@@ -35,7 +35,6 @@ TEAM_RANKINGS = [
 ]
 PLAYER_RANKINGS = [
     ("geral", "score_geral", "nota geral"),
-    ("acumulado", "score_acumulado", "impacto acumulado"),
     ("goleiros", "score_geral", "goleiros"),
     ("defensores", "score_geral", "defensores"),
     ("meias", "score_geral", "meias"),
@@ -231,11 +230,9 @@ def _render_player_ranking(player_scores: pd.DataFrame, ranking_slug: str, metri
     sort_cols = [c for c in [metric, "score_geral", "goals"] if c in player_scores.columns]
     ranked = player_scores.sort_values(sort_cols, ascending=[False] * len(sort_cols)).reset_index(drop=True)
     ranked["rank_metrica"] = ranked.index + 1
-    score_columns = ["score_geral", "score_acumulado"]
     want_columns = [
         "rank_metrica", "player_slug", "player_name", "team", "perfil",
         metric,
-        *[c for c in score_columns if c != metric and c in ranked.columns],
         "nivel_evidencia", "jogos", "goals", "assists", "shots_on_target", "saves",
     ]
     available = [c for c in want_columns if c in ranked.columns]
@@ -377,7 +374,6 @@ def _render_player_report(player: pd.Series, matches: pd.DataFrame, total_player
             ["defesas", player.get("saves", 0)],
             ["tackles", player.get("tackles", 0)],
             ["intercepcoes", player.get("interceptions", 0)],
-            ["score_acumulado", player.get("score_acumulado", 0)],
         ],
         ["metrica", "valor"],
     )
@@ -404,7 +400,7 @@ Nivel de evidencia: **{player.get('nivel_evidencia', '')}**
 
 {_player_score_explanation()}
 
-## Resumo acumulado
+## Resumo
 
 {summary}
 
@@ -559,7 +555,6 @@ def _player_ranking_labels(metric: str, title: str) -> dict[str, str]:
         "player_name": "jogador",
         "team": "selecao",
         "score_geral": "nota_geral",
-        "score_acumulado": "acumulado",
         "nivel_evidencia": "evidencia",
         "goals": "gols",
         "assists": "assist",

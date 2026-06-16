@@ -359,7 +359,6 @@ def build_player_scores(player_match_features: pd.DataFrame) -> pd.DataFrame:
     # score_geral calculado dentro do pool de cada perfil via z-score
     # Goleiro não compete com atacante — cada um é ranqueado entre os seus
     scores["score_geral"] = _score_by_profile(scores)
-    scores["score_acumulado"] = _score_acumulado(scores)
 
     scores["confianca_amostra"] = _sample_confidence(scores["jogos"])
     scores["nivel_evidencia"] = scores["confianca_amostra"].apply(_evidence_level)
@@ -505,31 +504,37 @@ def _player_profile(row: pd.Series) -> str:
 
 
 def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
-    """Calcula score_geral dentro do pool de cada perfil via z-score.
+    """Calcula score_geral dentro do pool de cada perfil via média ponderada de z-scores.
 
-    Usa apenas métricas que existem nos dados ESPN Copa 2026.
-    tackles, interceptions e passes são zero em 100% dos registros — não usados.
+    Métricas e pesos por perfil (só o que existe nos dados ESPN Copa 2026):
 
-    Goleiro:  saves/jogo (único indicador disponível)
-    Defensor: fouls_drawn/jogo (+, pressão e duelos ganhos),
-              shots_on_target/jogo (+, contribuição ofensiva quando chega),
-              fouls_committed/jogo (–, disciplina)
-    Meia:     goals+assists/jogo (+, criação),
-              shots_on_target/jogo (+, chutes perigosos),
-              fouls_drawn/jogo (+, agitação e envolvimento),
-              fouls_committed/jogo (–, disciplina)
-    Atacante: goals/jogo (+, peso dobrado — é o trabalho principal),
-              assists/jogo (+),
-              shots_on_target/jogo (+, pressão constante),
-              fouls_drawn/jogo (+, garante faltas e penaltis)
+    Goleiro:  saves/jogo        peso 0.4
+              save%             peso 0.4  (saves / saves+gols_sofridos)
+              gols_sofridos/jogo peso 0.2 (lower_is_better)
+
+    Defensor: fouls_drawn/jogo  peso 0.5  (duelos ganhos, pressão)
+              shots_on_target/j peso 0.3  (chegada ao ataque)
+              fouls_committed/j peso 0.2  (lower — disciplina)
+
+    Meia:     goals+assists/jogo peso 0.5 (criação e finalização)
+              shots_on_target/j  peso 0.3 (chutes perigosos)
+              fouls_drawn/jogo   peso 0.2 (envolvimento — peso baixo)
+
+    Atacante: goals/jogo         peso 0.5 (função principal)
+              assists/jogo        peso 0.3 (criação)
+              shots_on_target/j   peso 0.2 (pressão constante)
+              — fouls_drawn excluído: ruidoso, não discrimina qualidade ofensiva
     """
     result = pd.Series(50.0, index=scores.index)
 
-    # Colunas derivadas necessárias (calculadas se ainda não existirem)
     def _per_game(col: str, pool: pd.DataFrame) -> pd.Series:
         if col not in pool.columns:
             return pd.Series(0.0, index=pool.index)
         return _safe_divide(pool[col].fillna(0), pool["jogos"])
+
+    def _wavg(components_weights: list[tuple[pd.Series, float]]) -> pd.Series:
+        total_w = sum(w for _, w in components_weights)
+        return sum(s * w for s, w in components_weights) / total_w
 
     for profile in ["goleiro", "defensor", "meio", "atacante"]:
         mask = scores["perfil"] == profile
@@ -538,24 +543,22 @@ def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
         pool = scores[mask].copy()
 
         if profile == "goleiro":
-            saves_pg = _per_game("saves", pool)
-            # Taxa de defesas: saves / (saves + gols_sofridos) — save%
             saves_col = pool["saves"].fillna(0) if "saves" in pool.columns else pd.Series(0.0, index=pool.index)
             conceded_col = pool["goals_conceded"].fillna(0) if "goals_conceded" in pool.columns else pd.Series(0.0, index=pool.index)
             save_rate = _safe_divide(saves_col, saves_col + conceded_col)
-            conceded_pg = _per_game("goals_conceded", pool)
-            components = [
-                _zscore_to_100(saves_pg),                            # volume de defesas
-                _zscore_to_100(save_rate),                           # save% (qualidade)
-                _zscore_to_100(conceded_pg, lower_is_better=True),   # gols sofridos penaliza
-            ]
+            raw = _wavg([
+                (_zscore_to_100(_per_game("saves", pool)),                          0.4),
+                (_zscore_to_100(save_rate),                                         0.4),
+                (_zscore_to_100(_per_game("goals_conceded", pool), lower_is_better=True), 0.2),
+            ])
 
         elif profile == "defensor":
-            components = [
-                _zscore_to_100(_per_game("fouls_drawn", pool)),
-                _zscore_to_100(_per_game("shots_on_target", pool)),
-                _zscore_to_100(_per_game("fouls_committed", pool), lower_is_better=True),
-            ]
+            raw = _wavg([
+                (_zscore_to_100(_per_game("fouls_drawn", pool)),                                    0.4),
+                (_zscore_to_100(_per_game("shots_on_target", pool)),                                0.2),
+                (_zscore_to_100(_per_game("goals_conceded", pool), lower_is_better=True),           0.3),
+                (_zscore_to_100(_per_game("fouls_committed", pool), lower_is_better=True),          0.1),
+            ])
 
         elif profile == "meio":
             participacoes = (
@@ -563,27 +566,21 @@ def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
                 if "goals" in pool.columns and "assists" in pool.columns
                 else pd.Series(0.0, index=pool.index)
             )
-            components = [
-                _zscore_to_100(_safe_divide(participacoes, pool["jogos"])),
-                _zscore_to_100(_per_game("shots_on_target", pool)),
-                _zscore_to_100(_per_game("fouls_drawn", pool)),
-                _zscore_to_100(_per_game("fouls_committed", pool), lower_is_better=True),
-            ]
+            raw = _wavg([
+                (_zscore_to_100(_safe_divide(participacoes, pool["jogos"])), 0.5),
+                (_zscore_to_100(_per_game("shots_on_target", pool)),         0.3),
+                (_zscore_to_100(_per_game("fouls_drawn", pool)),             0.2),
+            ])
 
-        else:  # atacante
-            goals_pg = _per_game("goals", pool)
-            assists_pg = _per_game("assists", pool)
-            components = [
-                _zscore_to_100(goals_pg) * 2,          # peso duplo: função principal
-                _zscore_to_100(assists_pg),
-                _zscore_to_100(_per_game("shots_on_target", pool)),
-                _zscore_to_100(_per_game("fouls_drawn", pool)),
-            ]
+        else:  # atacante — fouls_drawn excluído
+            raw = _wavg([
+                (_zscore_to_100(_per_game("goals", pool)),           0.5),
+                (_zscore_to_100(_per_game("assists", pool)),          0.3),
+                (_zscore_to_100(_per_game("shots_on_target", pool)), 0.2),
+            ])
 
-        # Média simples entre componentes (pesos já embutidos acima no atacante)
-        raw = pd.concat(components, axis=1).mean(axis=1).fillna(50.0)
         conf = _sample_confidence(pool["jogos"])
-        adjusted = _apply_confidence(raw, conf)
+        adjusted = _apply_confidence(raw.fillna(50.0), conf)
         result.loc[mask] = adjusted.values
 
     return result

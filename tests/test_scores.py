@@ -293,12 +293,12 @@ def test_team_scores_disciplined_team_has_better_score():
 
 def _make_player_features() -> pd.DataFrame:
     players = pd.DataFrame([
-        _player("j1", "Brasil", "Alisson", position="GK", saves=5),
-        _player("j1", "Brasil", "Militão", position="CB", fouls_drawn=4, shots_on_target=1),
+        _player("j1", "Brasil", "Alisson", position="GK", saves=5, goals_conceded=0),
+        _player("j1", "Brasil", "Militão", position="CB", fouls_drawn=4, shots_on_target=1, goals_conceded=0),
         _player("j1", "Brasil", "Vinicius", position="LW", goals=2, assists=1, shots_on_target=4),
         _player("j1", "Brasil", "Rodrygo", position="RW", goals=1, shots_on_target=2),
-        _player("j1", "Alemanha", "Neuer", position="GK", saves=2),
-        _player("j1", "Alemanha", "Rüdiger", position="CB", fouls_drawn=1, shots_on_target=0),
+        _player("j1", "Alemanha", "Neuer", position="GK", saves=2, goals_conceded=3),
+        _player("j1", "Alemanha", "Rüdiger", position="CB", fouls_drawn=1, shots_on_target=0, goals_conceded=3),
     ])
     return build_player_match_features(players)
 
@@ -327,10 +327,10 @@ def test_player_scores_better_gk_has_higher_score():
 
 
 def test_player_scores_better_cb_has_higher_score():
-    """CB com mais fouls_drawn (duelos, pressão) deve pontuar mais no pool de defensores."""
+    """CB que sofre menos gols e ganha mais duelos deve pontuar mais."""
     players = pd.DataFrame([
-        _player("j1", "Brasil", "Militão", position="CB", fouls_drawn=4, shots_on_target=1),
-        _player("j1", "Alemanha", "Rüdiger", position="CB", fouls_drawn=1, shots_on_target=0),
+        _player("j1", "Brasil", "Militão", position="CB", fouls_drawn=4, shots_on_target=1, goals_conceded=0),
+        _player("j1", "Alemanha", "Rüdiger", position="CB", fouls_drawn=1, shots_on_target=0, goals_conceded=3),
     ])
     features = build_player_match_features(players)
     scores = build_player_scores(features)
@@ -339,10 +339,11 @@ def test_player_scores_better_cb_has_higher_score():
     assert militao["score_geral"] > rudiger["score_geral"]
 
 
-def test_player_scores_score_acumulado_present():
+def test_player_scores_has_score_geral():
     features = _make_player_features()
     scores = build_player_scores(features)
-    assert "score_acumulado" in scores.columns
+    assert "score_geral" in scores.columns
+    assert (scores["score_geral"] >= 0).all() and (scores["score_geral"] <= 100).all()
 
 
 def test_player_scores_slug_generated():
@@ -430,8 +431,8 @@ def test_gk_more_saves_beats_fewer_saves_same_conceded():
 def test_gk_saves_do_not_promote_defender_to_gk_pool():
     """CB com saves não deve ser classificado como goleiro — posição ESPN tem prioridade."""
     players = pd.DataFrame([
-        _player("j1", "Brasil", "CB1", position="CB", saves=5, fouls_drawn=3),
-        _player("j1", "Brasil", "CB2", position="CB", saves=0, fouls_drawn=1),
+        _player("j1", "Brasil", "CB1", position="CB", saves=5, fouls_drawn=3, goals_conceded=0),
+        _player("j1", "Brasil", "CB2", position="CB", saves=0, fouls_drawn=1, goals_conceded=3),
     ])
     features = build_player_match_features(players)
     scores = build_player_scores(features)
@@ -440,5 +441,5 @@ def test_gk_saves_do_not_promote_defender_to_gk_pool():
     # Posição ESPN (CB) tem prioridade — ambos ficam no pool de defensores
     assert cb1["perfil"] == "defensor"
     assert cb2["perfil"] == "defensor"
-    # CB1 tem mais fouls_drawn, deve liderar entre defensores (saves ignorados)
+    # CB1 tem mais fouls_drawn e menos gols sofridos — deve liderar
     assert cb1["score_geral"] > cb2["score_geral"]
