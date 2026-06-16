@@ -2,19 +2,43 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from fifa_analytics.utils.text import slugify
 
-
+# ---------------------------------------------------------------------------
+# Pesos do score de seleções
+# Defesa vale mais que ataque: um gol sofrido é mais difícil de recuperar
+# do que um gol marcado. Eficiência mede qualidade do ataque, não volume.
+# Controle é estilo de jogo — mantido com peso baixo, não é determinante.
+# ---------------------------------------------------------------------------
 TEAM_SCORE_WEIGHTS = {
-    "score_ataque": 0.30,
+    "score_resultado": 0.40,
+    "score_ataque": 0.20,
     "score_defesa": 0.25,
-    "score_controle": 0.20,
-    "score_eficiencia": 0.15,
-    "score_disciplina": 0.10,
+    "score_eficiencia": 0.10,
+    "score_controle": 0.05,
 }
 
+# Posições ESPN → perfil interno
+_POSITION_TO_PROFILE: dict[str, str] = {
+    "GK": "goleiro",
+    "G": "goleiro",
+    "CB": "defensor", "RB": "defensor", "LB": "defensor",
+    "RWB": "defensor", "LWB": "defensor",
+    "CDM": "meio", "CM": "meio", "CAM": "meio",
+    "RM": "meio", "LM": "meio",
+    "RW": "atacante", "LW": "atacante",
+    "CF": "atacante", "ST": "atacante", "SS": "atacante",
+    "F": "atacante",
+    "MF": "meio", "D": "defensor",
+}
+
+
+# ---------------------------------------------------------------------------
+# Features por partida — seleções
+# ---------------------------------------------------------------------------
 
 def build_team_match_features(matches: pd.DataFrame, team_stats: pd.DataFrame | None = None) -> pd.DataFrame:
     finished = matches[matches["status"] == "finalizado"].copy()
@@ -26,12 +50,10 @@ def build_team_match_features(matches: pd.DataFrame, team_stats: pd.DataFrame | 
         away_score = _number(match.get("away_score"))
         if not home_team or not away_team or pd.isna(home_score) or pd.isna(away_score):
             continue
-        rows.extend(
-            [
-                _team_match_row(match, home_team, away_team, home_score, away_score, "home"),
-                _team_match_row(match, away_team, home_team, away_score, home_score, "away"),
-            ]
-        )
+        rows.extend([
+            _team_match_row(match, home_team, away_team, home_score, away_score, "home"),
+            _team_match_row(match, away_team, home_team, away_score, home_score, "away"),
+        ])
 
     features = pd.DataFrame(rows)
     if features.empty:
@@ -39,29 +61,18 @@ def build_team_match_features(matches: pd.DataFrame, team_stats: pd.DataFrame | 
 
     stats = team_stats.copy() if team_stats is not None and not team_stats.empty else pd.DataFrame()
     if not stats.empty:
-        stats = stats.drop(columns=[column for column in ["source_match_id", "source", "collected_at", "dataset_source"] if column in stats.columns])
+        drop = [c for c in ["source_match_id", "source", "collected_at", "dataset_source"] if c in stats.columns]
+        stats = stats.drop(columns=drop)
         features = features.merge(stats, on=["match_id", "team"], how="left", suffixes=("", "_fonte"))
 
-    team_metric_columns = [column for column in ["shots", "shots_on_target", "passes", "possession", "fouls"] if column in features.columns]
-    features["team_stats_available"] = features[team_metric_columns].notna().any(axis=1) if team_metric_columns else False
+    process_cols = ["shots", "shots_on_target", "passes", "possession", "fouls"]
+    available_process = [c for c in process_cols if c in features.columns]
+    features["team_stats_available"] = features[available_process].notna().any(axis=1) if available_process else False
 
     for column in [
-        "goals_for",
-        "goals_against",
-        "shots",
-        "shots_on_target",
-        "blocked_shots",
-        "passes",
-        "accurate_passes",
-        "pass_accuracy",
-        "possession",
-        "corners",
-        "fouls",
-        "saves",
-        "yellow_cards",
-        "red_cards",
-        "tackles",
-        "interceptions",
+        "goals_for", "goals_against", "shots", "shots_on_target", "blocked_shots",
+        "passes", "accurate_passes", "pass_accuracy", "possession", "corners",
+        "fouls", "saves", "yellow_cards", "red_cards", "tackles", "interceptions",
     ]:
         if column not in features.columns:
             features[column] = 0
@@ -71,18 +82,21 @@ def build_team_match_features(matches: pd.DataFrame, team_stats: pd.DataFrame | 
     features["goal_conversion"] = _safe_divide(features["goals_for"], features["shots"])
     features["points"] = features["result"].map({"vitoria": 3, "empate": 1, "derrota": 0}).fillna(0).astype(int)
     features["clean_sheet"] = (features["goals_against"].fillna(0) == 0).astype(int)
-    opponent_stats = features[["match_id", "team", "shots", "shots_on_target"]].rename(
-        columns={
-            "team": "opponent",
-            "shots": "shots_against",
-            "shots_on_target": "shots_on_target_against",
-        }
-    )
+
+    opponent_stats = features[["match_id", "team", "shots", "shots_on_target"]].rename(columns={
+        "team": "opponent",
+        "shots": "shots_against",
+        "shots_on_target": "shots_on_target_against",
+    })
     features = features.merge(opponent_stats, on=["match_id", "opponent"], how="left")
     features["opponent_stats_available"] = features[["shots_against", "shots_on_target_against"]].notna().any(axis=1)
     features["team_slug"] = features["team"].apply(slugify)
     return features.sort_values(["date", "match_id", "home_away"]).reset_index(drop=True)
 
+
+# ---------------------------------------------------------------------------
+# Score de seleções
+# ---------------------------------------------------------------------------
 
 def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
     if team_match_features.empty:
@@ -111,37 +125,36 @@ def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
         "team_stats_available": "sum",
         "opponent_stats_available": "sum",
     }
-    available = {column: aggregation for column, aggregation in aggregations.items() if column in team_match_features.columns}
+    available = {c: agg for c, agg in aggregations.items() if c in team_match_features.columns}
     scores = team_match_features.groupby("team", dropna=False).agg(available).reset_index()
-    scores = scores.rename(
-        columns={
-            "match_id": "jogos",
-            "goals_for": "gols_pro",
-            "goals_against": "gols_contra",
-            "shots": "chutes",
-            "shots_on_target": "chutes_no_alvo",
-            "blocked_shots": "chutes_bloqueados",
-            "passes": "passes",
-            "accurate_passes": "passes_certos",
-            "possession": "posse_media",
-            "pass_accuracy": "precisao_passes_media",
-            "corners": "escanteios",
-            "fouls": "faltas",
-            "saves": "defesas",
-            "yellow_cards": "amarelos",
-            "red_cards": "vermelhos",
-            "clean_sheet": "jogos_sem_sofrer_gol",
-            "shots_against": "chutes_sofridos",
-            "shots_on_target_against": "chutes_no_alvo_sofridos",
-            "team_stats_available": "jogos_com_estatisticas",
-            "opponent_stats_available": "jogos_com_estatisticas_adversario",
-        }
-    )
+    scores = scores.rename(columns={
+        "match_id": "jogos",
+        "goals_for": "gols_pro",
+        "goals_against": "gols_contra",
+        "shots": "chutes",
+        "shots_on_target": "chutes_no_alvo",
+        "blocked_shots": "chutes_bloqueados",
+        "passes": "passes",
+        "accurate_passes": "passes_certos",
+        "possession": "posse_media",
+        "pass_accuracy": "precisao_passes_media",
+        "corners": "escanteios",
+        "fouls": "faltas",
+        "saves": "defesas",
+        "yellow_cards": "amarelos",
+        "red_cards": "vermelhos",
+        "clean_sheet": "jogos_sem_sofrer_gol",
+        "shots_against": "chutes_sofridos",
+        "shots_on_target_against": "chutes_no_alvo_sofridos",
+        "team_stats_available": "jogos_com_estatisticas",
+        "opponent_stats_available": "jogos_com_estatisticas_adversario",
+    })
+
+    # Métricas por jogo
     scores["saldo_gols"] = scores["gols_pro"] - scores["gols_contra"]
     scores["aproveitamento"] = _safe_divide(scores["points"], scores["jogos"] * 3)
     scores["gols_por_jogo"] = _safe_divide(scores["gols_pro"], scores["jogos"])
     scores["gols_contra_por_jogo"] = _safe_divide(scores["gols_contra"], scores["jogos"])
-    scores["chutes_por_jogo"] = _safe_divide(scores["chutes"], scores["jogos"])
     scores["chutes_no_alvo_por_jogo"] = _safe_divide(scores["chutes_no_alvo"], scores["jogos"])
     scores["gols_por_chute"] = _safe_divide(scores["gols_pro"], scores["chutes"])
     scores["chutes_no_alvo_por_chute"] = _safe_divide(scores["chutes_no_alvo"], scores["chutes"])
@@ -153,124 +166,95 @@ def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
     scores["chutes_sofridos_por_jogo"] = _safe_divide(scores["chutes_sofridos"], scores["jogos"])
     scores["chutes_no_alvo_sofridos_por_jogo"] = _safe_divide(scores["chutes_no_alvo_sofridos"], scores["jogos"])
 
-    scores["score_ataque_bruto"] = _mean_score(
-        [
-            _normalize(scores["gols_por_jogo"]),
-            _normalize(scores["chutes_por_jogo"]),
-            _normalize(scores["chutes_no_alvo_por_jogo"]),
-        ]
-    )
-    scores["score_defesa_bruto"] = _mean_score(
-        [
-            _normalize(scores["gols_contra_por_jogo"], lower_is_better=True),
-            _normalize(scores["chutes_sofridos_por_jogo"], lower_is_better=True),
-            _normalize(scores["chutes_no_alvo_sofridos_por_jogo"], lower_is_better=True),
-            _normalize(scores["clean_sheet_rate"]),
-        ]
-    )
-    scores["score_controle_bruto"] = _mean_score(
-        [
-            _normalize(scores["posse_media"]),
-            _normalize(scores["passes_por_jogo"]),
-            _normalize(scores["precisao_passes_media"]),
-        ]
-    )
-    scores["score_eficiencia_bruto"] = _mean_score(
-        [
-            _normalize(scores["gols_por_chute"]),
-            _normalize(scores["chutes_no_alvo_por_chute"]),
-        ]
-    )
-    scores["score_disciplina_bruto"] = _mean_score(
-        [
-            _normalize(scores["faltas_por_jogo"], lower_is_better=True),
-            _normalize(scores["amarelos_por_jogo"], lower_is_better=True),
-            _normalize(scores["vermelhos_por_jogo"], lower_is_better=True),
-        ]
-    )
-    scores["confianca_amostra"] = _sample_confidence(scores["jogos"])
-    scores["confianca_dados_time"] = _safe_divide(scores["jogos_com_estatisticas"], scores["jogos"]).clip(0, 1)
-    scores["confianca_dados_defesa"] = _safe_divide(scores["jogos_com_estatisticas_adversario"], scores["jogos"]).clip(0, 1)
-    scores["confianca_teste_defensivo"] = _defensive_workload_confidence(scores)
-    scores["confianca_ataque"] = (scores["confianca_amostra"] * scores["confianca_dados_time"]).clip(0, 1)
-    scores["confianca_defesa"] = (
-        scores["confianca_amostra"] * scores["confianca_dados_defesa"] * (0.75 + 0.25 * scores["confianca_teste_defensivo"])
-    ).clip(0, 1)
-    scores["confianca_controle"] = (scores["confianca_amostra"] * scores["confianca_dados_time"]).clip(0, 1)
-    scores["confianca_eficiencia"] = (scores["confianca_amostra"] * scores["confianca_dados_time"]).clip(0, 1)
-    scores["confianca_disciplina"] = (scores["confianca_amostra"] * scores["confianca_dados_time"]).clip(0, 1)
-    scores["score_ataque"] = _apply_confidence(scores["score_ataque_bruto"], scores["confianca_ataque"])
-    scores["score_defesa"] = _apply_confidence(scores["score_defesa_bruto"], scores["confianca_defesa"])
-    scores["score_controle"] = _apply_confidence(scores["score_controle_bruto"], scores["confianca_controle"])
-    scores["score_eficiencia"] = _apply_confidence(scores["score_eficiencia_bruto"], scores["confianca_eficiencia"])
-    scores["score_disciplina"] = _apply_confidence(scores["score_disciplina_bruto"], scores["confianca_disciplina"])
-    scores["confianca_score"] = _weighted_score(
-        scores,
-        {
-            "confianca_ataque": 0.30,
-            "confianca_defesa": 0.25,
-            "confianca_controle": 0.20,
-            "confianca_eficiencia": 0.15,
-            "confianca_disciplina": 0.10,
-        },
-    )
+    # --- Componentes via z-score (preserva distância absoluta entre times) ---
+    # score_resultado: resultado real — aproveitamento normalizado no torneio
+    scores["score_resultado"] = _zscore_to_100(scores["aproveitamento"])
+
+    # score_ataque: volume ofensivo de qualidade (chutes no alvo + gols, sem chutes totais)
+    scores["score_ataque"] = _mean_score([
+        _zscore_to_100(scores["gols_por_jogo"]),
+        _zscore_to_100(scores["chutes_no_alvo_por_jogo"]),
+    ])
+
+    # score_defesa: solidez defensiva
+    scores["score_defesa"] = _mean_score([
+        _zscore_to_100(scores["gols_contra_por_jogo"], lower_is_better=True),
+        _zscore_to_100(scores["chutes_no_alvo_sofridos_por_jogo"], lower_is_better=True),
+        _zscore_to_100(scores["clean_sheet_rate"]),
+    ])
+
+    # score_eficiencia: qualidade do ataque (conversão, não volume)
+    scores["score_eficiencia"] = _mean_score([
+        _zscore_to_100(scores["gols_por_chute"]),
+        _zscore_to_100(scores["chutes_no_alvo_por_chute"]),
+    ])
+
+    # score_controle: estilo de jogo — peso baixo, não determina qualidade
+    scores["score_controle"] = _mean_score([
+        _zscore_to_100(scores["posse_media"]),
+        _zscore_to_100(scores["passes_por_jogo"]),
+        _zscore_to_100(scores["precisao_passes_media"]),
+    ])
+
+    # score_geral composto
     scores["score_geral"] = _weighted_score(scores, TEAM_SCORE_WEIGHTS)
+
+    # Confiança baseada em amostra — sem piso artificial de 0.55
+    scores["confianca_amostra"] = _sample_confidence(scores["jogos"])
+    scores["confianca_dados"] = _safe_divide(
+        scores.get("jogos_com_estatisticas", pd.Series(0, index=scores.index)), scores["jogos"]
+    ).clip(0, 1)
+    scores["nivel_evidencia"] = scores["confianca_amostra"].apply(_evidence_level)
+
     scores["team_slug"] = scores["team"].apply(slugify)
     scores = _add_rank(scores, "score_geral", "ranking_score_geral")
-    score_columns = [column for column in scores.columns if column.startswith("score_")]
-    scores[score_columns] = scores[score_columns].round(1)
-    confidence_columns = [column for column in scores.columns if column.startswith("confianca_")]
-    scores[confidence_columns] = scores[confidence_columns].round(2)
-    scores["nivel_evidencia"] = scores["confianca_score"].apply(_evidence_level)
-    return scores.sort_values(["score_geral", "points", "saldo_gols"], ascending=[False, False, False]).reset_index(drop=True)
+    scores = _add_rank(scores, "score_ataque", "ranking_ataque")
+    scores = _add_rank(scores, "score_defesa", "ranking_defesa")
+    scores = _add_rank(scores, "score_eficiencia", "ranking_eficiencia")
 
+    score_cols = [c for c in scores.columns if c.startswith("score_")]
+    scores[score_cols] = scores[score_cols].round(1)
+    scores["confianca_amostra"] = scores["confianca_amostra"].round(2)
+    scores["confianca_dados"] = scores["confianca_dados"].round(2)
+
+    return scores.sort_values(["score_geral", "points", "saldo_gols"], ascending=False).reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Features por partida — jogadores
+# ---------------------------------------------------------------------------
 
 def build_player_match_features(player_stats: pd.DataFrame, lineups: pd.DataFrame | None = None) -> pd.DataFrame:
     if player_stats.empty:
         return pd.DataFrame()
+
     features = player_stats.copy()
     for column in [
-        "minutes_played",
-        "goals",
-        "assists",
-        "shots",
-        "shots_on_target",
-        "passes",
-        "tackles",
-        "interceptions",
-        "saves",
-        "yellow_cards",
-        "red_cards",
-        "fouls_committed",
-        "fouls_drawn",
+        "minutes_played", "goals", "assists", "shots", "shots_on_target",
+        "passes", "tackles", "interceptions", "saves",
+        "yellow_cards", "red_cards", "fouls_committed", "fouls_drawn",
     ]:
         if column not in features.columns:
             features[column] = 0
         features[column] = pd.to_numeric(features[column], errors="coerce").fillna(0)
 
     if lineups is not None and not lineups.empty and {"match_id", "team", "player_name"}.issubset(lineups.columns):
-        lineup_columns = [column for column in ["match_id", "team", "player_name", "position", "is_starter", "formation"] if column in lineups.columns]
-        lineup_info = lineups[lineup_columns].drop_duplicates(["match_id", "team", "player_name"])
+        lineup_cols = [c for c in ["match_id", "team", "player_name", "position", "is_starter", "formation"] if c in lineups.columns]
+        lineup_info = lineups[lineup_cols].drop_duplicates(["match_id", "team", "player_name"])
         features = features.merge(lineup_info, on=["match_id", "team", "player_name"], how="left")
 
     features["participacoes_gol"] = features["goals"] + features["assists"]
     features["shot_accuracy"] = _safe_divide(features["shots_on_target"], features["shots"])
-    features["impacto_partida"] = (
-        features["goals"] * 5
-        + features["assists"] * 3
-        + features["shots_on_target"] * 1.5
-        + features["shots"]
-        + features["saves"] * 1.2
-        + features["tackles"] * 0.4
-        + features["interceptions"] * 0.4
-        + features["fouls_drawn"] * 0.2
-        - features["yellow_cards"] * 0.5
-        - features["red_cards"] * 2
-    ).clip(lower=0)
     features["perfil"] = features.apply(_player_profile, axis=1)
-    features["player_slug"] = features.apply(lambda row: slugify(f"{row.get('player_name')}_{row.get('team')}"), axis=1)
+    features["player_slug"] = features.apply(
+        lambda row: slugify(f"{row.get('player_name')}_{row.get('team')}"), axis=1
+    )
     return features.sort_values(["team", "player_name", "match_id"]).reset_index(drop=True)
 
+
+# ---------------------------------------------------------------------------
+# Score de jogadores
+# ---------------------------------------------------------------------------
 
 def build_player_scores(player_match_features: pd.DataFrame) -> pd.DataFrame:
     if player_match_features.empty:
@@ -291,40 +275,39 @@ def build_player_scores(player_match_features: pd.DataFrame) -> pd.DataFrame:
         "yellow_cards": "sum",
         "red_cards": "sum",
         "participacoes_gol": "sum",
-        "impacto_partida": "sum",
         "perfil": _mode_or_first,
     }
-    available = {column: aggregation for column, aggregation in aggregations.items() if column in player_match_features.columns}
+    available = {c: agg for c, agg in aggregations.items() if c in player_match_features.columns}
     scores = player_match_features.groupby(group_columns, dropna=False).agg(available).reset_index()
-    scores = scores.rename(columns={"match_id": "jogos", "impacto_partida": "impacto_total"})
-    scores["impacto_por_jogo"] = _safe_divide(scores["impacto_total"], scores["jogos"])
+    scores = scores.rename(columns={"match_id": "jogos"})
+
     scores["gols_por_jogo"] = _safe_divide(scores["goals"], scores["jogos"])
     scores["assistencias_por_jogo"] = _safe_divide(scores["assists"], scores["jogos"])
     scores["chutes_no_alvo_por_chute"] = _safe_divide(scores["shots_on_target"], scores["shots"])
-    scores["score_acumulado_bruto"] = _normalize(scores["impacto_total"])
-    scores["score_medio_bruto"] = _normalize(scores["impacto_por_jogo"])
-    scores["score_ofensivo_bruto"] = _normalize(scores["goals"] * 5 + scores["assists"] * 3 + scores["shots_on_target"] * 1.5 + scores["shots"])
-    scores["score_goleiro_bruto"] = _normalize(scores["saves"])
-    scores["score_disciplina_bruto"] = _mean_score(
-        [
-            _normalize(_safe_divide(scores["yellow_cards"], scores["jogos"]), lower_is_better=True),
-            _normalize(_safe_divide(scores["red_cards"], scores["jogos"]), lower_is_better=True),
-        ]
-    )
-    scores["confianca_amostra"] = _sample_confidence(scores["jogos"])
-    scores["score_acumulado"] = _apply_confidence(scores["score_acumulado_bruto"], scores["confianca_amostra"])
-    scores["score_medio"] = _apply_confidence(scores["score_medio_bruto"], scores["confianca_amostra"])
-    scores["score_ofensivo"] = _apply_confidence(scores["score_ofensivo_bruto"], scores["confianca_amostra"])
-    scores["score_goleiro"] = _apply_confidence(scores["score_goleiro_bruto"], scores["confianca_amostra"])
-    scores["score_disciplina"] = _apply_confidence(scores["score_disciplina_bruto"], scores["confianca_amostra"])
-    scores["score_geral"] = scores["score_medio"].fillna(0) * 0.6 + scores["score_acumulado"].fillna(0) * 0.4
-    score_columns = [column for column in scores.columns if column.startswith("score_")]
-    scores[score_columns] = scores[score_columns].round(1)
-    scores["confianca_amostra"] = scores["confianca_amostra"].round(2)
-    scores["nivel_evidencia"] = scores["confianca_amostra"].apply(_evidence_level)
-    scores = _add_rank(scores, "score_geral", "ranking_score_geral")
-    return scores.sort_values(["score_geral", "impacto_total"], ascending=[False, False]).reset_index(drop=True)
+    scores["participacoes_por_jogo"] = _safe_divide(scores["participacoes_gol"], scores["jogos"])
+    scores["defesas_por_jogo"] = _safe_divide(scores["saves"], scores["jogos"])
+    scores["tackles_por_jogo"] = _safe_divide(scores["tackles"], scores["jogos"])
+    scores["intercepcoes_por_jogo"] = _safe_divide(scores["interceptions"], scores["jogos"])
 
+    # score_geral calculado dentro do pool de cada perfil via z-score
+    # Goleiro não compete com atacante — cada um é ranqueado entre os seus
+    scores["score_geral"] = _score_by_profile(scores)
+    scores["score_acumulado"] = _score_acumulado(scores)
+
+    scores["confianca_amostra"] = _sample_confidence(scores["jogos"])
+    scores["nivel_evidencia"] = scores["confianca_amostra"].apply(_evidence_level)
+
+    score_cols = [c for c in scores.columns if c.startswith("score_")]
+    scores[score_cols] = scores[score_cols].round(1)
+    scores["confianca_amostra"] = scores["confianca_amostra"].round(2)
+
+    scores = _add_rank(scores, "score_geral", "ranking_score_geral")
+    return scores.sort_values(["score_geral", "goals"], ascending=False).reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Helpers internos
+# ---------------------------------------------------------------------------
 
 def _team_match_row(match: pd.Series, team: str, opponent: str, goals_for: float, goals_against: float, home_away: str) -> dict[str, Any]:
     if goals_for > goals_against:
@@ -349,99 +332,162 @@ def _team_match_row(match: pd.Series, team: str, opponent: str, goals_for: float
 
 
 def _safe_divide(numerator: Any, denominator: Any) -> pd.Series:
-    numerator_series = pd.to_numeric(pd.Series(numerator), errors="coerce").astype(float)
+    num = pd.to_numeric(pd.Series(numerator), errors="coerce").astype(float)
     if isinstance(denominator, pd.Series):
-        denominator_series = pd.to_numeric(denominator, errors="coerce").astype(float)
-        denominator_series = denominator_series.reindex(numerator_series.index)
+        den = pd.to_numeric(denominator, errors="coerce").astype(float).reindex(num.index)
     else:
-        denominator_series = pd.Series(float(denominator), index=numerator_series.index)
-    denominator_series = denominator_series.replace(0, pd.NA)
-    return (numerator_series / denominator_series).fillna(0)
+        den = pd.Series(float(denominator), index=num.index)
+    return (num / den.replace(0, pd.NA)).fillna(0)
+
+
+def _zscore_to_100(values: pd.Series, lower_is_better: bool = False) -> pd.Series:
+    """Converte série em score 0–100 via z-score, preservando distância absoluta.
+
+    Diferente de min-max, um time isoladamente ruim não puxa o mínimo para 0
+    quando o grupo todo é bom — as distâncias relativas permanecem proporcionais.
+    Com um único valor (desvio padrão zero), retorna 50 (neutro).
+    """
+    numeric = pd.to_numeric(values, errors="coerce").fillna(0).astype(float)
+    std = float(numeric.std(ddof=0))
+    if std == 0:
+        return pd.Series(50.0, index=numeric.index)
+    z = (numeric - float(numeric.mean())) / std
+    if lower_is_better:
+        z = -z
+    # Clamp em ±3 desvios e mapeia para [0, 100]
+    return ((z.clip(-3, 3) + 3) / 6 * 100).clip(0, 100)
 
 
 def _normalize(values: pd.Series, lower_is_better: bool = False) -> pd.Series:
+    """Min-max 0–100. Mantido para compatibilidade interna."""
     numeric = pd.to_numeric(values, errors="coerce").fillna(0).astype(float)
-    minimum = numeric.min()
-    maximum = numeric.max()
-    if maximum == minimum:
-        if lower_is_better and maximum == 0:
+    mn, mx = float(numeric.min()), float(numeric.max())
+    if mx == mn:
+        if lower_is_better and mx == 0:
             return pd.Series(100.0, index=numeric.index)
-        return pd.Series(100.0 if maximum > 0 else 0.0, index=numeric.index)
-    normalized = (numeric - minimum) / (maximum - minimum) * 100
+        return pd.Series(100.0 if mx > 0 else 0.0, index=numeric.index)
+    normalized = (numeric - mn) / (mx - mn) * 100
     if lower_is_better:
         normalized = 100 - normalized
-    return normalized.clip(lower=0, upper=100)
+    return normalized.clip(0, 100)
 
 
-def _sample_confidence(games: pd.Series, full_confidence_games: int = 3) -> pd.Series:
+def _sample_confidence(games: pd.Series, full_confidence_games: int = 5) -> pd.Series:
+    """Confiança cresce de 0 a 1 com mais jogos. Sem piso artificial."""
     numeric = pd.to_numeric(games, errors="coerce").fillna(0).clip(lower=0)
-    return (0.55 + (numeric.clip(upper=full_confidence_games) / full_confidence_games) * 0.45).clip(0, 1)
+    return (numeric.clip(upper=full_confidence_games) / full_confidence_games).clip(0, 1)
 
 
-def _defensive_workload_confidence(scores: pd.DataFrame) -> pd.Series:
-    shots_reference = _positive_mean(scores["chutes_sofridos_por_jogo"])
-    target_reference = _positive_mean(scores["chutes_no_alvo_sofridos_por_jogo"])
-    shots_ratio = (scores["chutes_sofridos_por_jogo"] / shots_reference).clip(lower=0, upper=1) if shots_reference else 0
-    target_ratio = (
-        (scores["chutes_no_alvo_sofridos_por_jogo"] / target_reference).clip(lower=0, upper=1) if target_reference else 0
-    )
-    return _mean_score([pd.Series(shots_ratio, index=scores.index), pd.Series(target_ratio, index=scores.index)]).clip(0, 1)
-
-
-def _positive_mean(values: pd.Series) -> float:
-    positive = pd.to_numeric(values, errors="coerce")
-    positive = positive[positive > 0]
-    return float(positive.mean()) if not positive.empty else 0.0
-
-
-def _apply_confidence(raw_score: pd.Series, confidence: pd.Series, neutral: float | None = None) -> pd.Series:
-    raw = pd.to_numeric(raw_score, errors="coerce").fillna(0)
-    confidence = pd.to_numeric(confidence, errors="coerce").fillna(0).clip(0, 1)
-    neutral_value = float(raw.median()) if neutral is None else neutral
-    return raw * confidence + neutral_value * (1 - confidence)
+def _apply_confidence(raw_score: pd.Series, confidence: pd.Series, neutral: float = 50.0) -> pd.Series:
+    raw = pd.to_numeric(raw_score, errors="coerce").fillna(neutral)
+    conf = pd.to_numeric(confidence, errors="coerce").fillna(0).clip(0, 1)
+    return raw * conf + neutral * (1 - conf)
 
 
 def _evidence_level(value: Any) -> str:
     numeric = pd.to_numeric(pd.Series([value]), errors="coerce").fillna(0).iloc[0]
-    if numeric >= 0.90:
+    if numeric >= 0.80:
         return "alta"
-    if numeric >= 0.75:
+    if numeric >= 0.50:
         return "media"
     return "baixa"
 
 
-def _mean_score(scores: list[pd.Series]) -> pd.Series:
-    frame = pd.concat(scores, axis=1)
-    return frame.mean(axis=1).fillna(0)
+def _mean_score(series_list: list[pd.Series]) -> pd.Series:
+    return pd.concat(series_list, axis=1).mean(axis=1).fillna(0)
 
 
 def _weighted_score(frame: pd.DataFrame, weights: dict[str, float]) -> pd.Series:
-    weighted_parts = []
-    used_weights = []
-    for column, weight in weights.items():
-        if column in frame.columns:
-            weighted_parts.append(frame[column].fillna(0) * weight)
-            used_weights.append(weight)
-    if not weighted_parts:
+    parts, used = [], []
+    for col, w in weights.items():
+        if col in frame.columns:
+            parts.append(frame[col].fillna(0) * w)
+            used.append(w)
+    if not parts:
         return pd.Series(0.0, index=frame.index)
-    return sum(weighted_parts) / sum(used_weights)
+    return sum(parts) / sum(used)
 
 
-def _add_rank(frame: pd.DataFrame, score_column: str, rank_column: str) -> pd.DataFrame:
-    ranked = frame.copy()
-    ranked[rank_column] = ranked[score_column].rank(method="min", ascending=False).astype(int)
-    return ranked
+def _add_rank(frame: pd.DataFrame, score_col: str, rank_col: str) -> pd.DataFrame:
+    out = frame.copy()
+    out[rank_col] = out[score_col].rank(method="min", ascending=False).astype(int)
+    return out
 
 
 def _player_profile(row: pd.Series) -> str:
-    position = str(row.get("position") or "").upper()
-    if position in {"G", "GK"} or row.get("saves", 0) > 0:
+    """Classifica jogador por perfil usando posição ESPN quando disponível."""
+    position = str(row.get("position") or "").strip().upper()
+    if position in _POSITION_TO_PROFILE:
+        return _POSITION_TO_PROFILE[position]
+    # fallback por estatísticas quando posição não está disponível
+    if row.get("saves", 0) > 0:
         return "goleiro"
-    if row.get("goals", 0) > 0 or row.get("assists", 0) > 0 or row.get("shots", 0) > 0:
-        return "linha_ofensivo"
+    if row.get("goals", 0) > 0 or row.get("assists", 0) > 0 or row.get("shots_on_target", 0) > 0:
+        return "atacante"
     if row.get("tackles", 0) > 0 or row.get("interceptions", 0) > 0:
-        return "linha_defensivo"
-    return "linha"
+        return "defensor"
+    return "meio"
+
+
+def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
+    """Calcula score_geral dentro do pool de cada perfil via z-score.
+
+    Cada perfil usa métricas relevantes para aquela posição.
+    Goleiro não compete com atacante no mesmo pool.
+    """
+    result = pd.Series(50.0, index=scores.index)
+
+    profile_metrics: dict[str, list[tuple[str, bool]]] = {
+        "goleiro": [
+            ("defesas_por_jogo", False),
+        ],
+        "defensor": [
+            ("tackles_por_jogo", False),
+            ("intercepcoes_por_jogo", False),
+        ],
+        "meio": [
+            ("participacoes_por_jogo", False),
+            ("assists", False),
+            ("tackles_por_jogo", False),
+        ],
+        "atacante": [
+            ("gols_por_jogo", False),
+            ("participacoes_por_jogo", False),
+            ("chutes_no_alvo_por_chute", False),
+        ],
+    }
+
+    for profile, metrics in profile_metrics.items():
+        mask = scores["perfil"] == profile
+        if not mask.any():
+            continue
+        pool = scores[mask].copy()
+        component_scores = []
+        for col, lower in metrics:
+            if col in pool.columns:
+                component_scores.append(_zscore_to_100(pool[col], lower_is_better=lower))
+        if not component_scores:
+            continue
+        raw = _mean_score(component_scores)
+        conf = _sample_confidence(pool["jogos"])
+        adjusted = _apply_confidence(raw, conf)
+        result.loc[mask] = adjusted.values
+
+    return result
+
+
+def _score_acumulado(scores: pd.DataFrame) -> pd.Series:
+    """Score de impacto acumulado no torneio — coluna auxiliar, não entra no score_geral."""
+    parts = []
+    if "goals" in scores.columns:
+        parts.append(_zscore_to_100(scores["goals"]) * 0.5)
+    if "assists" in scores.columns:
+        parts.append(_zscore_to_100(scores["assists"]) * 0.3)
+    if "saves" in scores.columns:
+        parts.append(_zscore_to_100(scores["saves"]) * 0.2)
+    if not parts:
+        return pd.Series(0.0, index=scores.index)
+    return sum(parts).clip(0, 100)
 
 
 def _mode_or_first(values: pd.Series) -> Any:
