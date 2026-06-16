@@ -290,7 +290,7 @@ def build_player_match_features(player_stats: pd.DataFrame, lineups: pd.DataFram
     features = player_stats.copy()
     for column in [
         "minutes_played", "goals", "assists", "shots", "shots_on_target",
-        "passes", "tackles", "interceptions", "saves",
+        "passes", "tackles", "interceptions", "saves", "goals_conceded",
         "yellow_cards", "red_cards", "fouls_committed", "fouls_drawn",
     ]:
         if column not in features.columns:
@@ -331,6 +331,7 @@ def build_player_scores(player_match_features: pd.DataFrame) -> pd.DataFrame:
         "tackles": "sum",
         "interceptions": "sum",
         "saves": "sum",
+        "goals_conceded": "sum",
         "yellow_cards": "sum",
         "red_cards": "sum",
         "participacoes_gol": "sum",
@@ -347,6 +348,15 @@ def build_player_scores(player_match_features: pd.DataFrame) -> pd.DataFrame:
     scores["defesas_por_jogo"] = _safe_divide(scores["saves"], scores["jogos"])
     scores["tackles_por_jogo"] = _safe_divide(scores["tackles"], scores["jogos"])
     scores["intercepcoes_por_jogo"] = _safe_divide(scores["interceptions"], scores["jogos"])
+    # Métricas exclusivas de goleiro
+    if "goals_conceded" in scores.columns:
+        scores["gols_sofridos_por_jogo"] = _safe_divide(scores["goals_conceded"], scores["jogos"])
+        scores["defesas_por_gol_sofrido"] = _safe_divide(
+            scores["saves"], scores["saves"] + scores["goals_conceded"]
+        )
+    else:
+        scores["gols_sofridos_por_jogo"] = 0.0
+        scores["defesas_por_gol_sofrido"] = 0.0
 
     # score_geral calculado dentro do pool de cada perfil via z-score
     # Goleiro não compete com atacante — cada um é ranqueado entre os seus
@@ -474,16 +484,29 @@ def _add_rank(frame: pd.DataFrame, score_col: str, rank_col: str) -> pd.DataFram
 
 
 def _player_profile(row: pd.Series) -> str:
-    """Classifica jogador por perfil usando posição ESPN quando disponível."""
+    """Classifica jogador por perfil usando posição ESPN quando disponível.
+
+    Fallback por estatísticas: só classifica como goleiro se saves dominar
+    claramente (salvo mais do que gols+assists — típico de goleiro titular).
+    Defensores são identificados por tackles/interceptions sem produção ofensiva.
+    """
     position = str(row.get("position") or "").strip().upper()
     if position in _POSITION_TO_PROFILE:
         return _POSITION_TO_PROFILE[position]
-    # fallback por estatísticas quando posição não está disponível
-    if row.get("saves", 0) > 0:
+    saves = float(row.get("saves", 0) or 0)
+    goals = float(row.get("goals", 0) or 0)
+    assists = float(row.get("assists", 0) or 0)
+    tackles = float(row.get("tackles", 0) or 0)
+    interceptions = float(row.get("interceptions", 0) or 0)
+    shots_on_target = float(row.get("shots_on_target", 0) or 0)
+    # Goleiro: saves dominam claramente sobre produção ofensiva
+    if saves > 0 and saves > (goals + assists):
         return "goleiro"
-    if row.get("goals", 0) > 0 or row.get("assists", 0) > 0 or row.get("shots_on_target", 0) > 0:
+    # Atacante: produção ofensiva presente
+    if goals > 0 or assists > 0 or shots_on_target > 0:
         return "atacante"
-    if row.get("tackles", 0) > 0 or row.get("interceptions", 0) > 0:
+    # Defensor: ações defensivas sem produção ofensiva
+    if tackles > 0 or interceptions > 0:
         return "defensor"
     return "meio"
 
@@ -491,14 +514,21 @@ def _player_profile(row: pd.Series) -> str:
 def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
     """Calcula score_geral dentro do pool de cada perfil via z-score.
 
-    Cada perfil usa métricas relevantes para aquela posição.
-    Goleiro não compete com atacante no mesmo pool.
+    Cada perfil usa métricas exclusivas daquela posição. Goleiro penaliza
+    gols sofridos; defensor não usa saves nem gols; atacante não usa tackles.
     """
     result = pd.Series(50.0, index=scores.index)
 
+    # (coluna, lower_is_better)
+    # Goleiro: defesas por jogo (+), taxa de defesa (+), gols sofridos (-)
+    # Defensor: tackles (+), interceptações (+) — sem métricas ofensivas
+    # Meia: participações em gol (+), assists (+), tackles (+) — equilibrado
+    # Atacante: gols por jogo (+), participações (+), precisão de chute (+)
     profile_metrics: dict[str, list[tuple[str, bool]]] = {
         "goleiro": [
             ("defesas_por_jogo", False),
+            ("defesas_por_gol_sofrido", False),
+            ("gols_sofridos_por_jogo", True),
         ],
         "defensor": [
             ("tackles_por_jogo", False),
@@ -506,7 +536,7 @@ def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
         ],
         "meio": [
             ("participacoes_por_jogo", False),
-            ("assists", False),
+            ("assistencias_por_jogo", False),
             ("tackles_por_jogo", False),
         ],
         "atacante": [

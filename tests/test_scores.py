@@ -68,6 +68,7 @@ def _player(match_id: str, team: str, name: str, position: str | None = None, **
         "tackles": 0,
         "interceptions": 0,
         "saves": 0,
+        "goals_conceded": 0,
         "yellow_cards": 0,
         "red_cards": 0,
         "fouls_committed": 0,
@@ -153,18 +154,24 @@ def test_player_profile_cm_is_meio():
 
 
 def test_player_profile_fallback_saves():
-    row = pd.Series({"position": None, "saves": 3, "goals": 0, "tackles": 0, "shots_on_target": 0, "interceptions": 0})
+    row = pd.Series({"position": None, "saves": 3, "goals": 0, "assists": 0, "tackles": 0, "shots_on_target": 0, "interceptions": 0})
     assert _player_profile(row) == "goleiro"
 
 
 def test_player_profile_fallback_shots_on_target():
-    row = pd.Series({"position": None, "saves": 0, "goals": 0, "shots_on_target": 2, "tackles": 0, "interceptions": 0})
+    row = pd.Series({"position": None, "saves": 0, "goals": 0, "assists": 0, "shots_on_target": 2, "tackles": 0, "interceptions": 0})
     assert _player_profile(row) == "atacante"
 
 
 def test_player_profile_fallback_tackles():
-    row = pd.Series({"position": None, "saves": 0, "goals": 0, "shots_on_target": 0, "tackles": 3, "interceptions": 0})
+    row = pd.Series({"position": None, "saves": 0, "goals": 0, "assists": 0, "shots_on_target": 0, "tackles": 3, "interceptions": 0})
     assert _player_profile(row) == "defensor"
+
+
+def test_player_profile_saves_do_not_override_goal_scorer():
+    """Jogador de linha que salvou 1 chute mas marcou 2 gols não é goleiro."""
+    row = pd.Series({"position": None, "saves": 1, "goals": 2, "assists": 0, "shots_on_target": 2, "tackles": 0, "interceptions": 0})
+    assert _player_profile(row) != "goleiro"
 
 
 # ---------------------------------------------------------------------------
@@ -382,3 +389,51 @@ def test_build_player_match_features_assigns_profile_from_position():
     assert features[features["player_name"] == "Danilo"]["perfil"].iloc[0] == "defensor"
     assert features[features["player_name"] == "Casemiro"]["perfil"].iloc[0] == "meio"
     assert features[features["player_name"] == "Vinicius"]["perfil"].iloc[0] == "atacante"
+
+
+# ---------------------------------------------------------------------------
+# Métricas exclusivas de goleiro
+# ---------------------------------------------------------------------------
+
+def test_gk_with_goals_conceded_is_penalized():
+    """Goleiro que toma mais gols deve ter score menor com defesas iguais."""
+    players = pd.DataFrame([
+        _player("j1", "Brasil", "GK1", position="GK", saves=5, goals_conceded=0),
+        _player("j1", "Brasil", "GK2", position="GK", saves=5, goals_conceded=4),
+    ])
+    features = build_player_match_features(players)
+    scores = build_player_scores(features)
+    gk1 = scores[scores["player_name"] == "GK1"].iloc[0]
+    gk2 = scores[scores["player_name"] == "GK2"].iloc[0]
+    assert gk1["score_geral"] > gk2["score_geral"]
+
+
+def test_gk_more_saves_beats_fewer_saves_same_conceded():
+    """Goleiro com mais defesas e mesmos gols sofridos deve pontuar mais."""
+    players = pd.DataFrame([
+        _player("j1", "Brasil", "GK1", position="GK", saves=8, goals_conceded=1),
+        _player("j1", "Brasil", "GK2", position="GK", saves=2, goals_conceded=1),
+    ])
+    features = build_player_match_features(players)
+    scores = build_player_scores(features)
+    gk1 = scores[scores["player_name"] == "GK1"].iloc[0]
+    gk2 = scores[scores["player_name"] == "GK2"].iloc[0]
+    assert gk1["score_geral"] > gk2["score_geral"]
+
+
+def test_gk_metrics_do_not_bleed_into_defenders():
+    """Defensor não deve usar defesas_por_jogo no seu score_geral."""
+    players = pd.DataFrame([
+        # CB com muitas defesas (erro de dados frequente) — não deve ser promovido
+        _player("j1", "Brasil", "CB1", position="CB", tackles=5, interceptions=3, saves=3),
+        _player("j1", "Brasil", "CB2", position="CB", tackles=2, interceptions=1, saves=0),
+    ])
+    features = build_player_match_features(players)
+    scores = build_player_scores(features)
+    cb1 = scores[scores["player_name"] == "CB1"].iloc[0]
+    cb2 = scores[scores["player_name"] == "CB2"].iloc[0]
+    # CB1 tem mais tackles/interceptions, deve liderar — independente dos saves
+    assert cb1["score_geral"] > cb2["score_geral"]
+    # Ambos devem ser defensores, não goleiros
+    assert cb1["perfil"] == "defensor"
+    assert cb2["perfil"] == "defensor"
