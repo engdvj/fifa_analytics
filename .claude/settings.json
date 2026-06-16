@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \".claude/index-hook.py\" ] && python .claude/index-hook.py || exit 0",
+            "statusMessage": "Atualizando índice do vault...",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "f=$(python -c \"import sys,json; d=json.load(sys.stdin); print(d['tool_input'].get('file_path',''))\" 2>/dev/null); echo \"$f\" | grep -qE '\\.claude/commands/.*\\.md$' || exit 0; [ -f \".claude/update-claude-md.py\" ] && python .claude/update-claude-md.py",
+            "statusMessage": "Atualizando tabela de skills no CLAUDE.md...",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \".claude/index-hook.py\" ] && python .claude/index-hook.py || exit 0",
+            "statusMessage": "Atualizando índice do vault...",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
