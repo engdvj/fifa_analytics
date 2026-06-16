@@ -1,0 +1,11 @@
+## Qualidade dos dados
+
+Status: `{{ data_quality_status | default("desconhecido") }}`.
+
+{% if checks %}
+{% for check in checks %}
+- {{ check.field }}: `{{ check.status }}`
+{% endfor %}
+{% else %}
+Nenhuma validacao detalhada registrada ainda.
+{% endif %}

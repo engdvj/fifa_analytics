@@ -1,0 +1,17 @@
+# {{ home_team }} x {{ away_team }}
+
+## Resumo da partida
+
+{% if scoreline %}
+Placar: **{{ scoreline }}**.
+{% else %}
+Placar ainda indisponivel.
+{% endif %}
+
+Status: `{{ status | default("desconhecido") }}`.
+
+{% if date or stadium %}
+{% if date %}Data: `{{ date }}`.
+{% endif %}
+{% if stadium %}Estadio: {{ stadium }}{% if city %}, {{ city }}{% endif %}{% if country %} - {{ country }}{% endif %}.{% endif %}
+{% endif %}

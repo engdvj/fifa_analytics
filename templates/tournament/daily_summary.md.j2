@@ -1,0 +1,10 @@
+# Resumo diario - {{ match_date }}
+
+{% if matches %}
+{% for match in matches %}
+- {{ match.home_team }} x {{ match.away_team }} - `{{ match.status }}`
+{% endfor %}
+{% else %}
+Nenhum jogo encontrado para esta data.
+{% endif %}
+
