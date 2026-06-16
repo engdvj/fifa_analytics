@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from fifa_analytics.paths import GOLD_DIR, RAW_DIR, SILVER_DIR
+import pandas as pd
+
 from fifa_analytics.sources.espn import (
     fetch_tournament,
     normalize_commentary_payload,
@@ -8,6 +10,7 @@ from fifa_analytics.sources.espn import (
     normalize_lineups_payload,
     normalize_match_info_payload,
     normalize_matches_payload,
+    normalize_player_stats_from_commentary,
     normalize_player_stats_payload,
     normalize_shots_payload,
     normalize_team_stats_payload,
@@ -36,10 +39,15 @@ def run_espn_pipeline() -> dict[str, Path | int]:
     team_stats = normalize_team_stats_payload(payload["scoreboards"], payload["summaries"])
     events = normalize_events_payload(payload["scoreboards"], payload["summaries"])
     lineups = normalize_lineups_payload(payload["summaries"])
-    player_stats = normalize_player_stats_payload(payload["summaries"])
+    player_stats_roster = normalize_player_stats_payload(payload["summaries"])
+    player_stats_commentary = normalize_player_stats_from_commentary(payload["summaries"])
     match_info = normalize_match_info_payload(payload["scoreboards"], payload["summaries"])
     commentary = normalize_commentary_payload(payload["summaries"])
     shots = normalize_shots_payload(payload["summaries"])
+
+    # Merge: stats dos rosters (goals, assists, saves, goals_conceded) +
+    # stats do commentary (shots, fouls, offsides por jogador)
+    player_stats = _merge_player_stats(player_stats_roster, player_stats_commentary, lineups)
     teams = teams_from_matches(matches.dropna(subset=["home_team", "away_team"]))
 
     matches_path = write_dataframe(SILVER_DIR / "matches" / "espn_matches.parquet", matches)
@@ -87,3 +95,86 @@ def run_espn_pipeline() -> dict[str, Path | int]:
         "commentary": len(commentary),
         "shots": len(shots),
     }
+
+
+def _merge_player_stats(
+    roster_stats: pd.DataFrame,
+    commentary_stats: pd.DataFrame,
+    lineups: pd.DataFrame,
+) -> pd.DataFrame:
+    """Enriquece os stats dos rosters com eventos individuais extraídos do commentary.
+
+    O commentary não tem time para a vítima de faltas (fouls_drawn_commentary),
+    então resolve o time pelo match via lineups antes do merge.
+    """
+    if roster_stats.empty:
+        return roster_stats
+
+    if commentary_stats.empty or "player_name" not in commentary_stats.columns:
+        return roster_stats
+
+    # Resolver time dos jogadores sem team no commentary (vítimas de falta)
+    if not lineups.empty and {"match_id", "player_name", "team"}.issubset(lineups.columns):
+        name_to_team = (
+            lineups[["match_id", "player_name", "team"]]
+            .drop_duplicates(["match_id", "player_name"])
+        )
+        comm = commentary_stats.copy()
+        # Para linhas sem team, preenche via lineup
+        missing_team = comm["team"].isna() | (comm["team"] == "")
+        if missing_team.any():
+            filled = comm[missing_team].drop(columns=["team"]).merge(
+                name_to_team, on=["match_id", "player_name"], how="left"
+            )
+            comm.loc[missing_team, "team"] = filled["team"].values
+    else:
+        comm = commentary_stats.copy()
+
+    # Agrupar commentary por (match_id, player_name, team) — pode haver duplicatas
+    # por jogadores sem team resolvido
+    num_cols = [c for c in comm.columns if c not in ("match_id", "player_name", "team", "team_display", "source", "collected_at", "source_match_id")]
+    for col in num_cols:
+        comm[col] = pd.to_numeric(comm[col], errors="coerce").fillna(0)
+    comm_agg = comm.groupby(["match_id", "player_name", "team"], dropna=False)[num_cols].sum().reset_index()
+
+    # Merge com roster_stats
+    merged = roster_stats.merge(comm_agg, on=["match_id", "player_name", "team"], how="left")
+
+    # Substituir colunas quando o commentary tem dados melhores (mais granulares)
+    # shots_on_target do commentary é por evento, mais confiável que o roster aggregado
+    if "shots_on_target_commentary" in merged.columns:
+        # Preenche onde o roster tem 0 mas o commentary tem dados
+        roster_sot = pd.to_numeric(merged.get("shots_on_target", 0), errors="coerce").fillna(0)
+        comm_sot = pd.to_numeric(merged["shots_on_target_commentary"], errors="coerce").fillna(0)
+        merged["shots_on_target"] = roster_sot.where(roster_sot > 0, comm_sot)
+        merged = merged.drop(columns=["shots_on_target_commentary"])
+
+    if "goals_commentary" in merged.columns:
+        roster_g = pd.to_numeric(merged.get("goals", 0), errors="coerce").fillna(0)
+        comm_g = pd.to_numeric(merged["goals_commentary"], errors="coerce").fillna(0)
+        merged["goals"] = roster_g.where(roster_g > 0, comm_g)
+        merged = merged.drop(columns=["goals_commentary"])
+
+    if "fouls_committed_commentary" in merged.columns:
+        roster_fc = pd.to_numeric(merged.get("fouls_committed", 0), errors="coerce").fillna(0)
+        comm_fc = pd.to_numeric(merged["fouls_committed_commentary"], errors="coerce").fillna(0)
+        merged["fouls_committed"] = roster_fc.where(roster_fc > 0, comm_fc)
+        merged = merged.drop(columns=["fouls_committed_commentary"])
+
+    if "fouls_drawn_commentary" in merged.columns:
+        roster_fd = pd.to_numeric(merged.get("fouls_drawn", 0), errors="coerce").fillna(0)
+        comm_fd = pd.to_numeric(merged["fouls_drawn_commentary"], errors="coerce").fillna(0)
+        merged["fouls_drawn"] = roster_fd.where(roster_fd > 0, comm_fd)
+        merged = merged.drop(columns=["fouls_drawn_commentary"])
+
+    # Novas colunas do commentary que não existiam no roster
+    for col in ["shots_off_target", "shots_blocked_att", "shots_woodwork", "offsides_commentary", "corners_won"]:
+        if col in merged.columns:
+            merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0)
+
+    if "offsides_commentary" in merged.columns:
+        merged = merged.rename(columns={"offsides_commentary": "offsides_player"})
+    if "own_goals_commentary" in merged.columns:
+        merged = merged.rename(columns={"own_goals_commentary": "own_goals_player"})
+
+    return merged

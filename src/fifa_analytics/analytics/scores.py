@@ -298,9 +298,10 @@ def build_player_match_features(player_stats: pd.DataFrame, lineups: pd.DataFram
     features = player_stats.copy()
     for column in [
         "appearances", "goals", "assists", "shots", "shots_on_target",
+        "shots_off_target", "shots_blocked_att", "shots_woodwork",
         "saves", "goals_conceded", "shots_faced",
         "yellow_cards", "red_cards", "fouls_committed", "fouls_drawn",
-        "offsides", "own_goals",
+        "offsides_player", "own_goals_player", "corners_won",
     ]:
         if column not in features.columns:
             features[column] = 0
@@ -335,10 +336,14 @@ def build_player_scores(player_match_features: pd.DataFrame) -> pd.DataFrame:
         "assists": "sum",
         "shots": "sum",
         "shots_on_target": "sum",
+        "shots_off_target": "sum",
+        "shots_blocked_att": "sum",
+        "shots_woodwork": "sum",
         "saves": "sum",
         "goals_conceded": "sum",
         "fouls_committed": "sum",
         "fouls_drawn": "sum",
+        "corners_won": "sum",
         "yellow_cards": "sum",
         "red_cards": "sum",
         "participacoes_gol": "sum",
@@ -566,17 +571,32 @@ def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
                 if "goals" in pool.columns and "assists" in pool.columns
                 else pd.Series(0.0, index=pool.index)
             )
+            # total de chutes tentados = on_target + off_target + bloqueados + trave
+            total_shots = sum(
+                pool[c].fillna(0) for c in ["shots_on_target", "shots_off_target", "shots_blocked_att", "shots_woodwork"]
+                if c in pool.columns
+            )
+            if isinstance(total_shots, int):
+                total_shots = pd.Series(0.0, index=pool.index)
             raw = _wavg([
-                (_zscore_to_100(_safe_divide(participacoes, pool["jogos"])), 0.5),
-                (_zscore_to_100(_per_game("shots_on_target", pool)),         0.3),
-                (_zscore_to_100(_per_game("fouls_drawn", pool)),             0.2),
+                (_zscore_to_100(_safe_divide(participacoes, pool["jogos"])),      0.5),
+                (_zscore_to_100(_per_game("shots_on_target", pool)),              0.2),
+                (_zscore_to_100(_safe_divide(total_shots, pool["jogos"])),        0.1),
+                (_zscore_to_100(_per_game("fouls_drawn", pool)),                  0.2),
             ])
 
-        else:  # atacante — fouls_drawn excluído
+        else:  # atacante — sem fouls_drawn; usa todos os chutes tentados
+            total_shots = sum(
+                pool[c].fillna(0) for c in ["shots_on_target", "shots_off_target", "shots_blocked_att", "shots_woodwork"]
+                if c in pool.columns
+            )
+            if isinstance(total_shots, int):
+                total_shots = pd.Series(0.0, index=pool.index)
             raw = _wavg([
-                (_zscore_to_100(_per_game("goals", pool)),           0.5),
-                (_zscore_to_100(_per_game("assists", pool)),          0.3),
-                (_zscore_to_100(_per_game("shots_on_target", pool)), 0.2),
+                (_zscore_to_100(_per_game("goals", pool)),                        0.5),
+                (_zscore_to_100(_per_game("assists", pool)),                      0.2),
+                (_zscore_to_100(_per_game("shots_on_target", pool)),              0.2),
+                (_zscore_to_100(_safe_divide(total_shots, pool["jogos"])),        0.1),
             ])
 
         conf = _sample_confidence(pool["jogos"])

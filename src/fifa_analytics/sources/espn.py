@@ -389,6 +389,89 @@ def normalize_shots_payload(summaries: dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def normalize_player_stats_from_commentary(summaries: dict[str, Any]) -> pd.DataFrame:
+    """Agrega eventos do commentary ESPN em estatísticas individuais por jogador por partida.
+
+    Extrai chutes (no alvo, fora, bloqueados, na trave), faltas cometidas/sofridas,
+    impedimentos e cantos ganhos — com nome do jogador identificado em cada evento.
+    Combina com os stats dos rosters (goals, assists, saves, goals_conceded) para
+    produzir um DataFrame enriquecido por (match_id, team, player_name).
+    """
+    # Mapeamento de play_type → (coluna, participante_index)
+    # participante 0 = jogador principal; 1 = jogador secundário (bloqueador, assistente)
+    EVENT_TO_STAT: dict[str, tuple[str, int]] = {
+        "shot-on-target":   ("shots_on_target_commentary", 0),
+        "shot-off-target":  ("shots_off_target", 0),
+        "shot-blocked":     ("shots_blocked_att", 0),   # atacante que chutou
+        "shot-hit-woodwork": ("shots_woodwork", 0),
+        "goal":             ("goals_commentary", 0),
+        "goal---header":    ("goals_commentary", 0),
+        "goal---volley":    ("goals_commentary", 0),
+        "penalty---scored": ("goals_commentary", 0),
+        "own-goal":         ("own_goals_commentary", 0),
+        "foul":             ("fouls_committed_commentary", 0),   # quem fez a falta
+        "handball":         ("fouls_committed_commentary", 0),
+        "offside":          ("offsides_commentary", 0),
+        "corner-awarded":   ("corners_won", 1),          # quem concedeu o canto (time adversário)
+    }
+    # fouls sofridos: participante 1 nos eventos de falta
+    FOUL_VICTIM_STAT = "fouls_drawn_commentary"
+
+    collected_at = utc_now_iso()
+    rows: list[dict[str, Any]] = []
+
+    for event_id, summary in summaries.items():
+        competition = (summary.get("header", {}).get("competitions") or [{}])[0]
+        match_id = _match_id_from_event(competition, {"id": event_id, "date": competition.get("date")})
+        team_by_display = _team_by_display_name(competition)
+
+        # Contadores por (player_name, team_display)
+        counters: dict[tuple[str, str], dict[str, float]] = {}
+
+        def _inc(player_display: str, team_display: str, stat: str, val: float = 1.0) -> None:
+            key = (player_display, team_display)
+            if key not in counters:
+                counters[key] = {}
+            counters[key][stat] = counters[key].get(stat, 0.0) + val
+
+        for item in summary.get("commentary") or []:
+            play = item.get("play") or {}
+            ptype = (play.get("type") or {}).get("type", "")
+            if ptype not in EVENT_TO_STAT:
+                continue
+            team_display = (play.get("team") or {}).get("displayName", "")
+            participants = play.get("participants", [])
+
+            stat_col, p_idx = EVENT_TO_STAT[ptype]
+            if p_idx < len(participants):
+                name = (participants[p_idx].get("athlete") or {}).get("displayName", "")
+                if name:
+                    _inc(name, team_display, stat_col)
+
+            # Jogador que sofreu a falta (participante 1 em eventos de foul)
+            if ptype == "foul" and len(participants) > 1:
+                victim = (participants[1].get("athlete") or {}).get("displayName", "")
+                if victim:
+                    # vítima pertence ao time oposto — descobrimos pelo team_by_display
+                    _inc(victim, "", FOUL_VICTIM_STAT)  # team resolvido depois pelo merge
+
+        # Montar linhas
+        for (player_name, team_display), stats in counters.items():
+            team = traduzir_selecao(team_display) if team_display else None
+            rows.append({
+                "match_id": match_id,
+                "source_match_id": str(event_id),
+                "player_name": player_name,
+                "team_display": team_display,
+                "team": team,
+                "source": "espn_commentary",
+                "collected_at": collected_at,
+                **stats,
+            })
+
+    return pd.DataFrame(rows)
+
+
 def _get_json(url: str, params: dict[str, str] | None = None) -> dict[str, Any]:
     response = requests.get(url, params=params, timeout=30, headers={"User-Agent": "fifa-analytics/0.1"})
     response.raise_for_status()
