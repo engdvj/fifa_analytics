@@ -1,20 +1,28 @@
 import re
 import time
+import warnings
 from datetime import datetime
 from typing import Any
 
 import pandas as pd
 import requests
-import urllib3
 
+from fifa_analytics.config import load_config
 from fifa_analytics.transforms.matches import make_match_id
 from fifa_analytics.transforms.team_names import traduzir_selecao
 from fifa_analytics.utils.time import utc_now_iso
 
 
-BASE_URL = "https://worldcup26.ir"
+_FALLBACK_BASE_URL = "https://worldcup26.ir"
 DEFAULT_TIMEOUT = 20
 DEFAULT_RETRIES = 4
+
+
+def _base_url() -> str:
+    try:
+        return load_config("sources.yaml")["sources"]["worldcup2026"]["base_url"] or _FALLBACK_BASE_URL
+    except Exception:
+        return _FALLBACK_BASE_URL
 
 
 class WorldCup2026SourceError(RuntimeError):
@@ -24,23 +32,24 @@ class WorldCup2026SourceError(RuntimeError):
 def fetch_endpoint(
     endpoint: str,
     *,
-    base_url: str = BASE_URL,
+    base_url: str | None = None,
     timeout: int = DEFAULT_TIMEOUT,
     retries: int = DEFAULT_RETRIES,
     verify_tls: bool = False,
 ) -> dict[str, Any]:
     """Busca um endpoint da API worldcup26.ir com retry simples."""
-    if not verify_tls:
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-    url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+    resolved_base = base_url or _base_url()
+    url = f"{resolved_base.rstrip('/')}/{endpoint.lstrip('/')}"
     session = requests.Session()
     session.headers.update({"User-Agent": "fifa-analytics/0.1"})
 
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
         try:
-            response = session.get(url, timeout=timeout, verify=verify_tls)
+            with warnings.catch_warnings():
+                if not verify_tls:
+                    warnings.simplefilter("ignore")
+                response = session.get(url, timeout=timeout, verify=verify_tls)
             response.raise_for_status()
             return response.json()
         except (requests.RequestException, ValueError) as exc:
@@ -114,7 +123,7 @@ def normalize_matches_payload(games: list[dict[str, Any]], stadiums: list[dict[s
                 "away_score": away_score,
                 "winner": _winner(home_team, away_team, home_score, away_score),
                 "main_source": "worldcup2026",
-                "official_reference": "https://worldcup26.ir",
+                "official_reference": _base_url(),
                 "last_updated_at": utc_now_iso(),
             }
         )

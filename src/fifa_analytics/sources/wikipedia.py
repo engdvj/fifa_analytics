@@ -7,11 +7,19 @@ from typing import Any
 import pandas as pd
 import requests
 
+from fifa_analytics.config import load_config
 from fifa_analytics.transforms.matches import make_match_id
 from fifa_analytics.transforms.team_names import traduzir_selecao
 
 
-WIKIPEDIA_URL = "https://en.wikipedia.org/wiki/2026_FIFA_World_Cup"
+_FALLBACK_WIKIPEDIA_URL = "https://en.wikipedia.org/wiki/2026_FIFA_World_Cup"
+
+
+def _wikipedia_url() -> str:
+    try:
+        return load_config("sources.yaml")["sources"]["wikipedia"]["base_url"] or _FALLBACK_WIKIPEDIA_URL
+    except Exception:
+        return _FALLBACK_WIKIPEDIA_URL
 GROUPS = list("ABCDEFGHIJKL")
 GROUP_START_INDEX = 11
 TABLES_PER_GROUP = 7
@@ -19,7 +27,8 @@ SCORE_PATTERN = re.compile(r"^(\d+)[–-](\d+)$")
 GOAL_PATTERN = re.compile(r"([A-Za-zÀ-ÿØ-öø-ÿĀ-ž' .-]+?)\s+(\d{1,3}(?:\+\d+)?)['’]")
 
 
-def fetch_html(url: str = WIKIPEDIA_URL) -> str:
+def fetch_html(url: str | None = None) -> str:
+    url = url or _wikipedia_url()
     response = requests.get(
         url,
         headers={"User-Agent": "Mozilla/5.0 fifa_analytics/0.1"},
@@ -94,7 +103,7 @@ def parse_group_matches(tables: list[pd.DataFrame]) -> list[dict[str, Any]]:
                     "away_score": away_score,
                     "winner": _winner(home_team, away_team, home_score, away_score),
                     "main_source": "wikipedia",
-                    "official_reference": WIKIPEDIA_URL,
+                    "official_reference": _wikipedia_url(),
                 }
             )
     return records

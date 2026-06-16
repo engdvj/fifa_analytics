@@ -7,12 +7,23 @@ from typing import Any
 import pandas as pd
 import requests
 
+from fifa_analytics.config import load_config
 from fifa_analytics.transforms.matches import make_match_id
 from fifa_analytics.transforms.team_names import traduzir_selecao
 from fifa_analytics.utils.time import utc_now_iso
 
 
-BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world"
+_FALLBACK_BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world"
+
+
+def _base_url() -> str:
+    try:
+        return load_config("sources.yaml")["sources"]["espn"]["base_url"] or _FALLBACK_BASE_URL
+    except Exception:
+        return _FALLBACK_BASE_URL
+
+
+BASE_URL = _FALLBACK_BASE_URL
 START_DATE = date(2026, 6, 11)
 END_DATE = date(2026, 7, 19)
 TEAM_STAT_COLUMNS = {
@@ -55,11 +66,11 @@ PLAYER_STAT_COLUMNS = {
 
 
 def fetch_scoreboard(match_date: date) -> dict[str, Any]:
-    return _get_json(f"{BASE_URL}/scoreboard", params={"dates": match_date.strftime("%Y%m%d")})
+    return _get_json(f"{_base_url()}/scoreboard", params={"dates": match_date.strftime("%Y%m%d")})
 
 
 def fetch_summary(event_id: str) -> dict[str, Any]:
-    return _get_json(f"{BASE_URL}/summary", params={"event": event_id})
+    return _get_json(f"{_base_url()}/summary", params={"event": event_id})
 
 
 def fetch_tournament(start_date: date = START_DATE, end_date: date = END_DATE, sleep_seconds: float = 0.05) -> dict[str, Any]:
