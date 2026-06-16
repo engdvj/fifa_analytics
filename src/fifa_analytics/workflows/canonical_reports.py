@@ -90,7 +90,7 @@ def run_canonical_index() -> dict[str, Path | int]:
     }
 
 
-def run_canonical_reports(status: str = "finalizado") -> dict[str, object]:
+def run_canonical_reports(status: str = "finalizado") -> dict[str, Path | str | int | list | None]:
     index_result = run_canonical_index()
     matches = read_dataframe(GOLD_DIR / "dim_match" / "canonical_matches.parquet")
     source_map = read_dataframe(GOLD_DIR / "dim_match" / "source_match_map.parquet")

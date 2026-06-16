@@ -9,7 +9,7 @@ def validate_required_columns(
     dataframe: pd.DataFrame,
     required_columns: list[str] | None = None,
     schema: str | None = None,
-) -> dict[str, object]:
+) -> dict[str, str | list[str]]:
     """Valida colunas obrigatórias de um DataFrame.
 
     Aceita lista explícita via required_columns ou nome de schema YAML via schema

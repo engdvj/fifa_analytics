@@ -6,7 +6,7 @@ from fifa_analytics.paths import GOLD_DIR, SILVER_DIR
 from fifa_analytics.workflows.canonical_reports import run_canonical_reports
 
 
-def run_basic_reports(source: str = "canonical", status: str = "finalizado") -> dict[str, object]:
+def run_basic_reports(source: str = "canonical", status: str = "finalizado") -> dict[str, Path | str | int | list | None]:
     if source == "canonical":
         return run_canonical_reports(status=status)
     raise ValueError(

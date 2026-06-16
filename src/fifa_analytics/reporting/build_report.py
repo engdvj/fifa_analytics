@@ -10,7 +10,7 @@ def build_match_report(
     match_id: str,
     data_quality_status: str = "desconhecido",
     extra_manifest: dict[str, object] | None = None,
-) -> dict[str, object]:
+) -> dict[str, str | Path | list[str]]:
     section_config = load_config("report_sections.yaml")["match_report_sections"]
     fragment_dir = FRAGMENTS_DIR / match_id
     ensure_dir(FINAL_REPORTS_DIR)

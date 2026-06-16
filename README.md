@@ -59,9 +59,9 @@ data/silver/matches/matches.parquet
 data/silver/teams/teams.parquet
 data/silver/standings/standings.parquet
 data/gold/standings/group_standings.parquet
-reports/fragments/mexico_africa_do_sul_2026_06_11/
-reports/final/mexico_africa_do_sul_2026_06_11.md
-manifests/mexico_africa_do_sul_2026_06_11.yaml
+reports/fragments/copa_2026_jogo_001/
+reports/final/copa_2026_jogo_001.md
+manifests/copa_2026_jogo_001.yaml
 ```
 
 Gere dados a partir da Wikipedia:
@@ -227,7 +227,7 @@ Jogo especifico:
 
 ```python
 run_scope = "jogo_unico"
-match_id = "mexico_africa_do_sul_2026_06_11"
+match_id = "copa_2026_jogo_001"
 ```
 
 Jogos de uma data:
@@ -283,6 +283,36 @@ run_scope = "torneio"
 7. Atualizar manifesto do jogo e status global do torneio.
 8. Gerar scores acumulados por selecao e jogador.
 
-## Limitacoes iniciais
+## Fontes de dados
 
-Esta primeira base cria a estrutura e funcoes de pipeline. Os adaptadores de fontes reais ainda precisam ser conectados aos endpoints escolhidos e validados contra os dados da Copa em andamento.
+| Fonte | Status | O que coleta |
+|---|---|---|
+| `worldcup2026` | Operacional | 104 jogos, selecoes, estadios, classificacao, gols basicos |
+| `espn` | Operacional | Calendario, stats por selecao, escalacoes, stats por jogador |
+| `wikipedia` | Operacional | Partidas e classificacao de grupos (nao oficial) |
+| `canonical` | Derivado | Indice reconciliado das fontes acima |
+
+A pipeline calcula classificacao internamente e valida contra as fontes. Resultados gravados em `data/silver/validation_results/`.
+
+## Troubleshooting
+
+**ESPN retornou erro ou ficou fora:**
+```bash
+python -m fifa_analytics atualizar --sem-espn
+```
+
+**Reprocessar um jogo especifico apos nova coleta:**
+```bash
+# Apague os fragmentos e o relatorio do jogo e rode novamente
+rm -rf reports/fragments/copa_2026_jogo_013
+rm -f reports/final/copa_2026_jogo_013.md
+python -m fifa_analytics relatorios-basicos
+```
+
+**Limpar cache e reprocessar tudo do zero:**
+```bash
+python -m fifa_analytics atualizar
+```
+
+**Fontes divergem no placar:**
+Confira `data/silver/validation_results/` — cada arquivo contem o resultado da comparacao entre fontes. O indice canonico usa prioridade `worldcup2026 > espn > wikipedia`; o campo `primary_source` no manifesto indica qual fonte foi usada.

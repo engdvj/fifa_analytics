@@ -1,7 +1,7 @@
 import pandas as pd
 
 
-def build_match_summary(match: pd.Series | dict) -> dict[str, object]:
+def build_match_summary(match: pd.Series | dict) -> dict[str, str]:
     home_team = match.get("home_team")
     away_team = match.get("away_team")
     home_score = match.get("home_score")

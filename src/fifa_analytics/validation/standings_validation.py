@@ -1,7 +1,7 @@
 import pandas as pd
 
 
-def compare_standings(calculated: pd.DataFrame, external: pd.DataFrame) -> dict[str, object]:
+def compare_standings(calculated: pd.DataFrame, external: pd.DataFrame) -> dict[str, str | list[dict[str, str | None]]]:
     if external.empty:
         return {"status": "ausente", "message": "Classificacao externa indisponivel."}
 
