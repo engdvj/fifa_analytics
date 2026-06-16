@@ -40,6 +40,9 @@ sources:
     requires_api_key: false
     role: validacao_oficial
     base_url: null
+    endpoints:
+      squad_lists_pdf: https://fdp.fifa.org/assetspublic/ce281/pdf/SquadLists-English.pdf
+    observacao: Fonte oficial para elencos, posicao, data de nascimento, clube, altura, caps e gols por selecao.
   balldontlie:
     enabled: false
     official: false
@@ -47,6 +50,30 @@ sources:
     api_key_env: BALLDONTLIE_API_KEY
     role: enriquecimento_analitico
     base_url: null
+  api_football:
+    enabled: false
+    official: false
+    requires_api_key: true
+    api_key_env: API_FOOTBALL_KEY
+    role: enriquecimento_individual_gratuito_limitado
+    base_url: https://v3.football.api-sports.io
+    competition:
+      league: 1
+      season: 2026
+    endpoints:
+      coverage: /leagues?id=1&season=2026
+      fixtures: /fixtures?league=1&season=2026
+      teams: /teams?league=1&season=2026
+      players: /players?league=1&season=2026&page={page}
+      fixture_player_stats: /fixtures/players?fixture={fixture_id}
+      injuries: /injuries?league=1&season=2026
+      top_scorers: /players/topscorers?league=1&season=2026
+      top_assists: /players/topassists?league=1&season=2026
+      top_yellow_cards: /players/topyellowcards?league=1&season=2026
+      top_red_cards: /players/topredcards?league=1&season=2026
+    limits:
+      free_requests_per_day: 100
+    observacao: Plano gratuito com chave e limite diario; usar cache forte, paginacao e coleta incremental.
   football_data:
     enabled: false
     official: false

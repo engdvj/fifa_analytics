@@ -290,6 +290,8 @@ run_scope = "torneio"
 | `worldcup2026` | Operacional | 104 jogos, selecoes, estadios, classificacao, gols basicos |
 | `espn` | Operacional | Calendario, stats por selecao, escalacoes, stats por jogador |
 | `wikipedia` | Operacional | Partidas e classificacao de grupos (nao oficial) |
+| `api_football` | Candidata | Jogadores, perfis, injuries, rankings e stats individuais por partida no plano gratuito limitado |
+| `fifa` | Validacao oficial | PDF oficial de elencos com posicao, DOB, clube, altura, caps e gols |
 | `canonical` | Derivado | Indice reconciliado das fontes acima |
 
 A pipeline calcula classificacao internamente e valida contra as fontes. Resultados gravados em `data/silver/validation_results/`.

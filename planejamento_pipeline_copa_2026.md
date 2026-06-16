@@ -502,6 +502,8 @@ Uso principal:
 - estadios;
 - placares finais;
 - status oficial.
+- elencos oficiais;
+- dados individuais basicos dos jogadores.
 
 Papel no projeto:
 
@@ -513,6 +515,35 @@ Ponto de atencao:
 
 - pode nao ter API publica simples;
 - pode exigir coleta semi-manual, scraping controlado ou validacao pontual.
+
+Fonte gratuita identificada:
+
+```text
+https://fdp.fifa.org/assetspublic/ce281/pdf/SquadLists-English.pdf
+```
+
+Campos uteis do PDF de elencos:
+
+```text
+team
+position
+player_name
+first_names
+last_names
+shirt_name
+date_of_birth
+club
+height_cm
+caps
+national_team_goals
+coach
+```
+
+Papel recomendado:
+
+```text
+dimensao oficial de jogadores e validacao de elenco
+```
 
 ### 6.2 FIFA Training Centre / Match Report Hub
 
@@ -670,7 +701,74 @@ Ponto de atencao:
 - dados podem mudar de estrutura;
 - deve ser validada contra fonte oficial quando possivel.
 
-### 6.7 football-data.org
+### 6.7 API-Football / API-SPORTS
+
+Uso principal:
+
+- fonte gratuita com chave e limite diario;
+- perfis de jogadores;
+- elencos;
+- idade, nacionalidade, altura, peso e foto;
+- estatisticas individuais por partida;
+- ratings por jogador;
+- injuries/suspensoes;
+- rankings de artilharia, assistencias e cartoes;
+- calendario, eventos, lineups e standings como validacao cruzada.
+
+Papel no projeto:
+
+```text
+enriquecimento individual gratuito limitado
+```
+
+Configuracao da Copa 2026:
+
+```text
+league=1
+season=2026
+```
+
+Endpoints candidatos:
+
+```text
+/leagues?id=1&season=2026
+/fixtures?league=1&season=2026
+/players?league=1&season=2026&page={page}
+/fixtures/players?fixture={fixture_id}
+/injuries?league=1&season=2026
+/players/topscorers?league=1&season=2026
+/players/topassists?league=1&season=2026
+/players/topyellowcards?league=1&season=2026
+/players/topredcards?league=1&season=2026
+```
+
+Variavel de ambiente:
+
+```text
+API_FOOTBALL_KEY
+```
+
+Saidas esperadas:
+
+```text
+data/raw/api_football/...
+data/silver/players/api_football_players.parquet
+data/silver/player_stats/api_football_player_stats.parquet
+data/silver/injuries/api_football_injuries.parquet
+data/gold/dim_player/api_football_players.parquet
+data/gold/fact_player_match_stats/api_football_player_stats.parquet
+```
+
+Ponto de atencao:
+
+- exige cadastro e chave;
+- plano gratuito tem limite baixo de requisicoes;
+- precisa de cache forte por endpoint, fixture e pagina;
+- `players` e paginado;
+- validar cobertura real antes de depender da fonte em relatorio final;
+- usar como enriquecimento, nao como fonte unica de verdade.
+
+### 6.8 football-data.org
 
 Uso principal:
 
@@ -686,7 +784,7 @@ Papel no projeto:
 backup e validacao cruzada
 ```
 
-### 6.8 Estrategia recomendada
+### 6.9 Estrategia recomendada
 
 Comecar com:
 
@@ -694,13 +792,15 @@ Comecar com:
 worldcup2026 API
 + ESPN publica
 + FIFA oficial para validacao
++ FIFA SquadLists PDF para dimensao oficial de jogadores
 + standings calculado internamente
 ```
 
 Depois enriquecer com:
 
 ```text
-BALLDONTLIE FIFA API
+API-Football / API-SPORTS
++ BALLDONTLIE FIFA API
 + relatorios oficiais FIFA pos-jogo
 ```
 
