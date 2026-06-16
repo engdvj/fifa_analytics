@@ -1906,15 +1906,15 @@ Levantado em 2026-06-16 após revisão completa do repositório. Organizado por 
 
 ### Testes (gaps de cobertura)
 
-- [ ] **Sem testes de CLI** — `cli.py` com 8 comandos não tem nenhum teste; cobrir ao menos argumentos inválidos e saída de ajuda
-- [ ] **Sem testes de I/O real** — `utils/io.py` (write/read parquet, JSON, YAML) não tem testes; adicionar com `tmp_path` do pytest
-- [ ] **Sem testes de integração** — nenhum teste executa um fluxo completo (ingest → canonical → report); adicionar ao menos um teste E2E com dados de sample
+- [x] **Sem testes de CLI** — `cli.py` com 8 comandos não tem nenhum teste; cobrir ao menos argumentos inválidos e saída de ajuda
+- [x] **Sem testes de I/O real** — `utils/io.py` (write/read parquet, JSON, YAML) não tem testes; adicionar com `tmp_path` do pytest
+- [x] **Sem testes de integração** — nenhum teste executa um fluxo completo (ingest → canonical → report); adicionar ao menos um teste E2E com dados de sample
 - [ ] **Sem testes de edge cases em Wikipedia** — HTML quebrado, tabelas com formato inesperado, times com caracteres especiais
 
 ### Dependências e packaging
 
-- [ ] **`pytest` em `requirements.txt` junto com runtime** — separar em `requirements-dev.txt` ou `[project.optional-dependencies]` no `pyproject.toml`
-- [ ] **`papermill` declarado mas pouco usado** — verificar se notebooks estão sendo executados programaticamente; se não, mover para `requirements-dev.txt`
+- [x] **`pytest` em `requirements.txt` junto com runtime** — separar em `requirements-dev.txt` ou `[project.optional-dependencies]` no `pyproject.toml`
+- [x] **`papermill` declarado mas pouco usado** — verificar se notebooks estão sendo executados programaticamente; se não, mover para `requirements-dev.txt`
 
 ### README e documentação
 

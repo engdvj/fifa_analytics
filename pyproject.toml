@@ -8,6 +8,25 @@ version = "0.1.0"
 description = "Pipeline de analises da Copa do Mundo 2026 com Python e Jupyter."
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "requests>=2.31",
+    "PyYAML>=6.0",
+    "Jinja2>=3.1",
+    "lxml>=5.0",
+    "tabulate>=0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+notebooks = [
+    "jupyterlab>=4.0",
+    "notebook>=7.0",
+    "papermill>=2.5",
+]
 
 [project.scripts]
 fifa-analytics = "fifa_analytics.cli:main"

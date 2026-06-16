@@ -1,11 +1,16 @@
-jupyterlab>=4.0
-notebook>=7.0
+# Runtime
 pandas>=2.0
 pyarrow>=14.0
 requests>=2.31
 PyYAML>=6.0
 Jinja2>=3.1
 lxml>=5.0
-papermill>=2.5
-pytest>=8.0
 tabulate>=0.9
+
+# Dev
+pytest>=8.0
+
+# Notebooks (opcional)
+jupyterlab>=4.0
+notebook>=7.0
+papermill>=2.5
