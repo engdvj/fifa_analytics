@@ -8,7 +8,8 @@ from typing import Any
 
 import pandas as pd
 
-from fifa_analytics.analytics.scores import build_player_match_features, build_team_match_features, build_team_scores, slugify
+from fifa_analytics.analytics.scores import build_player_match_features, build_team_match_features, build_team_scores
+from fifa_analytics.utils.text import slugify
 from fifa_analytics.paths import GOLD_DIR, SILVER_DIR
 from fifa_analytics.reporting.build_report import build_match_report
 from fifa_analytics.reporting.fragments import render_template, write_fragment

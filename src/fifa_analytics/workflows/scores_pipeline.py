@@ -10,10 +10,10 @@ from fifa_analytics.analytics.scores import (
     build_player_scores,
     build_team_match_features,
     build_team_scores,
-    slugify,
 )
 from fifa_analytics.paths import GOLD_DIR, REPORTS_DIR
 from fifa_analytics.utils.io import ensure_dir, read_dataframe, write_dataframe
+from fifa_analytics.utils.text import slugify
 from fifa_analytics.utils.time import utc_now_iso
 
 

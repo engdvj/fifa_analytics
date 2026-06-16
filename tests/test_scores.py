@@ -5,8 +5,8 @@ from fifa_analytics.analytics.scores import (
     build_player_scores,
     build_team_match_features,
     build_team_scores,
-    slugify,
 )
+from fifa_analytics.utils.text import slugify
 
 
 def test_build_team_scores_ranks_stronger_match_profile():
