@@ -2,8 +2,6 @@
 
 Pipeline em Python + Jupyter para coletar, validar, analisar e gerar relatorios dos 104 jogos da Copa do Mundo 2026.
 
-O projeto usa notebooks por processo, nao por partida. Cada notebook recebe parametros como `match_id`, `match_date` e `run_scope`, chama funcoes reutilizaveis em `src/` e grava dados em camadas `raw`, `silver` e `gold`.
-
 ## Arquitetura
 
 ```text
@@ -25,229 +23,104 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-## Abrir os notebooks
+## Fluxo do dia a dia — quando ha jogos novos
 
-```bash
-jupyter lab
-```
-
-## Testar agora
-
-Ative o ambiente virtual:
+A rotina normal, quando uma nova rodada de jogos aconteceu:
 
 ```bash
 source .venv/bin/activate
+fifa-analytics atualizar
 ```
 
-Rode a suite de testes:
+Esse unico comando coleta as fontes (`worldcup2026` + ESPN), reconcilia o indice canonico, gera os relatorios de jogos finalizados, atualiza o status do torneio e recalcula scores/rankings de selecoes. E seguro rodar todos os dias — ele relê as fontes do zero e nao duplica nada.
+
+Depois de `atualizar`, a narrativa de cada jogo ("A historia do jogo") vem de um texto generico gerado pelo pipeline. Para reescrever com prosa real, peca para invocar a skill `atualizar-jogo` (em `.claude/skills/atualizar-jogo/`) numa sessao do Claude Code: ela le os dados reais do jogo (placar, eventos, estatisticas) e escreve um texto variado, sem repetir a mesma formula entre jogos. A skill protege esse texto com o marcador `<!-- narrativa-manual -->` no fragmento — depois que isso esta lá, rodar `atualizar` de novo NAO sobrescreve a narrativa escrita a mao.
+
+**Ordem correta:**
+
+```text
+1. fifa-analytics atualizar          # coleta dados + gera relatorios + recalcula scores
+2. skill atualizar-jogo (no Claude)  # reescreve a narrativa dos jogos novos com prosa real
+```
+
+Nunca inverta essa ordem — rodar `atualizar` depois de escrever narrativas manuais so e seguro porque o marcador protege o texto, mas a skill so consegue ler dados atualizados se o passo 1 já tiver rodado.
+
+### Quando rodar `espn-elencos`
 
 ```bash
+fifa-analytics espn-elencos
+```
+
+Coleta o elenco completo (convocacao oficial, com posicao estavel) de cada uma das 48 selecoes — diferente da escalacao por partida, que so mostra quem jogou. Isso ja foi coletado para todas as selecoes confirmadas na Copa; só precisa rodar de novo se uma convocacao mudar (lesao, substituicao na lista) ou se uma nova selecao aparecer nos dados sem elenco ainda coletado. Nao precisa rodar isso a cada atualizacao diaria.
+
+### Se uma fonte estiver fora do ar
+
+```bash
+fifa-analytics atualizar --sem-espn
+fifa-analytics atualizar --sem-worldcup2026
+```
+
+## Comandos individuais
+
+Quando precisar rodar so uma etapa especifica em vez do fluxo completo:
+
+```bash
+fifa-analytics worldcup2026        # fonte operacional principal (104 jogos, eventos basicos)
+fifa-analytics espn                # enriquecimento ESPN (stats, escalacoes por partida, eventos)
+fifa-analytics espn-elencos        # elenco/convocacao completo por selecao (raro precisar)
+fifa-analytics wikipedia           # referencia publica nao-oficial
+fifa-analytics indice-canonico     # reconcilia fontes -> indice canonico em data/gold
+fifa-analytics relatorios-basicos  # gera fragmentos + relatorios finais por jogo
+fifa-analytics status-torneio      # standings, status, pendencias
+fifa-analytics scores              # scores de selecoes + relatorios de time/jogador
+fifa-analytics remontar-relatorio <match_id>  # remonta um relatorio a partir dos fragmentos, sem recalcular nada
+```
+
+`remontar-relatorio` e usado pela skill `atualizar-jogo` apos escrever a narrativa manual de um jogo — ele so reconstroi o `.md` final juntando os fragmentos existentes, nao refaz coleta nem calculo.
+
+## Testar
+
+```bash
+source .venv/bin/activate
 python -m pytest -q
 ```
 
-Gere um relatorio de amostra de ponta a ponta:
+Relatorio de amostra de ponta a ponta, sem depender de fontes externas:
 
 ```bash
-python -m fifa_analytics amostra
+fifa-analytics amostra
 ```
 
-Esse comando cria:
+## O que cada relatorio mostra
 
-```text
-data/raw/sample/...
-data/silver/matches/matches.parquet
-data/silver/teams/teams.parquet
-data/silver/standings/standings.parquet
-data/gold/standings/group_standings.parquet
-reports/fragments/copa_2026_jogo_001/
-reports/final/copa_2026_jogo_001.md
-manifests/copa_2026_jogo_001.yaml
-```
+### Relatorio de jogo (`reports/final/{fase}/{rodada}/{numero}_{time1}_x_{time2}.md`)
 
-Gere dados a partir da Wikipedia:
+Organizado em: historia do jogo (narrativa) -> estatisticas comparativas (posse, chutes, cartoes, gols, frente a frente) -> escalacoes titulares. Metadados tecnicos (arbitro, publico, fontes, status de qualidade) ficam no comentario HTML no topo do arquivo, fora da leitura principal.
 
-```bash
-python -m fifa_analytics wikipedia
-```
+### Relatorio de selecao (`reports/teams/{selecao}.md`)
 
-Esse comando usa a pagina publica da Copa 2026 como fonte inicial para partidas e classificacao dos grupos. A Wikipedia nao e fonte oficial; os dados devem ser validados contra FIFA ou outra fonte operacional antes de conclusoes finais.
+Nota geral de 0 a 100, combinando seis componentes por media ponderada:
 
-Gere dados a partir da API operacional gratuita `worldcup26.ir`:
+| Componente | Peso | O que mede |
+|---|---|---|
+| Resultado | 35% | Aproveitamento real de pontos (vitoria/empate/derrota) |
+| Defesa | 20% | Gols sofridos, chutes no alvo sofridos, jogos sem sofrer gol |
+| Ataque | 15% | Gols e chutes no alvo por jogo |
+| Forca Relativa | 15% | Rating Elo — contextualiza o resultado pela qualidade do adversario e pelo dominio de jogo (gols, chutes, posse), nao so o placar puro |
+| Eficiencia | 10% | Conversao de chutes em gol |
+| Controle | 5% | Posse, passes, precisao de passe |
 
-```bash
-python -m fifa_analytics worldcup2026
-```
+Os pesos nao sao iguais (nao e simplesmente 1/6 para cada) porque os componentes nao tem o mesmo poder de explicar o resultado de uma partida de futebol — ver a justificativa completa nos comentarios de `TEAM_SCORE_WEIGHTS` em `src/fifa_analytics/analytics/scores.py`.
 
-Esse comando coleta os 104 jogos, selecoes, estadios, classificacao dos grupos e eventos basicos de gols quando a fonte disponibiliza autores/minutos. A fonte e publica e nao oficial; por isso a pipeline tambem calcula a classificacao internamente e grava a validacao em `data/silver/validation_results/`.
+Tambem aparecem: classificacao do grupo, evolucao da nota por jogo (a partir do 2o jogo), mediana/consistencia/tendencia (a partir do 2o jogo), e a tabela de jogadores do elenco agrupada por posicao (goleiro/defensor/meio/atacante).
 
-Gere dados analiticos gratuitos a partir da ESPN:
+### Rankings (`reports/rankings/selecoes/{metrica}.md`)
 
-```bash
-python -m fifa_analytics espn
-```
+Uma tabela por componente (geral, resultado, ataque, defesa, eficiencia, controle, forca-relativa, forma) ordenada por essa metrica.
 
-Esse comando coleta calendario, detalhes de eventos, estatisticas por selecao, escalacoes e estatisticas individuais quando disponiveis. Ele cria tabelas como:
+### Confianca da nota
 
-```text
-data/gold/fact_team_match_stats/espn_team_stats.parquet
-data/gold/lineups/espn_lineups.parquet
-data/gold/fact_player_match_stats/espn_player_stats.parquet
-```
-
-Atualize tudo em uma rodada unica:
-
-```bash
-python -m fifa_analytics atualizar
-```
-
-Esse comando coleta `worldcup2026` e ESPN, recria o indice canonico, gera relatorios de jogos finalizados, atualiza o status do torneio e recalcula os scores/rankings. Ele e uma atualizacao sob demanda, nao um servico em background. Para ignorar uma fonte temporariamente:
-
-```bash
-python -m fifa_analytics atualizar --sem-espn
-python -m fifa_analytics atualizar --sem-worldcup2026
-```
-
-Crie o indice canonico de partidas, reconciliando ids das fontes:
-
-```bash
-python -m fifa_analytics indice-canonico
-```
-
-Esse comando cria:
-
-```text
-data/gold/dim_match/canonical_matches.parquet
-data/gold/dim_match/source_match_map.parquet
-data/gold/fact_events/canonical_events.parquet
-data/gold/fact_team_match_stats/canonical_team_stats.parquet
-data/gold/lineups/canonical_lineups.parquet
-data/gold/fact_player_match_stats/canonical_player_stats.parquet
-```
-
-O `canonical_match_id` usa a numeracao estavel da fonte primaria quando ela existe, por exemplo `copa_2026_jogo_013`. Isso nao significa necessariamente ordem temporal. Para analises cronologicas, use a coluna `temporal_order`; para a numeracao original da fonte primaria, use `match_number`.
-
-Gere relatorios basicos no estilo canonico, com um relatorio por jogo real:
-
-```bash
-python -m fifa_analytics relatorios-basicos
-python -m fifa_analytics status-torneio
-```
-
-O comando `relatorios-basicos` usa `canonical` por padrao, gera relatorios para as partidas `finalizado` e inclui metadados das fontes vinculadas ao jogo. Quando as fontes trazem autores e minutos dos gols, ele tambem preenche a linha do tempo basica da partida.
-
-Nos relatorios por jogo, a secao de selecoes inclui comparativo de `nota_jogo` e frente a frente por componente. A secao de escalacoes junta titulares, reservas com impacto registrado, nota do jogador na partida e principais estatisticas individuais.
-
-Para processar outro status:
-
-```bash
-python -m fifa_analytics relatorios-basicos --status agendado
-python -m fifa_analytics relatorios-basicos --status todos
-python -m fifa_analytics status-torneio --source canonical
-```
-
-O comando `status-torneio` cria:
-
-```text
-manifests/tournament_status.parquet
-reports/tournament/status.md
-reports/tournament/standings.md
-reports/tournament/pendencias_relatorios.md
-```
-
-Gere scores acumulados por selecao e jogador:
-
-```bash
-python -m fifa_analytics scores
-```
-
-Esse comando cria tabelas analiticas derivadas e relatorios navegaveis por entidade:
-
-```text
-data/gold/analytics/team_match_features.parquet
-data/gold/analytics/team_scores.parquet
-data/gold/analytics/player_match_features.parquet
-data/gold/analytics/player_scores.parquet
-reports/teams/index.md
-reports/teams/{selecao}.md
-reports/players/index.md
-reports/players/{jogador}_{selecao}.md
-reports/rankings/index.md
-reports/rankings/selecoes/index.md
-reports/rankings/selecoes/{metrica}.md
-reports/rankings/jogadores/index.md
-reports/rankings/jogadores/{metrica}.md
-```
-
-O score inicial e uma nota de 0 a 100, transparente e recalculavel. Para selecoes, combina ataque, defesa, controle, eficiencia e `fair_play`. O componente `fair_play` e uma nota pequena de controle disciplinar: menos faltas, amarelos e vermelhos melhoram a nota; ele nao mede qualidade tecnica. Para jogadores, a nota geral combina impacto medio por jogo e impacto acumulado; cartoes entram como penalizacao no impacto. Os rankings principais ficam em `reports/rankings/selecoes/index.md` e `reports/rankings/jogadores/index.md`.
-
-Tambem sao gerados rankings separados por metrica. Para selecoes: `geral`, `ataque`, `defesa`, `controle`, `eficiencia` e `fair_play`. Para jogadores: `geral`, `medio`, `acumulado`, `ofensivo` e `goleiro`.
-
-Para evitar falsos positivos em poucos jogos, cada nota tem um `nivel_evidencia` textual: `baixa`, `media` ou `alta`. Isso nao e chance de acerto; e um aviso de estabilidade da nota. Com poucos jogos, a nota existe e entra no ranking, mas aparece com evidencia baixa. Os arquivos Markdown sao saidas geradas; a fonte real continua sendo `data/gold/analytics/`.
-
-Componentes da nota de selecoes:
-
-- `ataque`: volume/producao ofensiva, usando gols, chutes e chutes no alvo por jogo;
-- `defesa`: solidez defensiva, usando gols sofridos, chutes sofridos, chutes no alvo sofridos e jogos sem sofrer gol;
-- `controle`: dominio com bola, usando posse, passes e precisao de passe;
-- `eficiencia`: aproveitamento ofensivo, usando gols por chute e chutes no alvo por chute;
-- `fair_play`: controle disciplinar, usando faltas, amarelos e vermelhos.
-
-`eficiencia` nao e a mesma coisa que `ataque`: ataque mede volume/producao; eficiencia mede o quanto esse volume vira perigo/gol.
-
-`peso_evidencia` aparece apenas na auditoria da nota. Ele e um fator tecnico usado para reduzir exageros quando ha pouca amostra, dados incompletos ou baixo teste defensivo. Exemplo: uma defesa pode ter nota bruta alta por nao sofrer gol, mas a nota usada no ranking e ajustada se ela quase nao foi testada.
-
-Atualizacao dos scores:
-
-- os scores sao recalculados sempre que `python -m fifa_analytics scores` roda;
-- o comando nao soma em cima do Markdown anterior;
-- ele le novamente as tabelas canonicas em `data/gold`, reconstrói features por jogo e gera rankings atualizados;
-- quando novos jogos forem coletados, basta rodar `python -m fifa_analytics atualizar` para refazer fontes, indice canonico, relatorios, status e scores em sequencia.
-
-Estatisticas usadas na primeira versao:
-
-- acumulados: gols, assistencias, chutes, pontos, cartoes, defesas;
-- medias por jogo: gols por jogo, chutes por jogo, gols contra por jogo, impacto por jogo;
-- razoes: gols por chute, chutes no alvo por chute, aproveitamento;
-- normalizacao por percentil relativo ao torneio atual;
-- ajuste conservador por evidencia para reduzir exagero em amostra pequena.
-- links de Obsidian entre rankings, selecoes, jogadores e relatorios de jogos; em tabelas, os aliases usam `\|` para nao quebrar colunas Markdown.
-
-Estatisticas candidatas para a proxima evolucao:
-
-- mediana por jogo, para reduzir efeito de uma goleada isolada;
-- desvio padrao, para medir consistencia;
-- media movel dos ultimos jogos, para forma recente;
-- z-score/percentil por metrica, para comparar selecoes e jogadores;
-- ajuste por forca do adversario;
-- rankings por perfil de jogador, separando goleiros, defensores, meio-campistas e atacantes.
-
-## Modos de uso
-
-Jogo especifico:
-
-```python
-run_scope = "jogo_unico"
-match_id = "copa_2026_jogo_001"
-```
-
-Jogos de uma data:
-
-```python
-run_scope = "data_de_jogos"
-match_date = "2026-06-16"
-```
-
-Jogos finalizados pendentes:
-
-```python
-run_scope = "finalizados_pendentes"
-```
-
-Torneio inteiro:
-
-```python
-run_scope = "torneio"
-```
+`nivel_evidencia` (`baixa`/`media`/`alta`) reflete quantos jogos a selecao ja disputou em relacao aos 3 da fase de grupos — nao e probabilidade de a nota estar "certa", e so um aviso de estabilidade estatistica. Jogos do mata-mata so aumentam a confianca, nao mudam a referencia de 3.
 
 ## Notebooks
 
@@ -262,59 +135,40 @@ run_scope = "torneio"
 - `08_insights.ipynb`: gera leitura analitica.
 - `09_build_report.ipynb`: monta relatorio final por jogo.
 - `10_tournament_reports.ipynb`: gera relatorios agregados do torneio.
-- `11_scores.ipynb`: inspeciona scores acumulados por selecao e jogador.
+- `11_scores.ipynb`: inspeciona scores acumulados por selecao.
 
 ## Status de qualidade
 
-- `ok`: dados consistentes.
-- `aviso`: divergencia ou incompletude nao bloqueante.
+- `ok`: dados consistentes entre fontes, incluindo contagem de gols vs. eventos da timeline.
+- `aviso`: divergencia entre fontes (placar, ou numero de eventos de gol diferente do placar oficial).
 - `erro`: divergencia grave ou dado invalido.
 - `ausente`: fonte ou campo esperado ausente.
 - `desconhecido`: status ainda nao determinado.
-
-## Fluxo recomendado
-
-1. Atualizar indice de partidas.
-2. Ingerir dados brutos.
-3. Normalizar dados das camadas silver/gold.
-4. Validar placar, status, estadio e classificacao.
-5. Gerar fragmentos Markdown.
-6. Montar relatorio final.
-7. Atualizar manifesto do jogo e status global do torneio.
-8. Gerar scores acumulados por selecao e jogador.
 
 ## Fontes de dados
 
 | Fonte | Status | O que coleta |
 |---|---|---|
 | `worldcup2026` | Operacional | 104 jogos, selecoes, estadios, classificacao, gols basicos |
-| `espn` | Operacional | Calendario, stats por selecao, escalacoes, stats por jogador |
+| `espn` | Operacional | Calendario, stats por selecao, escalacoes por partida, stats por jogador |
+| `espn-elencos` | Operacional | Elenco/convocacao completo por selecao, com posicao estavel |
 | `wikipedia` | Operacional | Partidas e classificacao de grupos (nao oficial) |
-| `api_football` | Candidata | Jogadores, perfis, injuries, rankings e stats individuais por partida no plano gratuito limitado |
-| `fifa` | Validacao oficial | PDF oficial de elencos com posicao, DOB, clube, altura, caps e gols |
-| `canonical` | Derivado | Indice reconciliado das fontes acima |
+| `canonical` | Derivado | Indice reconciliado das fontes acima, prioridade `worldcup2026 > espn > wikipedia` |
 
 A pipeline calcula classificacao internamente e valida contra as fontes. Resultados gravados em `data/silver/validation_results/`.
 
 ## Troubleshooting
 
-**ESPN retornou erro ou ficou fora:**
+**ESPN retornou erro ou ficou fora do ar:**
 ```bash
-python -m fifa_analytics atualizar --sem-espn
+fifa-analytics atualizar --sem-espn
 ```
 
-**Reprocessar um jogo especifico apos nova coleta:**
-```bash
-# Apague os fragmentos e o relatorio do jogo e rode novamente
-rm -rf reports/fragments/copa_2026_jogo_013
-rm -f reports/final/copa_2026_jogo_013.md
-python -m fifa_analytics relatorios-basicos
-```
+**Reescrevi uma narrativa manual e ela voltou ao texto generico:**
+Confirme que o fragmento `reports/fragments/{match_id}/01b_story.md` comeca com a linha `<!-- narrativa-manual -->`. Sem ela, `atualizar`/`relatorios-basicos` sobrescreve o texto na proxima execucao.
 
-**Limpar cache e reprocessar tudo do zero:**
-```bash
-python -m fifa_analytics atualizar
-```
+**Fontes divergem no placar ou no numero de gols da timeline:**
+Confira o campo `data_quality_status` no comentario HTML do relatorio do jogo, e `data/silver/validation_results/` para o detalhe da comparacao entre fontes.
 
-**Fontes divergem no placar:**
-Confira `data/silver/validation_results/` — cada arquivo contem o resultado da comparacao entre fontes. O indice canonico usa prioridade `worldcup2026 > espn > wikipedia`; o campo `primary_source` no manifesto indica qual fonte foi usada.
+**Links de jogador quebrados:**
+Geralmente e nome de jogador escrito diferente entre fontes (ex: "C. Larin" vs "Cyle Larin") ou time errado atribuido a um autor de gol contra. Verifique a escalacao do jogo certo em `reports/final/.../{jogo}.md` para confirmar o nome e o time corretos antes de corrigir o link manualmente.
