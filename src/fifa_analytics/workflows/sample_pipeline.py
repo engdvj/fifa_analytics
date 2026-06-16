@@ -5,7 +5,6 @@ import pandas as pd
 from fifa_analytics.paths import GOLD_DIR, RAW_DIR, SILVER_DIR
 from fifa_analytics.reporting.build_report import build_match_report
 from fifa_analytics.reporting.fragments import render_template, write_fragment
-from fifa_analytics.reporting.tournament_reports import format_standings_table
 from fifa_analytics.sources.sample import fetch_match, fetch_matches
 from fifa_analytics.transforms.matches import normalize_matches
 from fifa_analytics.transforms.standings import calculate_group_standings
@@ -47,6 +46,10 @@ def run_sample_pipeline(match_id: str = "mexico_africa_do_sul_2026_06_11") -> di
                 "match_id": match_id,
                 "generated_at": generated_at,
                 "status": match.get("status", "desconhecido"),
+                "group": match.get("group"),
+                "stadium": match.get("stadium"),
+                "sources": "amostra",
+                "data_quality_status": "aviso",
             },
         ),
     )
@@ -60,42 +63,6 @@ def run_sample_pipeline(match_id: str = "mexico_africa_do_sul_2026_06_11") -> di
                 "away_team": match["away_team"],
                 "scoreline": scoreline,
                 "status": match.get("status", "desconhecido"),
-            },
-        ),
-    )
-    write_fragment(
-        match_id,
-        "02_context",
-        render_template(
-            "fragments/02_context.md.j2",
-            {
-                "context": (
-                    f"Partida do Grupo {match.get('group')} pela fase de grupos. "
-                    f"O jogo foi disputado em {match.get('stadium')}."
-                )
-            },
-        ),
-    )
-    write_fragment(
-        match_id,
-        "05_team_stats",
-        render_template(
-            "fragments/05_team_stats.md.j2",
-            {"team_stats": format_standings_table(standings[standings["group"] == match.get("group")])},
-        ),
-    )
-    write_fragment(
-        match_id,
-        "08_data_quality",
-        render_template(
-            "fragments/08_data_quality.md.j2",
-            {
-                "data_quality_status": "aviso",
-                "checks": [
-                    {"field": "fonte", "status": "amostra"},
-                    {"field": "schema", "status": "ok"},
-                    {"field": "classificacao_calculada", "status": "ok"},
-                ],
             },
         ),
     )

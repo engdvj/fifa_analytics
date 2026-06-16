@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import yaml
 
-from fifa_analytics.analytics.scores import build_player_match_features, build_team_match_features, build_team_scores
-from fifa_analytics.utils.text import slugify
-from fifa_analytics.paths import GOLD_DIR, SILVER_DIR
+from fifa_analytics.utils.text import position_label, position_order, slugify
+from fifa_analytics.paths import FINAL_REPORTS_DIR, GOLD_DIR, MANIFESTS_DIR, SILVER_DIR
 from fifa_analytics.reporting.build_report import build_match_report
 from fifa_analytics.reporting.fragments import render_template, write_fragment
 from fifa_analytics.reporting.tournament_reports import format_standings_table
@@ -20,10 +20,18 @@ from fifa_analytics.utils.time import utc_now_iso
 
 SOURCE_PRIORITY = ["worldcup2026", "espn", "wikipedia"]
 EVENT_SOURCE_PRIORITY = ["espn", "worldcup2026", "wikipedia"]
-SOURCE_DESCRIPTIONS = {
-    "worldcup2026": "API publica worldcup26.ir",
-    "espn": "ESPN",
-    "wikipedia": "Wikipedia",
+
+# Família de evento para fins de deduplicação entre fontes: fontes diferentes
+# classificam o mesmo gol como "gol", "gol_penalti" ou "gol_contra" (ex: ESPN marca
+# gol_contra corretamente, worldcup2026 só registra "gol") — tratar como
+# equivalentes evita o mesmo gol aparecer duas vezes na timeline canônica.
+# A versão mantida (com a classificação certa) vem da prioridade de fonte.
+_EVENT_DEDUP_FAMILY = {
+    "gol": "gol",
+    "gol_penalti": "gol",
+    "gol_contra": "gol",
+    "cartao_amarelo": "cartao_amarelo",
+    "cartao_vermelho": "cartao_vermelho",
 }
 
 
@@ -104,36 +112,24 @@ def run_canonical_reports(status: str = "finalizado") -> dict[str, Path | str | 
     lineups = read_dataframe(lineups_path) if lineups_path.exists() else pd.DataFrame()
     player_stats_path = GOLD_DIR / "fact_player_match_stats" / "canonical_player_stats.parquet"
     player_stats = read_dataframe(player_stats_path) if player_stats_path.exists() else pd.DataFrame()
-    shots_path = GOLD_DIR / "fact_shots" / "canonical_shots.parquet"
-    shots = read_dataframe(shots_path) if shots_path.exists() else pd.DataFrame()
-    standings = _load_best_standings()
     selected_matches = _filter_matches(matches, status)
-
-    # Pré-computa scores de todos os times no contexto do torneio inteiro.
-    # Necessário para que a comparação da partida use z-score entre os 32 times,
-    # não entre os 2 times desta partida (o que produziria notas artificialmente simétricas).
-    all_team_features = build_team_match_features(matches, team_stats if not team_stats.empty else None)
-    all_team_scores = build_team_scores(all_team_features) if not all_team_features.empty else pd.DataFrame()
 
     report_results = []
     for _, match in selected_matches.iterrows():
         match_dict = match.to_dict()
         match_sources = source_map[source_map["canonical_match_id"] == match_dict["canonical_match_id"]].copy()
-        data_quality_status, checks = _data_quality_checks(match_dict, match_sources)
+        data_quality_status, checks = _data_quality_checks(match_dict, match_sources, events)
         write_canonical_fragments(
             match_dict,
-            standings,
             events,
             team_stats,
             match_info,
             lineups,
             player_stats,
-            shots,
-            match_sources,
             data_quality_status,
             checks,
-            all_team_scores=all_team_scores,
         )
+        report_subdir, report_filename = _report_location(match_dict)
         report_results.append(
             build_match_report(
                 match_dict["canonical_match_id"],
@@ -144,6 +140,8 @@ def run_canonical_reports(status: str = "finalizado") -> dict[str, Path | str | 
                     "source_match_ids": _source_ids_for_manifest(match_sources),
                     "primary_source": match_dict.get("primary_source"),
                 },
+                report_subdir=report_subdir,
+                report_filename=report_filename,
             )
         )
 
@@ -155,6 +153,34 @@ def run_canonical_reports(status: str = "finalizado") -> dict[str, Path | str | 
         "primeiro_relatorio": report_results[0]["report_path"] if report_results else None,
         **index_result,
     }
+
+
+def rebuild_match_report(match_id: str) -> dict[str, Path | str | int | list | None]:
+    """Remonta o relatorio final de um unico jogo a partir dos fragmentos atuais
+    em reports/fragments/{match_id}/, sem recalcular nada — usado apos editar
+    manualmente um fragmento (ex: 01b_story.md reescrito por uma narrativa
+    melhor) para refletir a mudanca no relatorio final sem rodar o pipeline todo."""
+    manifest_path = MANIFESTS_DIR / f"{match_id}.yaml"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Manifest nao encontrado para {match_id}: rode 'fifa-analytics relatorios-basicos' primeiro.")
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+
+    final_report_path = Path(manifest["final_report_path"])
+    report_subdir = str(final_report_path.parent.relative_to(FINAL_REPORTS_DIR))
+    report_filename = final_report_path.stem
+
+    return build_match_report(
+        match_id,
+        data_quality_status=manifest.get("data_quality_status", "desconhecido"),
+        extra_manifest={
+            "canonical_match_id": manifest.get("canonical_match_id"),
+            "sources_used": manifest.get("sources_used"),
+            "source_match_ids": manifest.get("source_match_ids"),
+            "primary_source": manifest.get("primary_source"),
+        },
+        report_subdir=report_subdir,
+        report_filename=report_filename,
+    )
 
 
 def build_canonical_index(source_matches: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -218,10 +244,28 @@ def build_canonical_events(source_map: pd.DataFrame) -> pd.DataFrame:
 
     events = pd.concat(event_frames, ignore_index=True)
     events["source_priority"] = events["event_source"].map({source: index for index, source in enumerate(EVENT_SOURCE_PRIORITY)})
+    events["_minute_base"] = (pd.to_numeric(events["minute_sort"], errors="coerce").fillna(0) // 100).astype(int)
+    events["_event_family"] = events["event_type"].map(_EVENT_DEDUP_FAMILY).fillna(events["event_type"])
+    events = events.sort_values(["match_id", "source_priority", "minute_sort"]).reset_index(drop=True)
+
+    # Dedup com tolerância de 1' entre fontes: mesmo time + mesma família de
+    # evento + minuto a no máximo 1' de distância de um evento já mantido
+    # (ex: Wikipedia=50' / ESPN=51' para o mesmo gol não casam em minuto exato).
+    keep_mask = pd.Series(True, index=events.index)
+    kept_minute_by_key: dict[tuple[Any, Any, Any], list[int]] = {}
+    for idx, row in events.iterrows():
+        key = (row["match_id"], row["team"], row["_event_family"])
+        minute = row["_minute_base"]
+        kept_minutes = kept_minute_by_key.setdefault(key, [])
+        if any(abs(minute - m) <= 1 for m in kept_minutes):
+            keep_mask.loc[idx] = False
+        else:
+            kept_minutes.append(minute)
+
     events = (
-        events.sort_values(["match_id", "minute_sort", "source_priority"])
-        .drop_duplicates(subset=["match_id", "minute", "team", "event_type"])
-        .drop(columns=["source_priority"])
+        events[keep_mask]
+        .sort_values(["match_id", "minute_sort"])
+        .drop(columns=["source_priority", "_minute_base", "_event_family"])
         .reset_index(drop=True)
     )
     return events
@@ -253,17 +297,13 @@ def build_canonical_dataset(source_map: pd.DataFrame, gold_subdir: str, filename
 
 def write_canonical_fragments(
     match: dict[str, Any],
-    standings: pd.DataFrame,
     events: pd.DataFrame,
     team_stats: pd.DataFrame,
     match_info: pd.DataFrame,
     lineups: pd.DataFrame,
     player_stats: pd.DataFrame,
-    shots: pd.DataFrame,
-    match_sources: pd.DataFrame,
     data_quality_status: str,
     checks: list[dict[str, str]],
-    all_team_scores: pd.DataFrame | None = None,
 ) -> None:
     match_id = match["canonical_match_id"]
     home_team = _display_team(match.get("home_team"))
@@ -273,7 +313,7 @@ def write_canonical_fragments(
         scoreline = f"{int(match['home_score'])} x {int(match['away_score'])}"
 
     info = _match_info_for_match(match_info, match_id)
-    extra_context = _match_info_context(info)
+    sources_used = next((c["status"] for c in checks if c["field"] == "fontes_vinculadas"), "")
     write_fragment(
         match_id,
         "00_metadata",
@@ -283,6 +323,16 @@ def write_canonical_fragments(
                 "match_id": match_id,
                 "generated_at": utc_now_iso(),
                 "status": match.get("status", "desconhecido"),
+                "group": match.get("group"),
+                "date": match.get("date"),
+                "stadium": match.get("stadium"),
+                "city": match.get("city"),
+                "country": match.get("country"),
+                "referee": info.get("referee"),
+                "attendance": info.get("attendance"),
+                "broadcasts": info.get("broadcasts"),
+                "sources": sources_used,
+                "data_quality_status": data_quality_status,
             },
         ),
     )
@@ -296,76 +346,27 @@ def write_canonical_fragments(
                 "away_team": away_team,
                 "scoreline": scoreline,
                 "status": match.get("status", "desconhecido"),
-                "date": match.get("date"),
-                "stadium": match.get("stadium"),
-                "city": match.get("city"),
-                "country": match.get("country"),
-            },
-        ),
-    )
-    write_fragment(
-        match_id,
-        "02_context",
-        render_template(
-            "fragments/02_context.md.j2",
-            {
-                "context": (
-                    f"{_match_number_context(match)} do Grupo {match.get('group')} na fase de grupos. "
-                    f"Fonte primaria: {match.get('primary_source')}. "
-                    f"Fontes vinculadas: {_source_summary(match_sources)}."
-                    f"{extra_context}"
-                )
             },
         ),
     )
 
     match_team_stats = _team_stats_for_match(team_stats, match_id)
-    group_standings = standings[standings["group"] == match.get("group")] if not standings.empty else pd.DataFrame()
-    team_score_comparison = _format_team_score_comparison(match, match_team_stats, all_team_scores)
-    write_fragment(
-        match_id,
-        "05_team_stats",
-        render_template(
-            "fragments/05_team_stats.md.j2",
-            {"team_stats": _format_match_team_stats(match_team_stats, group_standings, team_score_comparison)},
-        ),
-    )
-    write_fragment(
-        match_id,
-        "04_timeline",
-        render_template("fragments/04_timeline.md.j2", {"events": _events_for_match(events, match_id)}),
-    )
+    match_events = _events_for_match(events, match_id)
     match_lineups = _lineups_for_match(lineups, match_id)
     match_player_stats = _player_stats_for_match(player_stats, match_id)
     write_fragment(
         match_id,
+        "01b_story",
+        render_template(
+            "fragments/01b_story.md.j2",
+            {"story": _build_match_story(match, match_team_stats, match_events, match_player_stats)},
+        ),
+        skip_if_manual=True,
+    )
+    write_fragment(
+        match_id,
         "03_lineups",
         render_template("fragments/03_lineups.md.j2", {"lineups": _format_lineups(match_lineups, match_player_stats)}),
-    )
-    write_fragment(
-        match_id,
-        "06_player_stats",
-        render_template("fragments/06_player_stats.md.j2", {"player_stats": _format_player_stats(match_player_stats)}),
-    )
-    match_shots = _shots_for_match(shots, match_id)
-    write_fragment(
-        match_id,
-        "07_key_insights",
-        render_template(
-            "fragments/07_key_insights.md.j2",
-            {"insights": _build_key_insights(match, match_team_stats, match_player_stats, match_shots)},
-        ),
-    )
-    write_fragment(
-        match_id,
-        "08_data_quality",
-        render_template(
-            "fragments/08_data_quality.md.j2",
-            {
-                "data_quality_status": data_quality_status,
-                "checks": checks,
-            },
-        ),
     )
 
 
@@ -540,18 +541,6 @@ def _source_records_for_json(source_records: list[dict[str, Any]]) -> list[dict[
     return records
 
 
-def _match_number_context(match: dict[str, Any]) -> str:
-    match_number = match.get("match_number")
-    temporal_order = match.get("temporal_order")
-    if pd.notna(match_number) and pd.notna(temporal_order):
-        return f"Partida {int(match_number)} na numeracao da fonte primaria; ordem temporal {int(temporal_order)}"
-    if pd.notna(match_number):
-        return f"Partida {int(match_number)} na numeracao da fonte primaria"
-    if pd.notna(temporal_order):
-        return f"Partida de ordem temporal {int(temporal_order)}"
-    return f"Partida {match.get('canonical_match_id') or match.get('match_id')}"
-
-
 def _match_key(row: pd.Series) -> str | None:
     home_team = row.get("home_team")
     away_team = row.get("away_team")
@@ -611,23 +600,15 @@ def _events_path(source: str) -> Path:
     return GOLD_DIR / "fact_events" / f"{source}_events.parquet"
 
 
-def _load_best_standings() -> pd.DataFrame:
-    for path in [
-        GOLD_DIR / "standings" / "worldcup2026_calculated_group_standings.parquet",
-        GOLD_DIR / "standings" / "wikipedia_calculated_group_standings.parquet",
-    ]:
-        if path.exists():
-            return read_dataframe(path)
-    return pd.DataFrame()
-
-
 def _filter_matches(matches: pd.DataFrame, status: str) -> pd.DataFrame:
     if status == "todos":
         return matches
     return matches[matches["status"] == status].copy()
 
 
-def _data_quality_checks(match: dict[str, Any], match_sources: pd.DataFrame) -> tuple[str, list[dict[str, str]]]:
+def _data_quality_checks(
+    match: dict[str, Any], match_sources: pd.DataFrame, events: pd.DataFrame | None = None
+) -> tuple[str, list[dict[str, str]]]:
     checks = [
         {"field": "id_canonico", "status": str(match["canonical_match_id"])},
         {"field": "fonte_primaria", "status": str(match.get("primary_source"))},
@@ -641,7 +622,32 @@ def _data_quality_checks(match: dict[str, Any], match_sources: pd.DataFrame) -> 
     for difference in differences:
         checks.append({"field": "divergencia_entre_fontes", "status": difference})
 
-    return ("aviso" if differences or len(match_sources) < 2 else "ok"), checks
+    goal_mismatch = _goal_count_mismatch(match, events) if events is not None else None
+    if goal_mismatch:
+        checks.append({"field": "divergencia_gols_x_eventos", "status": goal_mismatch})
+
+    has_warning = bool(differences) or len(match_sources) < 2 or bool(goal_mismatch)
+    return ("aviso" if has_warning else "ok"), checks
+
+
+def _goal_count_mismatch(match: dict[str, Any], events: pd.DataFrame) -> str | None:
+    """Confere se o numero de gols na timeline canonica bate com o placar oficial.
+
+    Util para detectar erros pontuais de fonte (ex: minuto errado faz o mesmo gol
+    escapar da deduplicacao e aparecer 2x) que nao sao capturados por
+    _source_differences, que so compara o placar declarado entre fontes."""
+    home_score = match.get("home_score")
+    away_score = match.get("away_score")
+    if pd.isna(home_score) or pd.isna(away_score) or events.empty:
+        return None
+    match_id = match["canonical_match_id"]
+    match_events = events[events["match_id"] == match_id]
+    goal_events = match_events[match_events["event_type"].isin(["gol", "gol_penalti", "gol_contra"])]
+    expected_total = int(home_score) + int(away_score)
+    actual_total = len(goal_events)
+    if expected_total != actual_total:
+        return f"placar soma {expected_total} gol(s), timeline tem {actual_total} evento(s) de gol"
+    return None
 
 
 def _source_differences(match_sources: pd.DataFrame) -> list[str]:
@@ -656,16 +662,33 @@ def _source_differences(match_sources: pd.DataFrame) -> list[str]:
     return differences
 
 
-def _source_summary(match_sources: pd.DataFrame) -> str:
-    parts = []
-    for _, source in match_sources.iterrows():
-        description = SOURCE_DESCRIPTIONS.get(source["source"], source["source"])
-        parts.append(f"{description} ({source.get('source_source_match_id')})")
-    return ", ".join(parts)
-
-
 def _source_ids_for_manifest(match_sources: pd.DataFrame) -> dict[str, str]:
     return {row["source"]: str(row.get("source_source_match_id")) for _, row in match_sources.iterrows()}
+
+
+_KNOCKOUT_STAGE_LABELS = {
+    "r32": "r32", "r16": "r16", "qf": "qf", "sf": "sf", "third": "terceiro_lugar", "final": "final",
+}
+
+
+def _report_location(match: dict[str, Any]) -> tuple[str, str]:
+    """Subdiretorio e nome de arquivo do relatorio final: agrupado por rodada
+    na fase de grupos e por fase no mata-mata, com nome descritivo (numero + selecoes)."""
+    match_id = str(match["canonical_match_id"])
+    home = slugify(_display_team(match.get("home_team")))
+    away = slugify(_display_team(match.get("away_team")))
+    number = match_id.split("_")[-1]
+    filename = f"{number}_{home}_x_{away}"
+
+    stage = match.get("stage")
+    if stage == "fase_de_grupos":
+        round_number = match.get("round")
+        subdir = f"fase_de_grupos/rodada_{int(round_number)}" if pd.notna(round_number) else "fase_de_grupos/rodada_desconhecida"
+    elif stage in _KNOCKOUT_STAGE_LABELS:
+        subdir = f"mata_mata/{_KNOCKOUT_STAGE_LABELS[stage]}"
+    else:
+        subdir = "outros"
+    return subdir, filename
 
 
 def _events_for_match(events: pd.DataFrame, match_id: str) -> list[dict[str, Any]]:
@@ -688,6 +711,8 @@ def _linked_event_description(event: pd.Series) -> str:
     if player and pd.notna(player):
         if event_type == "gol":
             description = f"Gol: {_player_link(player, team)} ({_team_link(team)})"
+        elif event_type == "gol_penalti":
+            description = f"Gol de penalti: {_player_link(player, team)} ({_team_link(team)})"
         elif event_type == "gol_contra":
             description = f"Gol contra: {_player_link(player, team)} ({_team_link(team)})"
         elif event_type == "cartao_amarelo":
@@ -722,12 +747,6 @@ def _player_stats_for_match(player_stats: pd.DataFrame, match_id: str) -> pd.Dat
     return player_stats[player_stats["match_id"] == match_id].copy()
 
 
-def _shots_for_match(shots: pd.DataFrame, match_id: str) -> pd.DataFrame:
-    if shots.empty:
-        return pd.DataFrame()
-    return shots[shots["match_id"] == match_id].copy()
-
-
 def _match_info_for_match(match_info: pd.DataFrame, match_id: str) -> dict[str, Any]:
     if match_info.empty:
         return {}
@@ -737,245 +756,30 @@ def _match_info_for_match(match_info: pd.DataFrame, match_id: str) -> dict[str, 
     return rows.iloc[0].to_dict()
 
 
-def _match_info_context(info: dict[str, Any]) -> str:
-    if not info:
-        return ""
-    parts = []
-    if pd.notna(info.get("attendance")):
-        parts.append(f"publico informado: {int(info['attendance'])}")
-    if info.get("referee") and pd.notna(info.get("referee")):
-        parts.append(f"arbitro: {info['referee']}")
-    if info.get("broadcasts") and pd.notna(info.get("broadcasts")):
-        parts.append(f"transmissao: {info['broadcasts']}")
-    if not parts:
-        return ""
-    return " " + "; ".join(parts) + "."
 
-
-def _format_match_team_stats(match_team_stats: pd.DataFrame, group_standings: pd.DataFrame, score_comparison: str = "") -> str:
-    parts = []
-    if score_comparison:
-        parts.append("### Comparativo de notas da partida")
-        parts.append("")
-        parts.append(score_comparison)
-        parts.append("")
-
-    if not match_team_stats.empty:
-        display_columns = [
-            "team",
-            "possession",
-            "shots",
-            "shots_on_target",
-            "blocked_shots",
-            "passes",
-            "pass_accuracy",
-            "corners",
-            "fouls",
-            "offsides",
-            "saves",
-            "yellow_cards",
-            "red_cards",
-            "tackles",
-            "interceptions",
-        ]
-        available_columns = [column for column in display_columns if column in match_team_stats.columns]
-        labels = {
-            "team": "selecao",
-            "possession": "posse",
-            "shots": "chutes",
-            "shots_on_target": "chutes_no_alvo",
-            "blocked_shots": "chutes_bloqueados",
-            "passes": "passes",
-            "pass_accuracy": "precisao_passes",
-            "corners": "escanteios",
-            "fouls": "faltas",
-            "offsides": "impedimentos",
-            "saves": "defesas",
-            "yellow_cards": "amarelos",
-            "red_cards": "vermelhos",
-            "tackles": "desarmes",
-            "interceptions": "interceptacoes",
-        }
-        display = match_team_stats[available_columns].copy()
-        if "team" in display.columns:
-            display["team"] = display["team"].apply(_team_link)
-        for percentage_column in ["pass_accuracy"]:
-            if percentage_column in display.columns:
-                display[percentage_column] = display[percentage_column].apply(
-                    lambda value: round(value * 100, 1) if pd.notna(value) and value <= 1 else value
-                )
-        parts.append("### Estatisticas da partida")
-        parts.append("")
-        parts.append(display.rename(columns=labels).to_markdown(index=False))
-        parts.append("")
-
-    if not group_standings.empty:
-        parts.append("### Classificacao do grupo")
-        parts.append("")
-        standings_display = group_standings.copy()
-        if "team" in standings_display.columns:
-            standings_display["team"] = standings_display["team"].apply(_team_link)
-        parts.append(format_standings_table(standings_display))
-
-    return "\n".join(parts).strip()
-
-
-def _format_team_score_comparison(
-    match: dict[str, Any],
-    match_team_stats: pd.DataFrame,
-    all_team_scores: pd.DataFrame | None = None,
-) -> str:
-    if match_team_stats.empty:
-        return ""
-
-    # Usa scores pré-computados no contexto do torneio inteiro (z-score entre 32 times).
-    # Sem isso, comparar 2 times entre si produziria notas artificialmente simétricas (33/67).
-    match_features = build_team_match_features(pd.DataFrame([match]), match_team_stats)
-    if match_features.empty:
-        return ""
-
-    if all_team_scores is not None and not all_team_scores.empty:
-        home_team = match.get("home_team")
-        away_team = match.get("away_team")
-        # Scores do torneio (notas no contexto dos 32 times)
-        tournament_scores = all_team_scores[all_team_scores["team"].isin([home_team, away_team])].copy()
-        # Stats desta partida (pontos, gols, chutes, posse — valores do jogo, não acumulados)
-        match_scores = build_team_scores(match_features)
-        match_game_cols = ["team", "points", "gols_pro", "gols_contra", "chutes_no_alvo", "posse_media"]
-        match_game = match_scores[[c for c in match_game_cols if c in match_scores.columns]].copy()
-        # Merge: notas do torneio + stats desta partida
-        score_cols = [c for c in tournament_scores.columns if c.startswith("score_")]
-        team_scores = match_game.merge(tournament_scores[["team"] + score_cols], on="team", how="left")
-    else:
-        team_scores = build_team_scores(match_features)
-
-    if team_scores.empty:
-        return ""
-
-    summary_columns = [
-        "team",
-        "score_geral",
-        "score_resultado",
-        "score_ataque",
-        "score_defesa",
-        "score_eficiencia",
-        "score_controle",
-        "points",
-        "gols_pro",
-        "gols_contra",
-        "chutes_no_alvo",
-        "posse_media",
-    ]
-    available = [column for column in summary_columns if column in team_scores.columns]
-    summary = team_scores[available].copy()
-    summary["team"] = summary["team"].apply(_team_link)
-    summary = summary.rename(
-        columns={
-            "team": "selecao",
-            "score_geral": "nota_jogo",
-            "score_resultado": "resultado",
-            "score_ataque": "ataque",
-            "score_defesa": "defesa",
-            "score_eficiencia": "eficiencia",
-            "score_controle": "controle",
-            "points": "pontos",
-            "gols_pro": "gols",
-            "gols_contra": "gols_contra",
-            "chutes_no_alvo": "no_alvo",
-            "posse_media": "posse",
-        }
-    )
-
-    parts = [
-        "Nota de 0-100 no contexto do torneio (z-score entre as 32 selecoes). Pontos, gols e chutes referentes a esta partida.",
-        "",
-        "#### Resumo por selecao",
-        "",
-        _normalize_markdown_table_values(summary).to_markdown(index=False),
-    ]
-
-    ordered = _order_match_teams(team_scores, match)
-    if len(ordered) >= 2:
-        home = ordered.iloc[0]
-        away = ordered.iloc[1]
-        rows = []
-        for column, label in [
-            ("score_geral", "nota_jogo"),
-            ("score_resultado", "resultado"),
-            ("score_ataque", "ataque"),
-            ("score_defesa", "defesa"),
-            ("score_eficiencia", "eficiencia"),
-            ("score_controle", "controle"),
-            ("points", "pontos"),
-            ("chutes_no_alvo", "chutes_no_alvo"),
-            ("posse_media", "posse"),
-        ]:
-            if column not in ordered.columns:
-                continue
-            rows.append(
-                {
-                    "metrica": label,
-                    str(home["team"]): _format_numeric(home.get(column)),
-                    str(away["team"]): _format_numeric(away.get(column)),
-                    "vantagem": _comparison_leader(home, away, column),
-                }
-            )
-        parts.extend(["", "#### Frente a frente", "", pd.DataFrame(rows).to_markdown(index=False)])
-
-    return "\n".join(parts).strip()
 
 
 def _format_lineups(lineups: pd.DataFrame, player_stats: pd.DataFrame | None = None) -> str:
+    """Escalacao titular por time: camisa, jogador, posicao. Sem estatisticas —
+    isso fica nos relatorios de time/jogador; aqui o foco e quem comecou o jogo."""
     if lineups.empty:
         return ""
-    lineup_players = lineups.copy()
-    player_notes = _player_match_notes(player_stats)
-    if not player_notes.empty:
-        lineup_players = lineup_players.merge(player_notes, on=["match_id", "team", "player_name"], how="left")
-    if "is_starter" in lineup_players.columns:
-        impact_columns = [
-            column
-            for column in ["contribuicao_partida", "goals", "assists", "shots_on_target", "saves", "yellow_cards", "red_cards"]
-            if column in lineup_players.columns
-        ]
-        if impact_columns:
-            impact_mask = lineup_players[impact_columns].apply(pd.to_numeric, errors="coerce").fillna(0).gt(0).any(axis=1)
-            lineup_players = lineup_players[lineup_players["is_starter"].fillna(False) | impact_mask].copy()
+    starters = lineups.copy()
+    if "is_starter" in starters.columns:
+        starters = starters[starters["is_starter"].fillna(False)].copy()
 
-    sort_columns = [column for column in ["is_starter", "formation_slot", "shirt_number", "player_name"] if column in lineup_players.columns]
-    columns = [
-        "shirt_number",
-        "player_name",
-        "position",
-        "is_starter",
-        "nota_jogo",
-        "contribuicao_partida",
-        "goals",
-        "assists",
-        "shots_on_target",
-        "saves",
-        "yellow_cards",
-        "red_cards",
-    ]
-    available = [column for column in columns if column in lineup_players.columns]
-    labels = {
-        "shirt_number": "camisa",
-        "player_name": "jogador",
-        "position": "posicao",
-        "is_starter": "titular",
-        "nota_jogo": "nota_jogo",
-        "contribuicao_partida": "contrib",
-        "goals": "gols",
-        "assists": "assist",
-        "shots_on_target": "no_alvo",
-        "saves": "defesas",
-        "yellow_cards": "amarelos",
-        "red_cards": "vermelhos",
-    }
-    parts = ["Nota do jogador em escala 0-100, relativa ao maior contribuidor individual registrado nesta partida.", ""]
-    sort_ascending = [True] + ([False] + [True] * (len(sort_columns) - 1) if sort_columns else [])
-    sorted_lineups = lineup_players.sort_values(["team", *sort_columns], ascending=sort_ascending, na_position="last")
-    for team, team_lineup in sorted_lineups.groupby("team", sort=False):
+    # Ordena por posição tática (goleiro -> defesa -> meio -> ataque), não pela
+    # ordem bruta da fonte — formation_slot segue a numeração interna da ESPN
+    # e nao corresponde a posicao em campo.
+    if "position" in starters.columns:
+        starters["_position_order"] = starters["position"].apply(position_order)
+    sort_columns = [column for column in ["_position_order", "shirt_number", "player_name"] if column in starters.columns]
+    columns = ["shirt_number", "player_name", "position"]
+    available = [column for column in columns if column in starters.columns]
+    labels = {"shirt_number": "camisa", "player_name": "jogador", "position": "posicao"}
+
+    parts = []
+    for team, team_lineup in starters.groupby("team", sort=False):
         parts.append(f"### {_team_link(team)}")
         formation = _first_valid(team_lineup.get("formation"))
         if formation:
@@ -983,217 +787,133 @@ def _format_lineups(lineups: pd.DataFrame, player_stats: pd.DataFrame | None = N
             parts.append(f"Formacao: `{formation}`")
         parts.append("")
         if sort_columns:
-            team_lineup = team_lineup.sort_values(sort_columns, ascending=[False, *([True] * (len(sort_columns) - 1))], na_position="last")
+            team_lineup = team_lineup.sort_values(sort_columns, na_position="last")
         team_lineup = team_lineup.copy()
         if "player_name" in team_lineup.columns:
             team_lineup["player_name"] = team_lineup["player_name"].apply(lambda player: _player_link(player, team))
-        if "is_starter" in team_lineup.columns:
-            team_lineup["is_starter"] = team_lineup["is_starter"].apply(lambda value: "sim" if bool(value) else "nao")
+        if "position" in team_lineup.columns:
+            team_lineup["position"] = team_lineup["position"].apply(position_label)
         table = _normalize_markdown_table_values(team_lineup[available])
         parts.append(table.rename(columns=labels).fillna("").to_markdown(index=False))
         parts.append("")
     return "\n".join(parts).strip()
 
 
-def _player_match_notes(player_stats: pd.DataFrame | None) -> pd.DataFrame:
-    if player_stats is None or player_stats.empty:
-        return pd.DataFrame()
-    features = build_player_match_features(player_stats)
-    if features.empty:
-        return pd.DataFrame()
-
-    # Contribuição bruta por partida: soma ponderada de eventos observáveis
-    contrib = (
-        features.get("goals", 0) * 5
-        + features.get("assists", 0) * 3
-        + features.get("shots_on_target", 0) * 1.5
-        + features.get("saves", 0) * 1.2
-        + features.get("tackles", 0) * 0.4
-        + features.get("interceptions", 0) * 0.4
-        - features.get("yellow_cards", 0) * 0.5
-        - features.get("red_cards", 0) * 2
-    ).clip(lower=0)
-    features["contribuicao_partida"] = contrib
-    max_contrib = float(contrib.max())
-    features["nota_jogo"] = (0.0 if max_contrib <= 0 else (contrib / max_contrib * 100)).round(1)
-
-    columns = [
-        "match_id", "team", "player_name", "nota_jogo", "contribuicao_partida",
-        "goals", "assists", "shots_on_target", "saves", "yellow_cards", "red_cards",
-    ]
-    available = [c for c in columns if c in features.columns]
-    notes = features[available].copy()
-    for col in ["nota_jogo", "contribuicao_partida"]:
-        if col in notes.columns:
-            notes[col] = notes[col].round(1)
-    return notes
-
-
-def _order_match_teams(team_scores: pd.DataFrame, match: dict[str, Any]) -> pd.DataFrame:
-    order = {match.get("home_team"): 0, match.get("away_team"): 1}
-    ordered = team_scores.copy()
-    ordered["_match_order"] = ordered["team"].map(order).fillna(99)
-    return ordered.sort_values(["_match_order", "team"]).drop(columns=["_match_order"]).reset_index(drop=True)
-
-
-def _comparison_leader(home: pd.Series, away: pd.Series, column: str) -> str:
-    home_value = pd.to_numeric(pd.Series([home.get(column)]), errors="coerce").iloc[0]
-    away_value = pd.to_numeric(pd.Series([away.get(column)]), errors="coerce").iloc[0]
-    if pd.isna(home_value) or pd.isna(away_value):
+def _build_match_story(
+    match: dict[str, Any],
+    team_stats: pd.DataFrame,
+    events: list[dict[str, Any]],
+    player_stats: pd.DataFrame,
+) -> str:
+    """Narrativa do jogo: abertura em prosa, lances decisivos em bullets
+    cronologicos com placar parcial, e fechamento em prosa. Os bullets
+    incorporam o que antes era a timeline separada — cada um traz minuto,
+    quem fez, e o efeito no placar, nao so o nome cru do evento."""
+    home_team = _display_team(match.get("home_team"))
+    away_team = _display_team(match.get("away_team"))
+    home_score = match.get("home_score")
+    away_score = match.get("away_score")
+    if pd.isna(home_score) or pd.isna(away_score):
         return ""
-    if home_value == away_value:
-        return "empate"
-    return _team_link(home["team"] if home_value > away_value else away["team"])
+    home_score, away_score = int(home_score), int(away_score)
 
+    goals = [e for e in events if e.get("event_type") in ("gol", "gol_penalti", "gol_contra")]
+    red_cards = [e for e in events if e.get("event_type") == "cartao_vermelho"]
 
-def _format_numeric(value: Any) -> str:
-    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-    if pd.isna(numeric):
-        return ""
-    if float(numeric).is_integer():
-        return str(int(numeric))
-    return f"{float(numeric):.1f}"
-
-
-def _format_player_stats(player_stats: pd.DataFrame) -> str:
-    if player_stats.empty:
-        return ""
-    stats = build_player_match_features(player_stats)
-    for column in ["goals", "assists", "shots", "shots_on_target", "saves", "tackles", "interceptions", "yellow_cards", "red_cards"]:
-        if column not in stats.columns:
-            stats[column] = 0
-    contrib = (
-        stats.get("goals", 0) * 5 + stats.get("assists", 0) * 3
-        + stats.get("shots_on_target", 0) * 1.5 + stats.get("saves", 0) * 1.2
-        + stats.get("tackles", 0) * 0.4 + stats.get("interceptions", 0) * 0.4
-        - stats.get("yellow_cards", 0) * 0.5 - stats.get("red_cards", 0) * 2
-    ).clip(lower=0)
-    stats["impact_score"] = contrib
-    max_impact = float(contrib.max())
-    stats["nota_jogo"] = (0.0 if max_impact <= 0 else (contrib / max_impact * 100)).round(1)
-    if "minutes_played" not in stats.columns:
-        stats["minutes_played"] = 0
-    columns = [
-        "player_name",
-        "nota_jogo",
-        "impact_score",
-        "minutes_played",
-        "goals",
-        "assists",
-        "shots",
-        "shots_on_target",
-        "saves",
-        "tackles",
-        "interceptions",
-        "yellow_cards",
-        "red_cards",
-    ]
-    available = [column for column in columns if column in stats.columns]
-    labels = {
-        "team": "selecao",
-        "player_name": "jogador",
-        "nota_jogo": "nota_jogo",
-        "impact_score": "impacto",
-        "minutes_played": "min",
-        "goals": "gols",
-        "assists": "assist",
-        "shots": "chutes",
-        "shots_on_target": "no_alvo",
-        "saves": "defesas",
-        "tackles": "desarmes",
-        "interceptions": "intercept",
-        "yellow_cards": "amarelos",
-        "red_cards": "vermelhos",
-    }
-    parts = []
-    sort_columns = ["impact_score", "minutes_played", "player_name"]
-    for team, team_stats in stats.sort_values(["team", *sort_columns], ascending=[True, False, False, True]).groupby("team", sort=False):
-        display = team_stats[team_stats["impact_score"] > 0].sort_values(sort_columns, ascending=[False, False, True]).head(8)
-        if display.empty:
-            continue
-        team_available = [column for column in available if column == "player_name" or _has_meaningful_values(display[column])]
-        table = _normalize_markdown_table_values(display[team_available])
-        if "player_name" in table.columns:
-            table["player_name"] = table["player_name"].apply(lambda player: _player_link(player, team))
-        parts.append(f"### {_team_link(team)}")
-        parts.append("")
-        parts.append(table.rename(columns=labels).to_markdown(index=False))
-        parts.append("")
-    return "\n".join(parts).strip()
-
-
-def _build_key_insights(match: dict[str, Any], team_stats: pd.DataFrame, player_stats: pd.DataFrame, shots: pd.DataFrame) -> str:
-    sections: list[tuple[str, list[str]]] = []
+    # --- Abertura: domínio de posse, se houve, mais o tom geral do confronto ---
+    dominance = ""
     if not team_stats.empty and len(team_stats) >= 2:
         teams = team_stats.set_index("team")
-        home_team = match.get("home_team")
-        away_team = match.get("away_team")
         if home_team in teams.index and away_team in teams.index:
-            home = teams.loc[home_team]
-            away = teams.loc[away_team]
-            sections.append(("Comparacao das selecoes", _team_stat_insights(home_team, away_team, home, away)))
+            home_poss = teams.loc[home_team].get("possession")
+            away_poss = teams.loc[away_team].get("possession")
+            if pd.notna(home_poss) and pd.notna(away_poss) and abs(home_poss - away_poss) >= 10:
+                dominant_team = home_team if home_poss > away_poss else away_team
+                leader_poss = max(home_poss, away_poss)
+                dominance = f"{_team_link(dominant_team)} controlou o ritmo da partida, com {leader_poss:g}% de posse de bola. "
 
-    if not shots.empty:
-        shot_insights = []
-        shot_counts = shots.groupby("team").size().sort_values(ascending=False)
-        on_target = shots[shots["outcome"].isin(["gol", "no_alvo"])].groupby("team").size()
-        if len(shot_counts) >= 2:
-            leader = shot_counts.index[0]
-            shot_insights.append(f"{leader} liderou o volume de finalizacoes com {int(shot_counts.iloc[0])} chutes registrados no lance a lance.")
-        for team, total in shot_counts.items():
-            target = int(on_target.get(team, 0))
-            shot_insights.append(f"{team} colocou {target} de {int(total)} finalizacoes no alvo ou no gol.")
-        sections.append(("Finalizacoes", shot_insights))
+    if not goals:
+        if dominance:
+            opening = f"{dominance}Apesar da superioridade, o jogo ficou travado e terminou sem gols, em {home_score} x {away_score}."
+        else:
+            opening = f"Partida disputada e sem favoritismo claro, que terminou em {home_score} x {away_score} sem que nenhuma das equipes balancasse as redes."
+        return opening
 
-    if not player_stats.empty:
-        player_insights = []
-        top = player_stats.copy()
-        for column in ["goals", "assists", "shots", "shots_on_target", "saves"]:
-            if column not in top.columns:
-                top[column] = 0
-        top["impact_score"] = top["goals"].fillna(0) * 5 + top["assists"].fillna(0) * 3 + top["shots_on_target"].fillna(0) * 1.5 + top["saves"].fillna(0)
-        top = top.sort_values("impact_score", ascending=False)
-        if not top.empty and top.iloc[0]["impact_score"] > 0:
-            row = top.iloc[0]
-            player_insights.append(
-                f"Destaque estatistico: {_player_link(row['player_name'], row['team'])} ({_team_link(row['team'])}) "
-                "combinou gols/assistencias/chutes no alvo/defesas com maior impacto simples."
-            )
-        sections.append(("Destaques individuais", player_insights))
+    first = goals[0]
+    first_minute = first.get("minute", "")
+    first_scorer = first.get("player")
+    first_team = first.get("team")
+    early = int(str(first_minute).split("+")[0]) <= 15
+    opener_phrase = "saiu na frente logo aos" if early else "abriu o placar aos"
+    scorer_part = f" com gol de {_player_link(first_scorer, first_team)}" if first_scorer and pd.notna(first_scorer) else ""
+    dominant_scored_first = dominance and _team_link(first_team) in dominance
+    if dominant_scored_first:
+        opening = f"{dominance}E foi justamente quem mandava no jogo que {opener_phrase} {first_minute}'{scorer_part}."
+    elif dominance:
+        opening = f"{dominance}Mas quem abriu o placar foi {_team_link(first_team)}, {opener_phrase.replace('saiu na frente logo aos', 'logo aos').replace('abriu o placar aos', 'aos')} {first_minute}'{scorer_part}."
+    else:
+        opening = f"{_team_link(first_team)} {opener_phrase} {first_minute}'{scorer_part}."
 
-    rendered = []
-    for title, insights in sections:
-        if not insights:
+    # --- Desenvolvimento: cada lance decisivo vira um bullet cronologico com
+    # placar parcial, entrelacando gols e cartoes vermelhos na ordem real ---
+    bullets: list[str] = []
+    score_balance: dict[str, int] = {home_team: 0, away_team: 0}
+    score_balance[first_team] = 1
+    bullets.append(
+        f"**{first_minute}'** — {_player_link(first_scorer, first_team)} {'abre' if not early else 'inaugura'} o placar para "
+        f"{_team_link(first_team)} ({_partial_score(home_team, away_team, score_balance)})."
+        if first_scorer and pd.notna(first_scorer)
+        else f"**{first_minute}'** — {_team_link(first_team)} abre o placar ({_partial_score(home_team, away_team, score_balance)})."
+    )
+
+    remaining_goals = goals[1:]
+    tagged_events = [("gol", g) for g in remaining_goals] + [("cartao", c) for c in red_cards]
+    tagged_events.sort(key=lambda item: item[1].get("minute_sort", 0))
+
+    for kind, event in tagged_events:
+        minute = event.get("minute", "")
+        team = event.get("team")
+        player = event.get("player")
+        if kind == "cartao":
+            if player and pd.notna(player):
+                bullets.append(f"**{minute}'** — {_player_link(player, team)} e expulso, e {_team_link(team)} passa a jogar com um a menos.")
             continue
-        rendered.append(f"### {title}")
-        rendered.append("")
-        rendered.extend(f"- {insight}" for insight in insights)
-        rendered.append("")
-    return "\n".join(rendered).strip() or "Dados enriquecidos disponiveis, mas ainda sem insight automatico relevante para esta partida."
+        opponent = away_team if team == home_team else home_team
+        scorer_link = _player_link(player, team) if player and pd.notna(player) else _team_link(team)
+        was_behind_or_tied = score_balance.get(team, 0) <= score_balance.get(opponent, 0)
+        score_balance[team] = score_balance.get(team, 0) + 1
+        partial = _partial_score(home_team, away_team, score_balance)
+        if score_balance[team] == score_balance[opponent]:
+            bullets.append(f"**{minute}'** — {scorer_link} deixa tudo igual para {_team_link(team)} ({partial}).")
+        elif was_behind_or_tied:
+            bullets.append(f"**{minute}'** — virada! {scorer_link} coloca {_team_link(team)} na frente ({partial}).")
+        else:
+            bullets.append(f"**{minute}'** — {scorer_link} amplia o placar para {_team_link(team)} ({partial}).")
+
+    # --- Fechamento: leitura do resultado final ---
+    diff = abs(home_score - away_score)
+    winner = home_team if home_score > away_score else (away_team if away_score > home_score else None)
+    if winner and diff >= 4:
+        loser = away_team if winner == home_team else home_team
+        closing = f"No apagar das luzes, {winner} confirmou a goleada sobre {loser}: {home_score} x {away_score}."
+    elif winner:
+        loser = away_team if winner == home_team else home_team
+        closing = f"No fim, {winner} levou a melhor sobre {loser} por {home_score} x {away_score}."
+    else:
+        closing = f"A partida terminou empatada em {home_score} x {away_score}."
+
+    if not player_stats.empty and "goals" in player_stats.columns:
+        top_scorer = player_stats.loc[player_stats["goals"].fillna(0).idxmax()]
+        if top_scorer.get("goals", 0) >= 2:
+            n = int(top_scorer["goals"])
+            closing += f" {_player_link(top_scorer['player_name'], top_scorer['team'])} foi o nome da partida, com {n} gols marcados."
+
+    bullet_list = "\n".join(f"- {b}" for b in bullets)
+    return f"{opening}\n\n{bullet_list}\n\n{closing}"
 
 
-def _team_stat_insights(home_team: str, away_team: str, home: pd.Series, away: pd.Series) -> list[str]:
-    insights = []
-    comparisons = [
-        ("possession", "posse"),
-        ("shots", "chutes"),
-        ("shots_on_target", "chutes no alvo"),
-        ("passes", "passes"),
-        ("fouls", "faltas"),
-    ]
-    for column, label in comparisons:
-        if column not in home.index or pd.isna(home.get(column)) or pd.isna(away.get(column)):
-            continue
-        home_value = home.get(column)
-        away_value = away.get(column)
-        if home_value == away_value:
-            continue
-        leader = home_team if home_value > away_value else away_team
-        leader_value = home_value if home_value > away_value else away_value
-        other_value = away_value if home_value > away_value else home_value
-        verb = "cometeu mais" if column == "fouls" else "liderou em"
-        insights.append(f"{leader} {verb} {label}: {leader_value:g} contra {other_value:g}.")
-    return insights
+def _partial_score(home_team: str, away_team: str, score_balance: dict[str, int]) -> str:
+    return f"{score_balance.get(home_team, 0)} x {score_balance.get(away_team, 0)}"
 
 
 def _first_valid(values: Any) -> Any:
@@ -1205,15 +925,6 @@ def _first_valid(values: Any) -> Any:
                 return value
         return None
     return values if pd.notna(values) and values != "" else None
-
-
-def _has_meaningful_values(values: pd.Series) -> bool:
-    if values.empty:
-        return False
-    numeric_values = pd.to_numeric(values, errors="coerce")
-    if numeric_values.notna().any():
-        return bool(numeric_values.fillna(0).ne(0).any())
-    return bool(values.fillna("").astype(str).str.strip().ne("").any())
 
 
 def _normalize_markdown_table_values(table: pd.DataFrame) -> pd.DataFrame:
@@ -1249,7 +960,7 @@ def _player_link(player_name: Any, team: Any) -> str:
     if pd.isna(player_name) or not player_name:
         return ""
     player = str(player_name)
-    return _obsidian_link(f"reports/players/{slugify(f'{player}_{team}')}", player)
+    return _obsidian_link(f"reports/players/{slugify(team)}/{slugify(player)}", player)
 
 
 def _display_team(value: Any) -> str:

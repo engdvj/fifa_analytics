@@ -13,7 +13,6 @@ def test_build_match_report_orders_fragments_and_records_missing_sections(tmp_pa
 
     (match_dir / "00_metadata.md").write_text("<!-- metadata -->", encoding="utf-8")
     (match_dir / "01_match_summary.md").write_text("# México x África do Sul", encoding="utf-8")
-    (match_dir / "08_data_quality.md").write_text("## Qualidade dos dados", encoding="utf-8")
 
     monkeypatch.setattr(build_report_module, "FRAGMENTS_DIR", fragments_dir)
     monkeypatch.setattr(build_report_module, "FINAL_REPORTS_DIR", final_dir)
@@ -25,4 +24,5 @@ def test_build_match_report_orders_fragments_and_records_missing_sections(tmp_pa
     assert report_path.exists()
     assert "# México x África do Sul" in report_path.read_text(encoding="utf-8")
     assert result["report_status"] == "parcial"
-    assert "02_context" in result["missing_sections"]
+    assert "01b_story" in result["missing_sections"]
+    assert "03_lineups" in result["missing_sections"]

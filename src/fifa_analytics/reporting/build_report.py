@@ -10,10 +10,12 @@ def build_match_report(
     match_id: str,
     data_quality_status: str = "desconhecido",
     extra_manifest: dict[str, object] | None = None,
+    report_subdir: str = "",
+    report_filename: str = "",
 ) -> dict[str, str | Path | list[str]]:
     section_config = load_config("report_sections.yaml")["match_report_sections"]
     fragment_dir = FRAGMENTS_DIR / match_id
-    ensure_dir(FINAL_REPORTS_DIR)
+    report_dir = ensure_dir(FINAL_REPORTS_DIR / report_subdir) if report_subdir else ensure_dir(FINAL_REPORTS_DIR)
     ensure_dir(MANIFESTS_DIR)
 
     parts = []
@@ -27,7 +29,7 @@ def build_match_report(
             if section.get("required"):
                 parts.append(f"## {section['title']}\n\nSecao pendente: fragmento `{section['id']}` nao encontrado.")
 
-    report_path = FINAL_REPORTS_DIR / f"{match_id}.md"
+    report_path = report_dir / f"{report_filename or match_id}.md"
     report_path.write_text("\n\n".join(part for part in parts if part) + "\n", encoding="utf-8")
 
     manifest = {

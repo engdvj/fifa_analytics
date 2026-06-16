@@ -3,8 +3,8 @@ import argparse
 from fifa_analytics.config import load_config
 from fifa_analytics.workflows.sample_pipeline import run_sample_pipeline
 from fifa_analytics.workflows.basic_reports import run_basic_reports
-from fifa_analytics.workflows.canonical_reports import run_canonical_index
-from fifa_analytics.workflows.espn_pipeline import run_espn_pipeline
+from fifa_analytics.workflows.canonical_reports import rebuild_match_report, run_canonical_index
+from fifa_analytics.workflows.espn_pipeline import run_espn_pipeline, run_espn_rosters_pipeline
 from fifa_analytics.workflows.scores_pipeline import run_scores_pipeline
 from fifa_analytics.workflows.tournament_status import run_tournament_status
 from fifa_analytics.workflows.update_pipeline import run_update_pipeline
@@ -142,6 +142,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Executa a coleta de enriquecimento da ESPN com estatisticas, eventos, lineups e jogadores.",
     )
 
+    subparsers.add_parser(
+        "espn-elencos",
+        help="Coleta o elenco completo (convocacao) de cada selecao na ESPN, com posicao estavel. Roda separado por ser raro mudar durante o torneio.",
+    )
+
     tournament_status = subparsers.add_parser(
         "status-torneio",
         aliases=["tournament-status"],
@@ -171,6 +176,15 @@ def build_parser() -> argparse.ArgumentParser:
     canonical_index = subparsers.add_parser(
         "indice-canonico",
         help="Reconcilia partidas entre fontes e cria o indice canonico de jogos.",
+    )
+
+    rebuild_report = subparsers.add_parser(
+        "remontar-relatorio",
+        help="Remonta o relatorio final de um jogo a partir dos fragmentos atuais, sem recalcular nada.",
+    )
+    rebuild_report.add_argument(
+        "match_id",
+        help="match_id canonico do jogo (ex: copa_2026_jogo_010).",
     )
 
     subparsers.add_parser(
@@ -218,6 +232,9 @@ def main() -> None:
     elif args.command == "espn":
         result = run_espn_pipeline()
         _print_result(result)
+    elif args.command == "espn-elencos":
+        result = run_espn_rosters_pipeline()
+        _print_result(result)
     elif args.command in {"status-torneio", "tournament-status"}:
         result = run_tournament_status(source=args.source)
         _print_result(result)
@@ -226,6 +243,9 @@ def main() -> None:
         _print_result(result)
     elif args.command == "indice-canonico":
         result = run_canonical_index()
+        _print_result(result)
+    elif args.command == "remontar-relatorio":
+        result = rebuild_match_report(args.match_id)
         _print_result(result)
     elif args.command == "scores":
         result = run_scores_pipeline()
