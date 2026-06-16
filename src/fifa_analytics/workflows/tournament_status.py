@@ -33,7 +33,7 @@ def run_tournament_status(source: str = "canonical") -> dict[str, Path | str | i
     standings = read_dataframe(standings_path) if standings_path.exists() else pd.DataFrame()
     status = build_tournament_status(matches)
 
-    status_path = write_dataframe(MANIFESTS_DIR / "tournament_status.parquet", status)
+    status_path = write_dataframe(GOLD_DIR / "tournament_status" / "tournament_status.parquet", status)
     ensure_dir(TOURNAMENT_REPORTS_DIR)
 
     status_report_path = TOURNAMENT_REPORTS_DIR / "status.md"
