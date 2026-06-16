@@ -1892,13 +1892,13 @@ Levantado em 2026-06-16 após revisão completa do repositório. Organizado por 
 - [ ] **`analytics/standings.py` é re-export inútil** — apenas reexporta `calculate_group_standings` de `transforms/standings.py`; remover o arquivo e ajustar imports nos workflows que o usam
 - [ ] **`slugify()` duplicada** — definida em `analytics/scores.py` e reimportada em `canonical_reports.py`; mover para `utils/` e atualizar todos os imports
 - [ ] **URLs hardcoded nos módulos de fontes** — `worldcup2026.py` e `espn.py` têm `BASE_URL` hardcoded; deveriam ler de `config/sources.yaml` via `load_config()`
-- [ ] **`config/pipeline.yaml` não é carregado** — arquivo bem estruturado mas ignorado pelo código; usar em `cli.py` para defaults globais (status válidos, run_scope, timezone)
-- [ ] **`efficiency.py` trivial** — `goals_per_shot()` é uma linha de fórmula; mover para `utils/` ou absorver em `analytics/scores.py` e remover o arquivo
+- [x] **`config/pipeline.yaml` não é carregado** — arquivo bem estruturado mas ignorado pelo código; usar em `cli.py` para defaults globais (status válidos, run_scope, timezone)
+- [x] **`efficiency.py` trivial** — `goals_per_shot()` é uma linha de fórmula; mover para `utils/` ou absorver em `analytics/scores.py` e remover o arquivo
 
 ### Validação e schemas (falta de contrato real)
 
-- [ ] **`schemas/*.yaml` são decorativos** — `load_schema()` existe em `config.py` mas nunca é chamado; implementar validação real via `validation/schemas.py` usando os schemas YAML para verificar colunas obrigatórias nos DataFrames antes de salvar em silver/gold
-- [ ] **`validate_required_columns()` em `validation/schemas.py` está vazia** — implementar com base nos schemas YAML
+- [x] **`schemas/*.yaml` são decorativos** — `load_schema()` existe em `config.py` mas nunca é chamado; implementar validação real via `validation/schemas.py` usando os schemas YAML para verificar colunas obrigatórias nos DataFrames antes de salvar em silver/gold
+- [x] **`validate_required_columns()` em `validation/schemas.py` está vazia** — implementar com base nos schemas YAML
 
 ### Sources stubs (confusão de leitura)
 

@@ -1,5 +1,6 @@
 import argparse
 
+from fifa_analytics.config import load_config
 from fifa_analytics.workflows.sample_pipeline import run_sample_pipeline
 from fifa_analytics.workflows.basic_reports import run_basic_reports
 from fifa_analytics.workflows.canonical_reports import run_canonical_index
@@ -96,7 +97,18 @@ LABELS = {
 }
 
 
+def _pipeline_defaults() -> dict:
+    try:
+        return load_config("pipeline.yaml").get("defaults", {})
+    except Exception:
+        return {}
+
+
 def build_parser() -> argparse.ArgumentParser:
+    defaults = _pipeline_defaults()
+    default_source = defaults.get("source", "canonical")
+    default_status = defaults.get("match_status_filter", "finalizado")
+
     parser = argparse.ArgumentParser(prog="fifa_analytics")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -137,8 +149,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tournament_status.add_argument(
         "--source",
-        default="canonical",
-        help="Fonte de dados a usar. Padrao: canonical.",
+        default=default_source,
+        help=f"Fonte de dados a usar. Padrao: {default_source}.",
     )
 
     basic_reports = subparsers.add_parser(
@@ -147,13 +159,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     basic_reports.add_argument(
         "--fonte",
-        default="canonical",
-        help="Fonte de dados a usar. Para relatorios finais, use canonical. Padrao: canonical.",
+        default=default_source,
+        help=f"Fonte de dados a usar. Para relatorios finais, use canonical. Padrao: {default_source}.",
     )
     basic_reports.add_argument(
         "--status",
-        default="finalizado",
-        help="Status das partidas a processar. Use 'todos' para processar todas.",
+        default=default_status,
+        help=f"Status das partidas a processar. Use 'todos' para processar todas. Padrao: {default_status}.",
     )
 
     canonical_index = subparsers.add_parser(
@@ -183,8 +195,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     update.add_argument(
         "--status",
-        default="finalizado",
-        help="Status das partidas a gerar nos relatorios. Padrao: finalizado.",
+        default=default_status,
+        help=f"Status das partidas a gerar nos relatorios. Padrao: {default_status}.",
     )
 
     return parser

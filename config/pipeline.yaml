@@ -4,11 +4,12 @@ competition:
   total_matches: 104
 
 defaults:
-  source: worldcup2026
+  source: canonical
   run_scope: single_match
   timezone: UTC
   write_outputs: true
   force_refresh: false
+  match_status_filter: finalizado
 
 statuses:
   match:

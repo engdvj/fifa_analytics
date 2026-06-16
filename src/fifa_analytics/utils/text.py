@@ -13,3 +13,11 @@ def slugify(value: Any) -> str:
     text = text.lower()
     text = re.sub(r"[^a-z0-9]+", "_", text)
     return re.sub(r"_+", "_", text).strip("_") or "sem_nome"
+
+
+def goals_per_shot(goals: int | float | None, shots: int | float | None) -> float | None:
+    if shots in (None, 0):
+        return None
+    if goals is None:
+        return None
+    return float(goals) / float(shots)
