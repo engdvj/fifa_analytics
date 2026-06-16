@@ -12,14 +12,27 @@ from fifa_analytics.utils.text import slugify
 # Defesa vale mais que ataque: um gol sofrido é mais difícil de recuperar
 # do que um gol marcado. Eficiência mede qualidade do ataque, não volume.
 # Controle é estilo de jogo — mantido com peso baixo, não é determinante.
+# Força relativa: contextualiza resultado/ataque pela qualidade do adversário
+# (vencer a Alemanha valoriza mais que vencer Curaçao) — sem isso, uma goleada
+# contra um time fraco e contra um time forte pesam exatamente igual.
 # ---------------------------------------------------------------------------
 TEAM_SCORE_WEIGHTS = {
-    "score_resultado": 0.40,
-    "score_ataque": 0.20,
-    "score_defesa": 0.25,
+    "score_resultado": 0.35,
+    "score_ataque": 0.15,
+    "score_defesa": 0.20,
     "score_eficiencia": 0.10,
     "score_controle": 0.05,
+    "score_forca_relativa": 0.15,
 }
+
+# Elo inicial neutro para todas as seleções — não há ranking FIFA oficial
+# integrado ainda, então o ponto de partida é igual para todos e a diferenciação
+# emerge só dos resultados do próprio torneio.
+ELO_INITIAL_RATING = 1500.0
+# K-factor base: mais alto que o usado em ligas longas (ex: xadrez usa K~20-32)
+# porque o torneio tem só 3-7 jogos por time — cada resultado precisa pesar
+# mais para o rating se diferenciar dentro de uma amostra tão pequena.
+ELO_K_FACTOR = 40.0
 
 # Posições ESPN → perfil interno
 # Inclui tanto os códigos padrão (GK, CB...) quanto os que aparecem nos dados reais
@@ -48,7 +61,12 @@ _POSITION_TO_PROFILE: dict[str, str] = {
 # Features por partida — seleções
 # ---------------------------------------------------------------------------
 
-def build_team_match_features(matches: pd.DataFrame, team_stats: pd.DataFrame | None = None) -> pd.DataFrame:
+def build_team_match_features(
+    matches: pd.DataFrame,
+    team_stats: pd.DataFrame | None = None,
+    events: pd.DataFrame | None = None,
+    lineups: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     finished = matches[matches["status"] == "finalizado"].copy()
     rows = []
     for _, match in finished.iterrows():
@@ -91,13 +109,36 @@ def build_team_match_features(matches: pd.DataFrame, team_stats: pd.DataFrame | 
     features["points"] = features["result"].map({"vitoria": 3, "empate": 1, "derrota": 0}).fillna(0).astype(int)
     features["clean_sheet"] = (features["goals_against"].fillna(0) == 0).astype(int)
 
-    opponent_stats = features[["match_id", "team", "shots", "shots_on_target"]].rename(columns={
+    # Estatísticas do adversário NESSA MESMA PARTIDA (não o score geral dele,
+    # que ainda nem foi calculado e seria circular) — usado para contextualizar
+    # ataque/defesa/eficiência/controle pela criação real do rival naquele
+    # jogo: segurar 0 gols contra um time que criou muito vale mais do que
+    # contra um time que praticamente não chegou ao ataque.
+    opponent_stats = features[["match_id", "team", "shots", "shots_on_target", "possession", "passes"]].rename(columns={
         "team": "opponent",
         "shots": "shots_against",
         "shots_on_target": "shots_on_target_against",
+        "possession": "possession_against",
+        "passes": "passes_against",
     })
     features = features.merge(opponent_stats, on=["match_id", "opponent"], how="left")
     features["opponent_stats_available"] = features[["shots_against", "shots_on_target_against"]].notna().any(axis=1)
+
+    # Fator de inferioridade numérica: quanto do jogo o time jogou com menos
+    # jogadores em campo por expulsão. Calculado a partir dos eventos de
+    # cartão vermelho com minuto — expulsão aos 49' pesa muito mais do que
+    # aos 90+2'. O adversário recebe o fator inverso (jogar contra 9 é vantagem).
+    disadvantage = _numerical_disadvantage_factor(events, features["match_id"].unique())
+    features = features.merge(disadvantage, on=["match_id", "team"], how="left")
+    features["disadvantage_factor"] = features["disadvantage_factor"].fillna(0.0)
+
+    if lineups is not None and not lineups.empty and "formation" in lineups.columns:
+        formation_by_match_team = (
+            lineups[lineups["formation"].notna()][["match_id", "team", "formation"]]
+            .drop_duplicates(["match_id", "team"])
+        )
+        features = features.merge(formation_by_match_team, on=["match_id", "team"], how="left")
+
     features["team_slug"] = features["team"].apply(slugify)
     return features.sort_values(["date", "match_id", "home_away"]).reset_index(drop=True)
 
@@ -161,6 +202,122 @@ def build_team_recent_form(team_match_features: pd.DataFrame, n: int = 5) -> pd.
     return result.sort_values("forma_aproveitamento", ascending=False).reset_index(drop=True)
 
 
+def calculate_elo_ratings(team_match_features: pd.DataFrame) -> pd.DataFrame:
+    """Rating Elo por seleção, com multiplicador de margem de gols.
+
+    Cada jogo do torneio é processado em ordem cronológica (cada partida afeta
+    os dois times ao mesmo tempo, por isso não dá para calcular por time
+    isolado). Vencer um adversário forte vale mais que vencer um fraco —
+    o termo `expected` da fórmula reflete a diferença de rating ANTES do jogo,
+    então uma goleada contra um time de rating baixo move pouco o rating de
+    quem já era favorito, e vencer um favorito move muito o rating do azarão.
+
+    Margem de gols: K efetivo cresce com ln(saldo_gols + 1) — o mesmo
+    princípio usado em ratings públicos de futebol (ex: FiveThirtyEight SPI).
+    Sem isso, 7x1 e 1x0 contra o mesmo adversário ajustariam o rating igual,
+    o que não capturaria "essa goleada justifica-se".
+
+    O resultado real (V/E/D pelo placar) decide qual FAIXA de `score_a` se
+    aplica — vitória sempre acima de empate, empate sempre acima de derrota,
+    a hierarquia nunca se inverte. Mas dentro de cada faixa, a posição exata
+    vem do índice de desempenho (gols + chutes no alvo + posse): uma vitória
+    sofrida (ganhou jogando pior que o adversário) fica perto do piso da
+    faixa de vitória, uma vitória dominante fica perto do teto — o mesmo
+    valendo para empates (dominado vs. equilibrado) e derrotas. Antes, só
+    o empate usava o desempenho para definir direção; vitória e derrota só
+    usavam `abs(diferença)` como magnitude simétrica, então uma vitória
+    sofrida e uma vitória dominante com a mesma margem de gols geravam o
+    mesmo ajuste — o que contradizia o princípio de que estatística sempre
+    deve contar, não só quando o resultado é ambíguo.
+
+    As três faixas (derrota=[0, 1/3], empate=[1/3, 2/3], vitória=[2/3, 1])
+    têm a mesma largura e nunca se tocam, preservando a hierarquia estrita.
+    Dentro da faixa, `performance_share_a` (participação de A no desempenho
+    total do jogo) interpola a posição exata — não há peso arbitrário
+    separando "resultado" de "desempenho": o desempenho nunca decide quem
+    ganhou (isso é sempre o placar real), só onde dentro da faixa correta
+    o ajuste cai.
+    """
+    if team_match_features.empty or "match_id" not in team_match_features.columns:
+        return pd.DataFrame(columns=["team", "elo_rating"])
+
+    ratings, _ = _run_elo_simulation(team_match_features)
+    return pd.DataFrame({"team": list(ratings.keys()), "elo_rating": list(ratings.values())})
+
+
+def calculate_pre_match_opponent_elo(team_match_features: pd.DataFrame) -> pd.DataFrame:
+    """Rating Elo do ADVERSÁRIO no momento de cada jogo (antes do próprio jogo
+    rodar) — usado para ponderar o aproveitamento de pontos em `score_resultado`.
+    Empatar com um time que já provou ser forte (rating alto na hora do jogo)
+    deveria valer mais que empatar com um time fraco; hoje o aproveitamento
+    trata os dois empates como idênticos (33.3%), o que gera o "salto
+    drástico" entre vitória/empate/derrota que ignora quem era o rival.
+    """
+    if team_match_features.empty or "match_id" not in team_match_features.columns:
+        return pd.DataFrame(columns=["match_id", "team", "opponent_elo_pre_match"])
+    _, pre_match_log = _run_elo_simulation(team_match_features)
+    return pd.DataFrame(pre_match_log)
+
+
+def _run_elo_simulation(team_match_features: pd.DataFrame) -> tuple[dict[str, float], list[dict[str, Any]]]:
+    """Roda a simulação de Elo uma única vez, retornando o rating final por
+    time E o log de rating do adversário pré-jogo em cada partida — evita
+    duplicar a lógica entre `calculate_elo_ratings` (rating final) e
+    `calculate_pre_match_opponent_elo` (rating no momento do jogo)."""
+    ratings: dict[str, float] = {}
+    pre_match_log: list[dict[str, Any]] = []
+    sort_col = "date" if "date" in team_match_features.columns else "match_id"
+    games_by_match = team_match_features.sort_values(sort_col).groupby("match_id", sort=False)
+
+    for match_id, game in games_by_match:
+        if len(game) != 2:
+            continue
+        a, b = game.iloc[0], game.iloc[1]
+        team_a, team_b = str(a["team"]), str(b["team"])
+        rating_a = ratings.setdefault(team_a, ELO_INITIAL_RATING)
+        rating_b = ratings.setdefault(team_b, ELO_INITIAL_RATING)
+
+        pre_match_log.append({"match_id": match_id, "team": team_a, "opponent_elo_pre_match": rating_b})
+        pre_match_log.append({"match_id": match_id, "team": team_b, "opponent_elo_pre_match": rating_a})
+
+        goals_a = float(a.get("goals_for", 0) or 0)
+        goals_b = float(b.get("goals_for", 0) or 0)
+        perf_a, perf_b = _performance_index(a), _performance_index(b)
+        # participação de A no desempenho total do jogo — 0.5 quando os dois
+        # times tiveram desempenho idêntico, desvia para os lados conforme
+        # o domínio real (chutes, posse, gols) de cada um.
+        performance_share_a = perf_a / (perf_a + perf_b) if (perf_a + perf_b) > 0 else 0.5
+
+        if goals_a > goals_b:
+            band_low, band_high = 2 / 3, 1.0
+        elif goals_a < goals_b:
+            band_low, band_high = 0.0, 1 / 3
+        else:
+            band_low, band_high = 1 / 3, 2 / 3
+        score_a = band_low + (band_high - band_low) * performance_share_a
+
+        performance_diff = abs(perf_a - perf_b)
+        expected_a = 1.0 / (1.0 + 10 ** ((rating_b - rating_a) / 400.0))
+        margin_multiplier = np.log(performance_diff + 1) + 1
+        delta = ELO_K_FACTOR * margin_multiplier * (score_a - expected_a)
+
+        ratings[team_a] = rating_a + delta
+        ratings[team_b] = rating_b - delta
+
+    return ratings, pre_match_log
+
+
+def _performance_index(game: pd.Series) -> float:
+    """Índice de desempenho de um time numa partida — combina gols (peso
+    maior, é o que decide o jogo), chutes no alvo (volume de chances criadas)
+    e posse (controle de jogo). Usado só para calibrar a MARGEM do ajuste de
+    Elo, nunca para decidir quem ganhou — isso é sempre o placar real."""
+    goals = float(game.get("goals_for", 0) or 0)
+    shots_on_target = float(game.get("shots_on_target", 0) or 0)
+    possession = float(game.get("possession", 0) or 0)
+    return goals * 3.0 + shots_on_target * 0.5 + possession * 0.05
+
+
 # ---------------------------------------------------------------------------
 # Score de seleções
 # ---------------------------------------------------------------------------
@@ -186,6 +343,7 @@ def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
         "saves": "sum",
         "yellow_cards": "sum",
         "red_cards": "sum",
+        "disadvantage_factor": "mean",
         "clean_sheet": "sum",
         "shots_against": "sum",
         "shots_on_target_against": "sum",
@@ -233,6 +391,20 @@ def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
     scores["chutes_sofridos_por_jogo"] = _safe_divide(scores["chutes_sofridos"], scores["jogos"])
     scores["chutes_no_alvo_sofridos_por_jogo"] = _safe_divide(scores["chutes_no_alvo_sofridos"], scores["jogos"])
 
+    # --- Contexto do adversário por jogo (sem circularidade) ---
+    # Segurar 0 gols contra um time que criou muito (chutes, posse, passes)
+    # naquela partida especifica vale mais do que contra um time que quase
+    # nao chegou ao ataque — e furar uma defesa que praticamente nao sofreu
+    # chutes em nenhum outro jogo (do adversario) vale mais do que furar uma
+    # que sofre sempre. Usa as estatisticas REAIS do adversario NESSE jogo
+    # (shots_against, possession_against, etc, já calculadas em
+    # build_team_match_features), não o score geral dele — isso evitaria a
+    # circularidade de precisar do score do adversário antes dele existir.
+    context_features = _opponent_context_multiplier(team_match_features)
+    scores = scores.merge(context_features, on="team", how="left")
+    for col in ["ataque_ctx", "defesa_ctx", "eficiencia_ctx", "controle_ctx"]:
+        scores[col] = scores[col].fillna(1.0)
+
     # --- Estatísticas robustas por jogo (mediana, consistência, tendência) ---
     # Médias/somas acumuladas escondem outliers (uma goleada de 7x1 infla a
     # média de gols tanto quanto 7 jogos de 1x0 cada) e não dizem nada sobre
@@ -242,39 +414,102 @@ def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
     per_game_stats = _team_per_game_distribution(team_match_features)
     scores = scores.merge(per_game_stats, on="team", how="left")
 
+    # --- Forca relativa (Elo com margem de gols) ---
+    elo_ratings = calculate_elo_ratings(team_match_features)
+    scores = scores.merge(elo_ratings, on="team", how="left")
+    scores["elo_rating"] = scores["elo_rating"].fillna(ELO_INITIAL_RATING)
+
+    # --- Aproveitamento ponderado pela força do adversário no momento do jogo ---
+    # Sem isso, empatar com a Alemanha e empatar com Curaçao valem exatamente
+    # os mesmos 33,3% de aproveitamento — o "salto drástico" entre vitória/
+    # empate/derrota (~80/~47/~33 hoje) ignora completamente quem era o
+    # rival. Usa o Elo do adversário ANTES daquele jogo (não o Elo final dele,
+    # que incluiria resultados futuros que ainda não existiam no momento).
+    pre_match_elo = calculate_pre_match_opponent_elo(team_match_features)
+    weighted_aproveitamento = _weighted_aproveitamento_by_opponent(team_match_features, pre_match_elo)
+    scores = scores.merge(weighted_aproveitamento, on="team", how="left")
+    scores["aproveitamento_ponderado"] = scores["aproveitamento_ponderado"].fillna(scores["aproveitamento"])
+
     # --- Componentes via z-score (preserva distância absoluta entre times) ---
-    # score_resultado: aproveitamento (pontos) domina; saldo de gols por jogo quebra
-    # empates dentro da mesma faixa sem inverter a hierarquia vitória > empate > derrota.
-    # Aproveitamento é normalizado para 0-100 antes de combinar com saldo normalizado.
-    _aprov_norm = _zscore_to_100(scores["aproveitamento"])
+    # score_resultado: aproveitamento PONDERADO pelo adversário domina; saldo
+    # de gols por jogo quebra empates dentro da mesma faixa sem inverter a
+    # hierarquia vitória > empate > derrota (o ajuste de adversário também
+    # nunca inverte essa hierarquia — só reposiciona dentro do que o placar
+    # real já estabeleceu, mesmo princípio do Elo com faixas).
+    _aprov_norm = _zscore_to_100(scores["aproveitamento_ponderado"])
     _saldo_norm = _zscore_to_100(scores["saldo_gols"] / scores["jogos"].clip(lower=1))
     scores["score_resultado"] = (_aprov_norm * 0.85 + _saldo_norm * 0.15).clip(0, 100).round(1)
 
     # score_ataque: volume ofensivo de qualidade (chutes no alvo + gols, sem chutes totais)
+    # Multiplicado pelo contexto do adversário ANTES do z-score: marcar contra
+    # quem criou muito volume de jogo (defesa provavelmente mais testada,
+    # adversário mais presente) conta mais do que contra quem praticamente
+    # não jogou.
     scores["score_ataque"] = _mean_score([
-        _zscore_to_100(scores["gols_por_jogo"]),
-        _zscore_to_100(scores["chutes_no_alvo_por_jogo"]),
+        _zscore_to_100(scores["gols_por_jogo"] * scores["ataque_ctx"]),
+        _zscore_to_100(scores["chutes_no_alvo_por_jogo"] * scores["ataque_ctx"]),
     ])
 
-    # score_defesa: solidez defensiva
-    scores["score_defesa"] = _mean_score([
-        _zscore_to_100(scores["gols_contra_por_jogo"], lower_is_better=True),
-        _zscore_to_100(scores["chutes_no_alvo_sofridos_por_jogo"], lower_is_better=True),
-        _zscore_to_100(scores["clean_sheet_rate"]),
+    # score_defesa: solidez defensiva — segurar adversário que criou muito
+    # volume vale mais do que segurar quem quase não chegou ao ataque.
+    _defesa_raw = _mean_score([
+        _zscore_to_100(scores["gols_contra_por_jogo"] / scores["defesa_ctx"], lower_is_better=True),
+        _zscore_to_100(scores["chutes_no_alvo_sofridos_por_jogo"] / scores["defesa_ctx"], lower_is_better=True),
+        _zscore_to_100(scores["clean_sheet_rate"] * scores["defesa_ctx"]),
     ])
+    # Defesa pouco testada (adversário criou pouco volume — defesa_ctx baixo)
+    # não é o mesmo que defesa sólida sob pressão: sem ser testada, não há
+    # evidência suficiente do mérito defensivo, então o score é atraído para
+    # o neutro (50) proporcionalmente a quão pouco foi testada — mesmo
+    # princípio do _apply_confidence já usado para jogadores com poucos jogos,
+    # aqui aplicado a "poucos chutes sofridos por dominar o jogo", não a
+    # poucos jogos disputados.
+    scores["score_defesa"] = _apply_confidence(_defesa_raw, scores["defesa_ctx"].clip(upper=1.0))
 
-    # score_eficiencia: qualidade do ataque (conversão, não volume)
+    # score_eficiencia: qualidade do ataque (conversão, não volume).
+    # eficiencia_resultado: gols/chute no alvo ponderado pelo aproveitamento —
+    # converter bem e perder não é eficiência real; o resultado contextualiza
+    # se a conversão técnica se traduziu em vantagem concreta.
+    scores["eficiencia_resultado"] = scores["gols_por_chute"] * scores["aproveitamento"].clip(lower=0.1)
     scores["score_eficiencia"] = _mean_score([
-        _zscore_to_100(scores["gols_por_chute"]),
-        _zscore_to_100(scores["chutes_no_alvo_por_chute"]),
+        _zscore_to_100(scores["gols_por_chute"] * scores["eficiencia_ctx"]),
+        _zscore_to_100(scores["chutes_no_alvo_por_chute"] * scores["eficiencia_ctx"]),
+        _zscore_to_100(scores["eficiencia_resultado"]),
     ])
 
-    # score_controle: estilo de jogo — peso baixo, não determina qualidade
+    # score_controle: estilo de jogo — peso baixo, não determina qualidade.
+    # posse_produtiva penaliza posse estéril: ter a bola mas não chegar ao alvo
+    # (ex: Turquia 71% posse perdeu 0x2, Espanha 74% posse empatou 0x0) não é
+    # controle de qualidade — é só que o adversário deixou a bola passar.
+    scores["posse_produtiva"] = _safe_divide(scores["chutes_no_alvo_por_jogo"], scores["posse_media"])
     scores["score_controle"] = _mean_score([
-        _zscore_to_100(scores["posse_media"]),
-        _zscore_to_100(scores["passes_por_jogo"]),
-        _zscore_to_100(scores["precisao_passes_media"]),
+        _zscore_to_100(scores["posse_media"] * scores["controle_ctx"]),
+        _zscore_to_100(scores["passes_por_jogo"] * scores["controle_ctx"]),
+        _zscore_to_100(scores["precisao_passes_media"] * scores["controle_ctx"]),
+        _zscore_to_100(scores["posse_produtiva"]),
     ])
+
+    # score_forca_relativa: contextualiza o resultado pela qualidade do
+    # adversário enfrentado — vencer a Alemanha vale mais que vencer Curaçao.
+    # Único componente que não é "por jogo" isolado: o Elo acumula o efeito
+    # de toda a sequência de jogos do time (quem jogou, em que ordem, com
+    # que margem), por isso o z-score aqui mede força relativa acumulada,
+    # não uma média simples como os outros componentes.
+    scores["score_forca_relativa"] = _zscore_to_100(scores["elo_rating"]).round(1)
+
+    # score_disciplina: índice de violência — faltas e cartões por jogo.
+    # Nota alta = time disciplinado. Vermelho vale mais que amarelo (impacto
+    # imediato e irreversível no jogo). Não entra no score_geral — é informativo,
+    # não determinante de qualidade de jogo.
+    scores["vermelhos_por_jogo"] = _safe_divide(scores["vermelhos"], scores["jogos"])
+    _disc_faltas = _zscore_to_100(scores["faltas_por_jogo"], lower_is_better=True)
+    _disc_amarelos = _zscore_to_100(scores["amarelos_por_jogo"], lower_is_better=True)
+    _disc_vermelhos = _zscore_to_100(scores["vermelhos_por_jogo"], lower_is_better=True)
+    scores["score_disciplina"] = _mean_score([
+        _disc_faltas * 0.3,
+        _disc_amarelos * 0.3,
+        _disc_vermelhos * 0.4,
+    ]) / 0.3  # reescala para manter 0-100 após ponderação
 
     # score_geral composto
     scores["score_geral"] = _weighted_score(scores, TEAM_SCORE_WEIGHTS)
@@ -291,6 +526,7 @@ def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
     scores = _add_rank(scores, "score_ataque", "ranking_ataque")
     scores = _add_rank(scores, "score_defesa", "ranking_defesa")
     scores = _add_rank(scores, "score_eficiencia", "ranking_eficiencia")
+    scores = _add_rank(scores, "score_disciplina", "ranking_disciplina")
 
     score_cols = [c for c in scores.columns if c.startswith("score_")]
     scores[score_cols] = scores[score_cols].round(1)
@@ -481,6 +717,142 @@ def _team_per_game_distribution(team_match_features: pd.DataFrame) -> pd.DataFra
     return pd.DataFrame(rows)
 
 
+def _weighted_aproveitamento_by_opponent(team_match_features: pd.DataFrame, pre_match_elo: pd.DataFrame) -> pd.DataFrame:
+    """Aproveitamento de pontos por jogo, ponderado pelo rating Elo do
+    adversário NO MOMENTO daquele jogo (antes do resultado dele mesmo
+    influenciar o rating). Pontos contra adversário acima da média do
+    rating valem mais que pontos contra adversário abaixo da média —
+    empatar com a Alemanha não fica mais idêntico a empatar com Curaçao.
+
+    O ajuste só reposiciona o valor DENTRO do que o resultado real (V/E/D)
+    já decidiu, nunca inverte a hierarquia entre jogos com placares
+    diferentes — mesmo princípio do Elo com faixas: o placar decide o que
+    aconteceu, o contexto só pesa o quanto isso vale.
+    """
+    if team_match_features.empty or pre_match_elo.empty:
+        return pd.DataFrame(columns=["team", "aproveitamento_ponderado"])
+
+    games = team_match_features.merge(pre_match_elo, on=["match_id", "team"], how="left")
+    games["opponent_elo_pre_match"] = games["opponent_elo_pre_match"].fillna(ELO_INITIAL_RATING)
+    games["points"] = pd.to_numeric(games.get("points", 0), errors="coerce").fillna(0)
+
+    league_avg_elo = games["opponent_elo_pre_match"].mean() or ELO_INITIAL_RATING
+    # peso relativo do adversário: >1 se mais forte que a média do torneio
+    # na hora do jogo, <1 se mais fraco. Clip evita que um Elo muito
+    # destoante (extremos do torneio) gere peso desproporcional.
+    games["_opponent_weight"] = (games["opponent_elo_pre_match"] / league_avg_elo).clip(0.7, 1.3)
+    games["_weighted_points"] = (games["points"] / 3.0) * games["_opponent_weight"]
+
+    by_team = games.groupby("team", dropna=False)["_weighted_points"].mean().reset_index()
+    return by_team.rename(columns={"_weighted_points": "aproveitamento_ponderado"})
+
+
+def _opponent_context_multiplier(team_match_features: pd.DataFrame) -> pd.DataFrame:
+    """Multiplicador de contexto por time (média entre os jogos disputados),
+    baseado em estatísticas REAIS do adversário em cada partida — não o
+    score geral dele, que seria circular (precisaria do score do adversário
+    antes de existir o do time, e vice-versa).
+
+    Dois multiplicadores distintos, não um único reaproveitado:
+
+    - `defesa_ctx`: volume ofensivo que o adversário teve NESSE jogo (chutes,
+      posse). Segurar um adversário que pressionou muito vale mais do que
+      segurar quem quase não chegou ao ataque — não depende de o adversário
+      ter convertido ou não, só de ter criado volume.
+
+    - `ataque_ctx` (e eficiência/controle): quão bem o adversário defendeu
+      EM MÉDIA NOS OUTROS JOGOS DELE (gols/chutes no alvo sofridos por jogo,
+      olhando só partidas anteriores à atual). Marcar contra um adversário
+      historicamente sólido vale mais do que contra um que sofre sempre.
+      Por isso fica neutro (1.0) no 1º jogo de cada adversário — ainda não
+      há "outros jogos dele" para medir solidez defensiva real, e usar
+      volume bruto dele nesse mesmo jogo seria o erro identificado: um
+      adversário que domina posse mas não converte (ex: Turquia 71% posse,
+      perdeu 0x2) não torna o ATAQUE do rival mais impressionante, só
+      mostra que a DEFESA do rival aguentou pressão.
+    """
+    empty_cols = ["team", "ataque_ctx", "defesa_ctx", "eficiencia_ctx", "controle_ctx"]
+    if team_match_features.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    games = team_match_features.copy()
+    for col in ["shots_against", "shots_on_target_against", "possession_against", "goals_against", "shots_on_target"]:
+        if col not in games.columns:
+            games[col] = 0
+        games[col] = pd.to_numeric(games[col], errors="coerce").fillna(0)
+
+    # --- defesa_ctx: volume ofensivo do adversário NESSE jogo (sem olhar histórico) ---
+    games["_opponent_volume"] = games["shots_on_target_against"] * 0.5 + games["possession_against"] * 0.05 + games["shots_against"] * 0.1
+    volume_mean = games["_opponent_volume"].mean()
+    if not volume_mean or pd.isna(volume_mean):
+        games["defesa_ctx"] = 1.0
+    else:
+        games["defesa_ctx"] = (games["_opponent_volume"] / volume_mean).clip(0.5, 1.5)
+
+    # --- ataque_ctx: solidez defensiva HISTÓRICA do adversário (jogos
+    # anteriores dele, não esse jogo) — evita confundir "dominou sem
+    # converter" com "defesa fraca que torna o gol mais fácil". Processa por
+    # PARTIDA (não por linha) para nunca deixar o gol sofrido de um time
+    # nessa mesma partida contaminar o histórico consultado pelo adversário
+    # dentro do próprio jogo — mesma armadilha que o Elo evita processando
+    # match_id por vez antes de atualizar os ratings dos dois lados.
+    sort_col = "date" if "date" in games.columns else "match_id"
+    league_avg_conceded = pd.to_numeric(games["goals_against"], errors="coerce").fillna(0).mean() or 1.0
+    defensive_history: dict[str, list[float]] = {}
+    attack_ctx_by_index: dict[int, float] = {}
+    games_by_match = games.sort_values(sort_col).groupby("match_id", sort=False)
+    for _, match_rows in games_by_match:
+        for idx, row in match_rows.iterrows():
+            opponent = str(row.get("opponent"))
+            history = defensive_history.get(opponent, [])
+            if history:
+                opponent_avg_conceded = sum(history) / len(history)
+                attack_ctx_by_index[idx] = float((league_avg_conceded / opponent_avg_conceded) if opponent_avg_conceded > 0 else 1.5)
+            else:
+                attack_ctx_by_index[idx] = 1.0  # sem histórico do adversário ainda — neutro
+        # só depois de calcular o contexto dos DOIS lados dessa partida,
+        # atualiza o histórico defensivo de cada time com o que sofreu aqui.
+        for _, row in match_rows.iterrows():
+            team = str(row.get("team"))
+            team_history = defensive_history.setdefault(team, [])
+            team_history.append(float(row.get("goals_against", 0) or 0))
+    games["ataque_ctx"] = pd.Series(attack_ctx_by_index).reindex(games.index).clip(0.5, 1.5)
+    games["eficiencia_ctx"] = games["ataque_ctx"]
+    games["controle_ctx"] = games["ataque_ctx"]
+
+    # Ajuste de inferioridade/superioridade numérica — condicional ao resultado:
+    # - perdeu em inferioridade (ex: África do Sul 0x2 com 9) → reduz peso
+    #   (resultado esperado, pouca evidência sobre a qualidade real do time)
+    # - ganhou em inferioridade (ex: 10 contra 11 e venceu) → aumenta peso
+    #   (resultado improvável, forte evidência de qualidade tática)
+    # - ganhou em superioridade (ex: México 2x0 contra 9) → reduz peso
+    #   (resultado esperado, pouca evidência — vencer com 11 contra 9 é o mínimo)
+    # - perdeu/empatou em superioridade → sem ajuste (já é penalizado pelo resultado)
+    if "disadvantage_factor" in games.columns and "result" in games.columns:
+        disadv = pd.to_numeric(games["disadvantage_factor"], errors="coerce").fillna(0)
+        # fator do adversário: o quanto O OUTRO TIME jogou em inferioridade nesse jogo
+        opponent_disadv = (
+            games[["match_id", "team", "disadvantage_factor"]]
+            .rename(columns={"team": "opponent", "disadvantage_factor": "opponent_disadvantage_factor"})
+        )
+        games = games.merge(opponent_disadv, on=["match_id", "opponent"], how="left")
+        opp_disadv = pd.to_numeric(games["opponent_disadvantage_factor"], errors="coerce").fillna(0)
+
+        won = games["result"] == "vitoria"
+        lost = games["result"] == "derrota"
+        # própria inferioridade: bônus se ganhou, penalidade se perdeu
+        own_bonus = 1.0 + disadv * 0.4 * won.astype(float)
+        own_penalty = 1.0 - disadv * 0.4 * lost.astype(float)
+        # superioridade sobre o adversário: penaliza quem ganhou jogando com 11 contra menos
+        superiority_penalty = 1.0 - opp_disadv * 0.3 * won.astype(float)
+        adjustment = own_bonus * own_penalty * superiority_penalty
+        for col in ["ataque_ctx", "defesa_ctx", "eficiencia_ctx", "controle_ctx"]:
+            games[col] = (games[col] * adjustment).clip(0.3, 2.0)
+
+    by_team = games.groupby("team", dropna=False)[["ataque_ctx", "defesa_ctx", "eficiencia_ctx", "controle_ctx"]].mean().reset_index()
+    return by_team
+
+
 def _zscore_to_100(values: pd.Series, lower_is_better: bool = False) -> pd.Series:
     """Converte série em score 0–100 via z-score, preservando distância absoluta.
 
@@ -593,21 +965,24 @@ def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
 
     Métricas e pesos por perfil (só o que existe nos dados ESPN Copa 2026):
 
-    Goleiro:  saves/jogo        peso 0.4
-              save%             peso 0.4  (saves / saves+gols_sofridos)
-              gols_sofridos/jogo peso 0.2 (lower_is_better)
+    Goleiro:  saves/jogo         peso 0.4
+              save%              peso 0.4  (saves / saves+gols_sofridos)
+              gols_sofridos/jogo peso 0.2  (lower_is_better)
 
-    Defensor: fouls_drawn/jogo  peso 0.5  (duelos ganhos, pressão)
-              shots_on_target/j peso 0.3  (chegada ao ataque)
-              fouls_committed/j peso 0.2  (lower — disciplina)
+    Defensor: fouls_drawn/jogo   peso 0.4  (duelos ganhos, pressão)
+              goals_conceded/j   peso 0.3  (lower — solidez defensiva)
+              shots_on_target/j  peso 0.2  (chegada ao ataque)
+              fouls_committed/j  peso 0.1  (lower — disciplina)
 
-    Meia:     goals+assists/jogo peso 0.5 (criação e finalização)
-              shots_on_target/j  peso 0.3 (chutes perigosos)
-              fouls_drawn/jogo   peso 0.2 (envolvimento — peso baixo)
+    Meia:     goals+assists/jogo peso 0.5  (criação e finalização)
+              shots_on_target/j  peso 0.2  (chutes perigosos)
+              total_shots/jogo   peso 0.1  (volume ofensivo)
+              fouls_drawn/jogo   peso 0.2  (envolvimento — peso baixo)
 
-    Atacante: goals/jogo         peso 0.5 (função principal)
-              assists/jogo        peso 0.3 (criação)
-              shots_on_target/j   peso 0.2 (pressão constante)
+    Atacante: goals/jogo         peso 0.5  (função principal)
+              assists/jogo       peso 0.2  (criação)
+              shots_on_target/j  peso 0.2  (pressão constante)
+              total_shots/jogo   peso 0.1  (volume ofensivo)
               — fouls_drawn excluído: ruidoso, não discrimina qualidade ofensiva
     """
     result = pd.Series(50.0, index=scores.index)
@@ -684,6 +1059,38 @@ def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
         result.loc[mask] = adjusted.values
 
     return result
+
+
+def _numerical_disadvantage_factor(
+    events: pd.DataFrame | None, match_ids: "np.ndarray"
+) -> pd.DataFrame:
+    """Fração do jogo que cada time jogou em inferioridade numérica por expulsão.
+
+    Retorna DataFrame com colunas [match_id, team, disadvantage_factor] onde
+    disadvantage_factor é a proporção de minutos jogados com menos jogadores
+    (0.0 = jogo completo com 11, 1.0 = expulsão no 1º minuto).
+
+    Expulsão no minuto M → time jogou (90 - M) / 90 minutos em inferioridade.
+    Múltiplas expulsões acumulam (ficou com 9: soma os dois intervalos).
+    O adversário recebe o fator invertido como bônus (jogar contra 9 é vantagem),
+    mas apenas nos scores de ataque/defesa via _opponent_context_multiplier.
+    """
+    empty = pd.DataFrame(columns=["match_id", "team", "disadvantage_factor"])
+    if events is None or events.empty:
+        return empty
+    reds = events[events["event_type"] == "cartao_vermelho"].copy()
+    if reds.empty:
+        return empty
+
+    reds["minute_num"] = pd.to_numeric(reds["minute"], errors="coerce").fillna(90)
+    reds["minute_num"] = reds["minute_num"].clip(1, 90)
+
+    rows = []
+    for (match_id, team), group in reds.groupby(["match_id", "team"]):
+        # cada expulsão contribui com (90 - minuto) / 90 de inferioridade
+        factor = float((90 - group["minute_num"]).clip(lower=0).sum() / 90)
+        rows.append({"match_id": match_id, "team": team, "disadvantage_factor": min(factor, 1.0)})
+    return pd.DataFrame(rows) if rows else empty
 
 
 def _score_acumulado(scores: pd.DataFrame) -> pd.Series:
