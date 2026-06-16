@@ -1909,7 +1909,7 @@ Levantado em 2026-06-16 após revisão completa do repositório. Organizado por 
 - [x] **Sem testes de CLI** — `cli.py` com 8 comandos não tem nenhum teste; cobrir ao menos argumentos inválidos e saída de ajuda
 - [x] **Sem testes de I/O real** — `utils/io.py` (write/read parquet, JSON, YAML) não tem testes; adicionar com `tmp_path` do pytest
 - [x] **Sem testes de integração** — nenhum teste executa um fluxo completo (ingest → canonical → report); adicionar ao menos um teste E2E com dados de sample
-- [ ] **Sem testes de edge cases em Wikipedia** — HTML quebrado, tabelas com formato inesperado, times com caracteres especiais
+- [x] **Sem testes de edge cases em Wikipedia** — HTML quebrado, tabelas com formato inesperado, times com caracteres especiais
 
 ### Dependências e packaging
 
@@ -1918,14 +1918,14 @@ Levantado em 2026-06-16 após revisão completa do repositório. Organizado por 
 
 ### README e documentação
 
-- [ ] **Exemplos de output do `amostra` usam nome temporal** — README mostra `mexico_africa_do_sul_2026_06_11` mas o match_id real é `copa_2026_jogo_001`; corrigir exemplos
-- [ ] **Seção "Limitações iniciais" vaga** — especificar quais fontes estão 100% operacionais (worldcup2026 ✅, espn ✅, wikipedia ✅ básico) e quais são stubs (fifa ❌, football_data ❌, balldontlie ❌)
-- [ ] **Falta seção de Troubleshooting** — o que fazer se ESPN cair, como reprocessar um jogo, como limpar cache parcial
+- [x] **Exemplos de output do `amostra` usam nome temporal** — README mostra `mexico_africa_do_sul_2026_06_11` mas o match_id real é `copa_2026_jogo_001`; corrigir exemplos
+- [x] **Seção "Limitações iniciais" vaga** — especificar quais fontes estão 100% operacionais (worldcup2026 ✅, espn ✅, wikipedia ✅ básico) e quais são stubs (fifa ❌, football_data ❌, balldontlie ❌)
+- [x] **Falta seção de Troubleshooting** — o que fazer se ESPN cair, como reprocessar um jogo, como limpar cache parcial
 
 ### Melhorias de qualidade (quando der)
 
 - [ ] **TLS bypass global em `worldcup2026.py`** — `urllib3.disable_warnings()` afeta toda a sessão; usar `verify=False` inline em `requests.get()` sem desabilitar warnings globalmente
-- [ ] **Type hints imprecisos em workflows** — varios retornam `dict[str, object]`; tipar com `dict[str, Path | str | int]` onde o retorno é conhecido
+- [x] **Type hints imprecisos em workflows** — varios retornam `dict[str, object]`; tipar com `dict[str, Path | str | int]` onde o retorno é conhecido
 
 ---
 
