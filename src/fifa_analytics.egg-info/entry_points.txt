@@ -1,0 +1,2 @@
+[console_scripts]
+fifa-analytics = fifa_analytics.cli:main

@@ -1,0 +1,232 @@
+import argparse
+
+from fifa_analytics.workflows.sample_pipeline import run_sample_pipeline
+from fifa_analytics.workflows.basic_reports import run_basic_reports
+from fifa_analytics.workflows.canonical_reports import run_canonical_index
+from fifa_analytics.workflows.espn_pipeline import run_espn_pipeline
+from fifa_analytics.workflows.scores_pipeline import run_scores_pipeline
+from fifa_analytics.workflows.tournament_status import run_tournament_status
+from fifa_analytics.workflows.update_pipeline import run_update_pipeline
+from fifa_analytics.workflows.wiki_pipeline import run_wikipedia_pipeline
+from fifa_analytics.workflows.worldcup2026_pipeline import run_worldcup2026_pipeline
+
+
+LABELS = {
+    "source": "fonte",
+    "match_id": "match_id",
+    "raw_dir": "diretorio_bruto",
+    "matches_path": "caminho_partidas",
+    "source_map_path": "caminho_mapa_fontes",
+    "events_path": "caminho_eventos",
+    "metadata_path": "caminho_metadados",
+    "teams_path": "caminho_selecoes",
+    "stadiums_path": "caminho_estadios",
+    "standings_path": "caminho_classificacao",
+    "external_standings_path": "caminho_classificacao_externa",
+    "calculated_standings_path": "caminho_classificacao_calculada",
+    "gold_events_path": "caminho_eventos_gold",
+    "team_stats_path": "caminho_estatisticas_selecoes",
+    "lineups_path": "caminho_escalacoes",
+    "player_stats_path": "caminho_estatisticas_jogadores",
+    "match_info_path": "caminho_info_partidas",
+    "commentary_path": "caminho_narracao",
+    "shots_path": "caminho_chutes",
+    "team_match_features_path": "caminho_features_selecoes_por_jogo",
+    "team_scores_path": "caminho_scores_selecoes",
+    "player_match_features_path": "caminho_features_jogadores_por_jogo",
+    "player_scores_path": "caminho_scores_jogadores",
+    "team_reports_dir": "diretorio_relatorios_selecoes",
+    "player_reports_dir": "diretorio_relatorios_jogadores",
+    "team_index_path": "caminho_indice_selecoes",
+    "player_index_path": "caminho_indice_jogadores",
+    "rankings_index_path": "caminho_indice_rankings",
+    "team_ranking_path": "caminho_ranking_selecoes",
+    "player_ranking_path": "caminho_ranking_jogadores",
+    "team_rankings": "rankings_selecoes",
+    "player_rankings": "rankings_jogadores",
+    "modo_atualizacao": "modo_atualizacao",
+    "status_relatorios": "status_relatorios",
+    "worldcup2026_status": "status_worldcup2026",
+    "worldcup2026_partidas": "partidas_worldcup2026",
+    "worldcup2026_eventos": "eventos_worldcup2026",
+    "espn_status": "status_espn",
+    "espn_partidas": "partidas_espn",
+    "espn_eventos": "eventos_espn",
+    "espn_estatisticas_selecoes": "estatisticas_selecoes_espn",
+    "espn_estatisticas_jogadores": "estatisticas_jogadores_espn",
+    "partidas_canonicas": "partidas_canonicas",
+    "partidas_processadas": "partidas_processadas",
+    "caminho_status_torneio": "caminho_status_torneio",
+    "caminho_rankings": "caminho_rankings",
+    "gold_team_stats_path": "caminho_estatisticas_selecoes_gold",
+    "gold_lineups_path": "caminho_escalacoes_gold",
+    "gold_player_stats_path": "caminho_estatisticas_jogadores_gold",
+    "gold_match_info_path": "caminho_info_partidas_gold",
+    "gold_commentary_path": "caminho_narracao_gold",
+    "gold_shots_path": "caminho_chutes_gold",
+    "gold_standings_path": "caminho_classificacao_gold",
+    "validation_path": "caminho_validacao",
+    "status_path": "caminho_status",
+    "status_report_path": "caminho_relatorio_status",
+    "standings_report_path": "caminho_relatorio_classificacao",
+    "missing_report_path": "caminho_relatorio_pendencias",
+    "report_path": "caminho_relatorio",
+    "manifest_path": "caminho_manifesto",
+    "report_status": "status_relatorio",
+    "matches": "partidas",
+    "source_links": "vinculos_fontes",
+    "events": "eventos",
+    "team_stats": "estatisticas_selecoes",
+    "lineups": "escalacoes",
+    "player_stats": "estatisticas_jogadores",
+    "match_info": "info_partidas",
+    "commentary": "narracao",
+    "shots": "chutes",
+    "relatorios_completos": "relatorios_completos",
+    "relatorios_parciais": "relatorios_parciais",
+    "relatorios_nao_iniciados": "relatorios_nao_iniciados",
+    "status_processado": "status_processado",
+    "partidas_encontradas": "partidas_encontradas",
+    "relatorios_gerados": "relatorios_gerados",
+    "primeiro_relatorio": "primeiro_relatorio",
+    "teams_ranked": "selecoes_ranqueadas",
+    "players_ranked": "jogadores_ranqueados",
+    "team_reports": "relatorios_selecoes",
+    "player_reports": "relatorios_jogadores",
+}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="fifa_analytics")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    sample = subparsers.add_parser("amostra", aliases=["sample"], help="Executa a pipeline local de amostra.")
+    sample.add_argument(
+        "--match-id",
+        default="mexico_africa_do_sul_2026_06_11",
+        help="match_id de amostra a processar.",
+    )
+
+    wiki = subparsers.add_parser("wikipedia", aliases=["wiki"], help="Executa a pipeline inicial com dados da Wikipedia.")
+    wiki.add_argument(
+        "--match-id",
+        default=None,
+        help="match_id derivado da Wikipedia a processar. Por padrao usa o primeiro jogo finalizado.",
+    )
+
+    worldcup2026 = subparsers.add_parser(
+        "worldcup2026",
+        aliases=["operacional"],
+        help="Executa a pipeline operacional com a API publica worldcup26.ir.",
+    )
+    worldcup2026.add_argument(
+        "--match-id",
+        default=None,
+        help="match_id derivado da fonte worldcup2026 a processar. Por padrao usa o primeiro jogo finalizado.",
+    )
+
+    subparsers.add_parser(
+        "espn",
+        help="Executa a coleta de enriquecimento da ESPN com estatisticas, eventos, lineups e jogadores.",
+    )
+
+    tournament_status = subparsers.add_parser(
+        "status-torneio",
+        aliases=["tournament-status"],
+        help="Gera o status do torneio e relatorios agregados.",
+    )
+    tournament_status.add_argument(
+        "--source",
+        default="canonical",
+        help="Fonte de dados a usar. Padrao: canonical.",
+    )
+
+    basic_reports = subparsers.add_parser(
+        "relatorios-basicos",
+        help="Gera relatorios basicos em lote a partir dos dados ja coletados.",
+    )
+    basic_reports.add_argument(
+        "--fonte",
+        default="canonical",
+        help="Fonte de dados a usar. Para relatorios finais, use canonical. Padrao: canonical.",
+    )
+    basic_reports.add_argument(
+        "--status",
+        default="finalizado",
+        help="Status das partidas a processar. Use 'todos' para processar todas.",
+    )
+
+    canonical_index = subparsers.add_parser(
+        "indice-canonico",
+        help="Reconcilia partidas entre fontes e cria o indice canonico de jogos.",
+    )
+
+    subparsers.add_parser(
+        "scores",
+        help="Gera features, scores e relatorios acumulados por selecao e jogador.",
+    )
+
+    update = subparsers.add_parser(
+        "atualizar",
+        aliases=["refresh", "update"],
+        help="Atualiza fontes, indice canonico, relatorios, status do torneio e scores.",
+    )
+    update.add_argument(
+        "--sem-worldcup2026",
+        action="store_true",
+        help="Nao coleta a fonte worldcup2026 nesta rodada.",
+    )
+    update.add_argument(
+        "--sem-espn",
+        action="store_true",
+        help="Nao coleta a ESPN nesta rodada.",
+    )
+    update.add_argument(
+        "--status",
+        default="finalizado",
+        help="Status das partidas a gerar nos relatorios. Padrao: finalizado.",
+    )
+
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.command in {"amostra", "sample"}:
+        result = run_sample_pipeline(match_id=args.match_id)
+        _print_result(result)
+    elif args.command in {"wikipedia", "wiki"}:
+        result = run_wikipedia_pipeline(match_id=args.match_id)
+        _print_result(result)
+    elif args.command in {"worldcup2026", "operacional"}:
+        result = run_worldcup2026_pipeline(match_id=args.match_id)
+        _print_result(result)
+    elif args.command == "espn":
+        result = run_espn_pipeline()
+        _print_result(result)
+    elif args.command in {"status-torneio", "tournament-status"}:
+        result = run_tournament_status(source=args.source)
+        _print_result(result)
+    elif args.command == "relatorios-basicos":
+        result = run_basic_reports(source=args.fonte, status=args.status)
+        _print_result(result)
+    elif args.command == "indice-canonico":
+        result = run_canonical_index()
+        _print_result(result)
+    elif args.command == "scores":
+        result = run_scores_pipeline()
+        _print_result(result)
+    elif args.command in {"atualizar", "refresh", "update"}:
+        result = run_update_pipeline(
+            include_worldcup2026=not args.sem_worldcup2026,
+            include_espn=not args.sem_espn,
+            status=args.status,
+        )
+        _print_result(result)
+
+
+def _print_result(result: dict) -> None:
+    for key, value in result.items():
+        print(f"{LABELS.get(key, key)}: {value}")

@@ -1,0 +1,190 @@
+Metadata-Version: 2.4
+Name: fifa-analytics
+Version: 0.1.0
+Summary: Pipeline de analises da Copa do Mundo 2026 com Python e Jupyter.
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+
+# FIFA Analytics - Copa do Mundo 2026
+
+Pipeline em Python + Jupyter para coletar, validar, analisar e gerar relatorios dos 104 jogos da Copa do Mundo 2026.
+
+O projeto usa notebooks por processo, nao por partida. Cada notebook recebe parametros como `match_id`, `match_date` e `run_scope`, chama funcoes reutilizaveis em `src/` e grava dados em camadas `raw`, `silver` e `gold`.
+
+## Arquitetura
+
+```text
+fontes de dados
+-> data/raw
+-> data/silver
+-> data/gold
+-> reports/fragments
+-> reports/final
+-> reports/tournament
+```
+
+## Instalar
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+## Abrir os notebooks
+
+```bash
+jupyter lab
+```
+
+## Testar agora
+
+Ative o ambiente virtual:
+
+```bash
+source .venv/bin/activate
+```
+
+Rode a suite de testes:
+
+```bash
+python -m pytest -q
+```
+
+Gere um relatorio de amostra de ponta a ponta:
+
+```bash
+python -m fifa_analytics amostra
+```
+
+Esse comando cria:
+
+```text
+data/raw/sample/...
+data/silver/matches/matches.parquet
+data/silver/teams/teams.parquet
+data/silver/standings/standings.parquet
+data/gold/standings/group_standings.parquet
+reports/fragments/mexico_africa_do_sul_2026_06_11/
+reports/final/mexico_africa_do_sul_2026_06_11.md
+manifests/mexico_africa_do_sul_2026_06_11.yaml
+```
+
+Gere dados e relatorio a partir da Wikipedia:
+
+```bash
+python -m fifa_analytics wikipedia
+```
+
+Esse comando usa a pagina publica da Copa 2026 como fonte inicial para partidas e classificacao dos grupos. A Wikipedia nao e fonte oficial; os dados devem ser validados contra FIFA ou outra fonte operacional antes de conclusoes finais.
+
+Para processar um jogo especifico derivado da Wikipedia:
+
+```bash
+python -m fifa_analytics wikipedia --match-id mexico_africa_do_sul_2026_match_1
+```
+
+Gere dados a partir da API operacional gratuita `worldcup26.ir`:
+
+```bash
+python -m fifa_analytics worldcup2026
+```
+
+Esse comando coleta os 104 jogos, selecoes, estadios, classificacao dos grupos e eventos basicos de gols quando a fonte disponibiliza autores/minutos. A fonte e publica e nao oficial; por isso a pipeline tambem calcula a classificacao internamente e grava a validacao em `data/silver/validation_results/`.
+
+Para processar um jogo especifico derivado dessa fonte:
+
+```bash
+python -m fifa_analytics worldcup2026 --match-id australia_paraguai_2026_match_6
+```
+
+Gere o controle global do torneio e relatorios agregados:
+
+```bash
+python -m fifa_analytics relatorios-basicos
+python -m fifa_analytics status-torneio
+```
+
+O comando `relatorios-basicos` gera relatorios para as partidas `finalizado` por padrao. Quando a fonte traz autores e minutos dos gols, ele tambem preenche a linha do tempo basica da partida.
+
+Para processar outro status:
+
+```bash
+python -m fifa_analytics relatorios-basicos --status agendado
+python -m fifa_analytics relatorios-basicos --status todos
+python -m fifa_analytics relatorios-basicos --fonte worldcup2026
+python -m fifa_analytics status-torneio --source worldcup2026
+```
+
+O comando `status-torneio` cria:
+
+```text
+manifests/tournament_status.parquet
+reports/tournament/status.md
+reports/tournament/standings.md
+reports/tournament/pendencias_relatorios.md
+```
+
+## Modos de uso
+
+Jogo especifico:
+
+```python
+run_scope = "jogo_unico"
+match_id = "mexico_africa_do_sul_2026_06_11"
+```
+
+Jogos de uma data:
+
+```python
+run_scope = "data_de_jogos"
+match_date = "2026-06-16"
+```
+
+Jogos finalizados pendentes:
+
+```python
+run_scope = "finalizados_pendentes"
+```
+
+Torneio inteiro:
+
+```python
+run_scope = "torneio"
+```
+
+## Notebooks
+
+- `00_match_index.ipynb`: cria e atualiza o indice de partidas.
+- `01_ingest_sources.ipynb`: coleta dados das fontes e salva snapshots raw.
+- `02_validate_match_data.ipynb`: valida dados entre fontes e schemas.
+- `03_match_context.ipynb`: gera contexto da partida.
+- `04_lineups.ipynb`: processa escalacoes.
+- `05_match_events.ipynb`: monta timeline de eventos.
+- `06_team_stats.ipynb`: gera estatisticas por selecao.
+- `07_player_stats.ipynb`: gera estatisticas individuais.
+- `08_insights.ipynb`: gera leitura analitica.
+- `09_build_report.ipynb`: monta relatorio final por jogo.
+- `10_tournament_reports.ipynb`: gera relatorios agregados do torneio.
+
+## Status de qualidade
+
+- `ok`: dados consistentes.
+- `aviso`: divergencia ou incompletude nao bloqueante.
+- `erro`: divergencia grave ou dado invalido.
+- `ausente`: fonte ou campo esperado ausente.
+- `desconhecido`: status ainda nao determinado.
+
+## Fluxo recomendado
+
+1. Atualizar indice de partidas.
+2. Ingerir dados brutos.
+3. Normalizar dados das camadas silver/gold.
+4. Validar placar, status, estadio e classificacao.
+5. Gerar fragmentos Markdown.
+6. Montar relatorio final.
+7. Atualizar manifesto do jogo e status global do torneio.
+
+## Limitacoes iniciais
+
+Esta primeira base cria a estrutura e funcoes de pipeline. Os adaptadores de fontes reais ainda precisam ser conectados aos endpoints escolhidos e validados contra os dados da Copa em andamento.
