@@ -109,6 +109,12 @@ def run_canonical_reports(status: str = "finalizado") -> dict[str, Path | str | 
     standings = _load_best_standings()
     selected_matches = _filter_matches(matches, status)
 
+    # Pré-computa scores de todos os times no contexto do torneio inteiro.
+    # Necessário para que a comparação da partida use z-score entre os 32 times,
+    # não entre os 2 times desta partida (o que produziria notas artificialmente simétricas).
+    all_team_features = build_team_match_features(matches, team_stats if not team_stats.empty else None)
+    all_team_scores = build_team_scores(all_team_features) if not all_team_features.empty else pd.DataFrame()
+
     report_results = []
     for _, match in selected_matches.iterrows():
         match_dict = match.to_dict()
@@ -126,6 +132,7 @@ def run_canonical_reports(status: str = "finalizado") -> dict[str, Path | str | 
             match_sources,
             data_quality_status,
             checks,
+            all_team_scores=all_team_scores,
         )
         report_results.append(
             build_match_report(
@@ -256,6 +263,7 @@ def write_canonical_fragments(
     match_sources: pd.DataFrame,
     data_quality_status: str,
     checks: list[dict[str, str]],
+    all_team_scores: pd.DataFrame | None = None,
 ) -> None:
     match_id = match["canonical_match_id"]
     home_team = _display_team(match.get("home_team"))
@@ -313,7 +321,7 @@ def write_canonical_fragments(
 
     match_team_stats = _team_stats_for_match(team_stats, match_id)
     group_standings = standings[standings["group"] == match.get("group")] if not standings.empty else pd.DataFrame()
-    team_score_comparison = _format_team_score_comparison(match, match_team_stats)
+    team_score_comparison = _format_team_score_comparison(match, match_team_stats, all_team_scores)
     write_fragment(
         match_id,
         "05_team_stats",
@@ -812,15 +820,35 @@ def _format_match_team_stats(match_team_stats: pd.DataFrame, group_standings: pd
     return "\n".join(parts).strip()
 
 
-def _format_team_score_comparison(match: dict[str, Any], match_team_stats: pd.DataFrame) -> str:
+def _format_team_score_comparison(
+    match: dict[str, Any],
+    match_team_stats: pd.DataFrame,
+    all_team_scores: pd.DataFrame | None = None,
+) -> str:
     if match_team_stats.empty:
         return ""
 
-    team_features = build_team_match_features(pd.DataFrame([match]), match_team_stats)
-    if team_features.empty:
+    # Usa scores pré-computados no contexto do torneio inteiro (z-score entre 32 times).
+    # Sem isso, comparar 2 times entre si produziria notas artificialmente simétricas (33/67).
+    match_features = build_team_match_features(pd.DataFrame([match]), match_team_stats)
+    if match_features.empty:
         return ""
 
-    team_scores = build_team_scores(team_features)
+    if all_team_scores is not None and not all_team_scores.empty:
+        home_team = match.get("home_team")
+        away_team = match.get("away_team")
+        # Scores do torneio (notas no contexto dos 32 times)
+        tournament_scores = all_team_scores[all_team_scores["team"].isin([home_team, away_team])].copy()
+        # Stats desta partida (pontos, gols, chutes, posse — valores do jogo, não acumulados)
+        match_scores = build_team_scores(match_features)
+        match_game_cols = ["team", "points", "gols_pro", "gols_contra", "chutes_no_alvo", "posse_media"]
+        match_game = match_scores[[c for c in match_game_cols if c in match_scores.columns]].copy()
+        # Merge: notas do torneio + stats desta partida
+        score_cols = [c for c in tournament_scores.columns if c.startswith("score_")]
+        team_scores = match_game.merge(tournament_scores[["team"] + score_cols], on="team", how="left")
+    else:
+        team_scores = build_team_scores(match_features)
+
     if team_scores.empty:
         return ""
 
@@ -859,7 +887,7 @@ def _format_team_score_comparison(match: dict[str, Any], match_team_stats: pd.Da
     )
 
     parts = [
-        "Nota da partida em escala 0-100, calculada apenas com os dados deste jogo.",
+        "Nota de 0-100 no contexto do torneio (z-score entre as 32 selecoes). Pontos, gols e chutes referentes a esta partida.",
         "",
         "#### Resumo por selecao",
         "",

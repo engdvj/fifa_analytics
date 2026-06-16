@@ -48,20 +48,20 @@ TEAM_STAT_COLUMNS = {
     "clearances": "totalClearance",
 }
 PLAYER_STAT_COLUMNS = {
-    "minutes_played": "minutes",
+    "appearances": "appearances",
     "goals": "totalGoals",
     "assists": "goalAssists",
     "shots": "totalShots",
     "shots_on_target": "shotsOnTarget",
-    "passes": "totalPasses",
-    "tackles": "totalTackles",
-    "interceptions": "interceptions",
     "saves": "saves",
-    "cards": "yellowCards",
+    "goals_conceded": "goalsConceded",
+    "shots_faced": "shotsFaced",
     "yellow_cards": "yellowCards",
     "red_cards": "redCards",
     "fouls_committed": "foulsCommitted",
     "fouls_drawn": "foulsSuffered",
+    "offsides": "offsides",
+    "own_goals": "ownGoals",
 }
 
 

@@ -297,9 +297,10 @@ def build_player_match_features(player_stats: pd.DataFrame, lineups: pd.DataFram
 
     features = player_stats.copy()
     for column in [
-        "minutes_played", "goals", "assists", "shots", "shots_on_target",
-        "passes", "tackles", "interceptions", "saves", "goals_conceded",
+        "appearances", "goals", "assists", "shots", "shots_on_target",
+        "saves", "goals_conceded", "shots_faced",
         "yellow_cards", "red_cards", "fouls_committed", "fouls_drawn",
+        "offsides", "own_goals",
     ]:
         if column not in features.columns:
             features[column] = 0
@@ -330,12 +331,12 @@ def build_player_scores(player_match_features: pd.DataFrame) -> pd.DataFrame:
     group_columns = ["player_slug", "player_name", "team"]
     aggregations = {
         "match_id": "nunique",
-        "minutes_played": "sum",
         "goals": "sum",
         "assists": "sum",
         "shots": "sum",
         "shots_on_target": "sum",
         "saves": "sum",
+        "goals_conceded": "sum",
         "fouls_committed": "sum",
         "fouls_drawn": "sum",
         "yellow_cards": "sum",
@@ -537,8 +538,16 @@ def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
         pool = scores[mask].copy()
 
         if profile == "goleiro":
+            saves_pg = _per_game("saves", pool)
+            # Taxa de defesas: saves / (saves + gols_sofridos) — save%
+            saves_col = pool["saves"].fillna(0) if "saves" in pool.columns else pd.Series(0.0, index=pool.index)
+            conceded_col = pool["goals_conceded"].fillna(0) if "goals_conceded" in pool.columns else pd.Series(0.0, index=pool.index)
+            save_rate = _safe_divide(saves_col, saves_col + conceded_col)
+            conceded_pg = _per_game("goals_conceded", pool)
             components = [
-                _zscore_to_100(_per_game("saves", pool)),
+                _zscore_to_100(saves_pg),                            # volume de defesas
+                _zscore_to_100(save_rate),                           # save% (qualidade)
+                _zscore_to_100(conceded_pg, lower_is_better=True),   # gols sofridos penaliza
             ]
 
         elif profile == "defensor":
