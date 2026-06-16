@@ -327,17 +327,19 @@ def build_player_match_features(
         lineup_info = lineups[lineup_cols].drop_duplicates(["match_id", "team", "player_name"])
         features = features.merge(lineup_info, on=["match_id", "team", "player_name"], how="left")
 
-    # Reservas que nunca entraram em campo têm position="SUB" (sem posição
-    # tática real) — preenche com a posição de elenco/convocação da ESPN
-    # (estável, não depende de ter jogado) para evitar cair no perfil
-    # genérico "meio" por padrão em _player_profile.
-    if rosters is not None and not rosters.empty and "position" in features.columns:
-        no_real_position = features["position"].isna() | (features["position"].astype(str).str.upper() == "SUB")
-        if no_real_position.any():
-            roster_position = rosters[["team", "player_name", "squad_position"]].drop_duplicates(["team", "player_name"])
-            features = features.merge(roster_position, on=["team", "player_name"], how="left")
-            features.loc[no_real_position, "position"] = features.loc[no_real_position, "squad_position"]
-            features = features.drop(columns=["squad_position"])
+    # "position" (do lineup) é a posição TÁTICA daquele jogo especifico — varia
+    # jogo a jogo (ex: Vinícius Júnior às vezes joga aberto como "AM-L") e fica
+    # como está para exibir a escalação real da partida. Para classificar o
+    # PERFIL do jogador (usado em scores e agrupamento de relatórios), usa-se
+    # "roster_position" — a função de elenco/convocação da ESPN, estável e
+    # correta independente de onde o jogador atuou num jogo específico.
+    features["roster_position"] = features.get("position")
+    if rosters is not None and not rosters.empty:
+        roster_position = rosters[["team", "player_name", "squad_position"]].drop_duplicates(["team", "player_name"])
+        features = features.merge(roster_position, on=["team", "player_name"], how="left")
+        has_roster = features["squad_position"].notna()
+        features.loc[has_roster, "roster_position"] = features.loc[has_roster, "squad_position"]
+        features = features.drop(columns=["squad_position"])
 
     features["participacoes_gol"] = features["goals"] + features["assists"]
     features["shot_accuracy"] = _safe_divide(features["shots_on_target"], features["shots"])
@@ -560,13 +562,17 @@ def _add_rank(frame: pd.DataFrame, score_col: str, rank_col: str) -> pd.DataFram
 
 
 def _player_profile(row: pd.Series) -> str:
-    """Classifica jogador por perfil usando posição ESPN quando disponível.
+    """Classifica jogador por perfil usando a posição de elenco/convocação
+    (roster_position) quando disponível — estável e correta independente de
+    onde o jogador atuou tatica numa partida especifica. Cai para a posição
+    de lineup (tática, pode variar jogo a jogo) só quando o roster não tem
+    o jogador, e por último para o fallback estatístico.
 
     Fallback por estatísticas: tackles e interceptions não existem nos dados ESPN —
     o fallback usa apenas saves vs produção ofensiva. Sem posição e sem saves,
     o padrão é "meio" (perfil mais genérico).
     """
-    position = str(row.get("position") or "").strip().upper()
+    position = str(row.get("roster_position") or row.get("position") or "").strip().upper()
     if position in _POSITION_TO_PROFILE:
         return _POSITION_TO_PROFILE[position]
     # SUB sem posição definida: tenta inferir pelas stats

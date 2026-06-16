@@ -14,6 +14,7 @@ from fifa_analytics.analytics.scores import (
     build_team_scores,
 )
 from fifa_analytics.paths import GOLD_DIR, MANIFESTS_DIR, REPORTS_DIR
+from fifa_analytics.transforms.standings import calculate_group_standings
 from fifa_analytics.utils.io import ensure_dir, read_dataframe, write_dataframe
 from fifa_analytics.utils.text import position_label, slugify
 from fifa_analytics.utils.time import utc_now_iso
@@ -35,9 +36,9 @@ PROFILE_LABELS = {"goleiro": "Goleiro", "defensor": "Defensor", "meio": "Meia", 
 # metrica relevante, atacante nao defende. Cada perfil mostra so o que importa.
 PROFILE_STATS: dict[str, list[str]] = {
     "goleiro": ["saves", "goals_conceded", "yellow_cards", "red_cards"],
-    "defensor": ["goals", "assists", "fouls_committed", "fouls_drawn", "yellow_cards", "red_cards"],
-    "meio": ["goals", "assists", "shots_on_target", "shots_off_target", "fouls_drawn", "yellow_cards", "red_cards"],
-    "atacante": ["goals", "assists", "shots_on_target", "shots_off_target", "yellow_cards", "red_cards"],
+    "defensor": ["goals", "assists", "shots_on_target", "shots_off_target", "fouls_committed", "fouls_drawn", "yellow_cards", "red_cards"],
+    "meio": ["goals", "assists", "shots_on_target", "shots_off_target", "fouls_committed", "fouls_drawn", "yellow_cards", "red_cards"],
+    "atacante": ["goals", "assists", "shots_on_target", "shots_off_target", "fouls_committed", "fouls_drawn", "yellow_cards", "red_cards"],
 }
 STAT_COL_LABELS = {
     "goals": "gols", "assists": "assist", "shots_on_target": "no_alvo",
@@ -70,6 +71,7 @@ def run_scores_pipeline() -> dict[str, Any]:
     team_scores = build_team_scores(team_match_features)
     team_recent_form = build_team_recent_form(team_match_features, n=3)
     player_match_features = build_player_match_features(player_stats, lineups, rosters)
+    group_standings = calculate_group_standings(matches)
 
     team_match_features_path = write_dataframe(ANALYTICS_DIR / "team_match_features.parquet", team_match_features)
     team_scores_path = write_dataframe(ANALYTICS_DIR / "team_scores.parquet", team_scores)
@@ -77,7 +79,7 @@ def run_scores_pipeline() -> dict[str, Any]:
     player_match_features_path = write_dataframe(ANALYTICS_DIR / "player_match_features.parquet", player_match_features)
     team_score_history = _record_team_score_history(team_scores)
 
-    team_report_paths = write_team_reports(team_scores, team_match_features, player_match_features, team_recent_form, team_score_history)
+    team_report_paths = write_team_reports(team_scores, team_match_features, player_match_features, team_recent_form, team_score_history, group_standings)
     player_report_paths = write_player_reports(player_match_features)
     team_index_path = write_team_index(team_scores)
     rankings_index_path = write_rankings_index()
@@ -106,6 +108,7 @@ def write_team_reports(
     player_match_features: pd.DataFrame,
     team_recent_form: pd.DataFrame | None = None,
     team_score_history: pd.DataFrame | None = None,
+    group_standings: pd.DataFrame | None = None,
 ) -> list[Path]:
     ensure_dir(TEAM_REPORTS_DIR)
     paths = []
@@ -115,6 +118,9 @@ def write_team_reports(
     if team_recent_form is not None and not team_recent_form.empty:
         for _, row in team_recent_form.iterrows():
             form_by_team[str(row["team"])] = row
+    group_by_team: dict[str, str] = {}
+    if "group" in team_match_features.columns:
+        group_by_team = team_match_features.dropna(subset=["group"]).drop_duplicates("team").set_index("team")["group"].to_dict()
     for _, team in team_scores.iterrows():
         matches = team_match_features[team_match_features["team"] == team["team"]].sort_values("date")
         player_events = player_match_features[player_match_features["team"] == team["team"]] if not player_match_features.empty else pd.DataFrame()
@@ -124,8 +130,17 @@ def write_team_reports(
             if team_score_history is not None and not team_score_history.empty
             else pd.DataFrame()
         )
+        group = group_by_team.get(str(team["team"]))
+        group_table = (
+            group_standings[group_standings["group"] == group]
+            if group is not None and group_standings is not None and not group_standings.empty
+            else pd.DataFrame()
+        )
         path = TEAM_REPORTS_DIR / f"{team['team_slug']}.md"
-        path.write_text(_render_team_report(team, matches, player_events, total_teams, team_slug_by_name, recent, history), encoding="utf-8")
+        path.write_text(
+            _render_team_report(team, matches, player_events, total_teams, team_slug_by_name, recent, history, group_table),
+            encoding="utf-8",
+        )
         paths.append(path)
     return paths
 
@@ -153,9 +168,23 @@ def _record_team_score_history(team_scores: pd.DataFrame) -> pd.DataFrame:
 
 
 def write_team_index(team_scores: pd.DataFrame) -> Path:
+    """Lista simples das selecoes por nome, com link para o relatorio de cada
+    uma — o ranking completo (com notas e componentes) ja existe em
+    reports/rankings/selecoes/geral.md, nao precisa ser duplicado aqui."""
     ensure_dir(TEAM_REPORTS_DIR)
     path = TEAM_REPORTS_DIR / "index.md"
-    path.write_text(_render_team_ranking(team_scores, "geral", "score_geral", "nota geral"), encoding="utf-8")
+    if team_scores.empty:
+        path.write_text("# Selecoes\n\nNenhuma selecao disponivel ainda.\n", encoding="utf-8")
+        return path
+    ordered = team_scores.sort_values("team")
+    links = "\n".join(f"- {_team_link(row['team'], row.get('team_slug'))}" for _, row in ordered.iterrows())
+    content = f"""# Selecoes
+
+[[reports/rankings/selecoes/index\\|Ver ranking completo]]
+
+{links}
+"""
+    path.write_text(content, encoding="utf-8")
     return path
 
 
@@ -186,8 +215,10 @@ def write_team_rankings(team_scores: pd.DataFrame) -> list[Path]:
 
 
 def _render_team_rankings_index(team_scores: pd.DataFrame) -> str:
+    """So navegacao — a tabela completa do ranking geral fica em
+    reports/rankings/selecoes/geral.md, sem duplicar aqui."""
     links = "\n".join(f"- [[reports/rankings/selecoes/{slug}\\|{title.title()}]]" for slug, _, title in TEAM_RANKINGS)
-    return f"# Rankings de selecoes\n\nAtualizado em `{utc_now_iso()}`.\n\n{links}\n\n{_render_team_ranking(team_scores, 'geral', 'score_geral', 'nota geral')}"
+    return f"# Rankings de selecoes\n\nAtualizado em `{utc_now_iso()}`.\n\n{links}\n"
 
 
 def _render_team_ranking(team_scores: pd.DataFrame, ranking_slug: str, metric: str, title: str) -> str:
@@ -307,6 +338,7 @@ def _render_team_report(
     team_slug_by_name: dict[str, str],
     recent: pd.Series | None = None,
     history: pd.DataFrame | None = None,
+    group_table: pd.DataFrame | None = None,
 ) -> str:
     generated_at = utc_now_iso()
     jogos = int(team.get("jogos", 0) or 0)
@@ -328,18 +360,18 @@ def _render_team_report(
     evolution_section = _team_score_evolution(history)
 
     gols_label = "gols marcados"
-    gols_value: Any = team.get("gols_pro", 0)
+    gols_value: Any = _format_value(team.get("gols_pro", 0))
     if jogos > 1:
         # mediana so agrega informacao a partir de 2+ jogos — com 1 jogo
         # ela e identica ao total e mostrar os dois e redundante.
         gols_label = "gols marcados (mediana por jogo)"
-        gols_value = f"{team.get('gols_pro', 0)} ({_format_value(team.get('mediana_gols_pro'))})"
+        gols_value = f"{_format_value(team.get('gols_pro', 0))} ({_format_value(team.get('mediana_gols_pro'))})"
     summary_rows = [
         ["jogos disputados", jogos],
-        ["pontos", team.get("points", 0)],
-        ["saldo de gols", team.get("saldo_gols", 0)],
+        ["pontos", _format_value(team.get("points", 0))],
+        ["saldo de gols", _format_value(team.get("saldo_gols", 0))],
         [gols_label, gols_value],
-        ["gols sofridos", team.get("gols_contra", 0)],
+        ["gols sofridos", _format_value(team.get("gols_contra", 0))],
         ["aproveitamento de pontos", _percent(team.get("aproveitamento"))],
     ]
     consistency_label = _consistency_label(team.get("consistencia_resultado"))
@@ -360,6 +392,7 @@ def _render_team_report(
     team_slug = slugify(team.get("team", ""))
     match_table = _team_matches_table(matches, team_slug_by_name)
     players_section = _team_players_by_position(player_events, team_slug)
+    group_section = _format_group_standings(group_table, str(team.get("team", "")), team_slug_by_name)
     return f"""<!--
 team: {team.get('team')}
 generated_at: {generated_at}
@@ -386,10 +419,34 @@ A nota geral combina os cinco componentes abaixo por media ponderada (pesos entr
 ## Jogos
 
 {match_table}
-
+{group_section}
 ## Jogadores
 
 {players_section}
+"""
+
+
+def _format_group_standings(group_table: pd.DataFrame | None, team: str, team_slug_by_name: dict[str, str]) -> str:
+    """Classificacao do grupo na fase de grupos — contextualiza se o time esta
+    avancando ou nao, algo que faltava no relatorio (so mostrava os jogos do
+    proprio time, sem comparar com os rivais de grupo)."""
+    if group_table is None or group_table.empty:
+        return ""
+    ordered = group_table.sort_values(["points", "goal_difference", "goals_for"], ascending=False).reset_index(drop=True)
+    rows = []
+    for position, (_, row) in enumerate(ordered.iterrows(), start=1):
+        team_name = str(row["team"])
+        label = f"**{_team_link(team_name, team_slug_by_name.get(team_name))}**" if team_name == team else _team_link(team_name, team_slug_by_name.get(team_name))
+        rows.append([
+            position, label, int(row["played"]), int(row["wins"]), int(row["draws"]), int(row["losses"]),
+            int(row["goals_for"]), int(row["goals_against"]), int(row["goal_difference"]), int(row["points"]),
+        ])
+    table = _markdown_table(rows, ["pos", "selecao", "jogos", "vit", "emp", "der", "gp", "gc", "sg", "pts"])
+    group_name = ordered.iloc[0].get("group", "") if not ordered.empty else ""
+    return f"""
+## Classificacao do Grupo {group_name}
+
+{table}
 """
 
 
@@ -416,36 +473,24 @@ def _team_score_evolution(history: pd.DataFrame | None) -> str:
 """
 
 
+_RESULT_LABELS = {"vitoria": "vitoria", "empate": "empate", "derrota": "derrota"}
+
+
 def _team_matches_table(matches: pd.DataFrame, team_slug_by_name: dict[str, str]) -> str:
+    """Tabela enxuta: jogo, data, adversario e resultado com placar embutido.
+    Estatisticas detalhadas (chutes, posse, etc) ficam no relatorio do jogo —
+    quem quiser o detalhe clica no link em vez de ver tudo repetido aqui."""
     if matches.empty:
         return "Nenhum jogo finalizado encontrado."
-    display = matches[
-        [
-            "match_id",
-            "date",
-            "opponent",
-            "result",
-            "goals_for",
-            "goals_against",
-            "shots",
-            "shots_on_target",
-            "possession",
-        ]
-    ].copy()
+    display = matches[["match_id", "date", "opponent", "result", "goals_for", "goals_against"]].copy()
     display["match_id"] = display["match_id"].apply(_match_link)
     display["opponent"] = display["opponent"].apply(lambda team: _team_link(team, team_slug_by_name.get(team)))
-    display = display.rename(
-        columns={
-            "match_id": "jogo",
-            "date": "data",
-            "opponent": "adversario",
-            "result": "resultado",
-            "goals_for": "gols_pro",
-            "goals_against": "gols_contra",
-            "shots": "chutes",
-            "shots_on_target": "no_alvo",
-            "possession": "posse",
-        }
+    display["result"] = display.apply(
+        lambda row: f"{_RESULT_LABELS.get(row['result'], row['result'])} {_format_value(row['goals_for'])}x{_format_value(row['goals_against'])}",
+        axis=1,
+    )
+    display = display.drop(columns=["goals_for", "goals_against"]).rename(
+        columns={"match_id": "jogo", "date": "data", "opponent": "adversario", "result": "resultado"}
     )
     return display.fillna("").to_markdown(index=False)
 
@@ -547,8 +592,8 @@ def _team_score_explanation() -> str:
 - **Defesa** (peso 25%): gols sofridos, chutes no alvo sofridos e jogos sem tomar gol.
 - **Eficiencia** (peso 10%): conversao de chutes em gol e chutes no alvo por chute. Distinto de ataque: ataque mede producao, eficiencia mede aproveitamento.
 - **Controle** (peso 5%): posse, passes e precisao. Peso baixo — estilo de jogo nao e determinante de qualidade.
-- **Forma recente**: aproveitamento dos ultimos 5 jogos, independente da nota geral acumulada.
-- **Evidencia**: estabilidade da nota (`baixa`, `media`, `alta`). Aumenta com o numero de jogos jogados."""
+- **Forma recente**: aproveitamento dos ultimos 3 jogos (janela da fase de grupos), independente da nota geral acumulada.
+- **Evidencia**: estabilidade da nota (`baixa`, `media`, `alta`). Atinge confianca plena com 3 jogos — os 3 da fase de grupos."""
 
 
 def _format_value(value: Any) -> str:
