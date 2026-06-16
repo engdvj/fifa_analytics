@@ -233,9 +233,22 @@ def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
     scores["chutes_sofridos_por_jogo"] = _safe_divide(scores["chutes_sofridos"], scores["jogos"])
     scores["chutes_no_alvo_sofridos_por_jogo"] = _safe_divide(scores["chutes_no_alvo_sofridos"], scores["jogos"])
 
+    # --- Estatísticas robustas por jogo (mediana, consistência, tendência) ---
+    # Médias/somas acumuladas escondem outliers (uma goleada de 7x1 infla a
+    # média de gols tanto quanto 7 jogos de 1x0 cada) e não dizem nada sobre
+    # se o desempenho é estável ou alterna entre ótimo e péssimo — daí
+    # mediana (robusta a outliers) e consistência (desvio padrão do
+    # aproveitamento por jogo) como camada extra de leitura, não substituição.
+    per_game_stats = _team_per_game_distribution(team_match_features)
+    scores = scores.merge(per_game_stats, on="team", how="left")
+
     # --- Componentes via z-score (preserva distância absoluta entre times) ---
-    # score_resultado: resultado real — aproveitamento normalizado no torneio
-    scores["score_resultado"] = _zscore_to_100(scores["aproveitamento"])
+    # score_resultado: aproveitamento (pontos) domina; saldo de gols por jogo quebra
+    # empates dentro da mesma faixa sem inverter a hierarquia vitória > empate > derrota.
+    # Aproveitamento é normalizado para 0-100 antes de combinar com saldo normalizado.
+    _aprov_norm = _zscore_to_100(scores["aproveitamento"])
+    _saldo_norm = _zscore_to_100(scores["saldo_gols"] / scores["jogos"].clip(lower=1))
+    scores["score_resultado"] = (_aprov_norm * 0.85 + _saldo_norm * 0.15).clip(0, 100).round(1)
 
     # score_ataque: volume ofensivo de qualidade (chutes no alvo + gols, sem chutes totais)
     scores["score_ataque"] = _mean_score([
@@ -291,7 +304,9 @@ def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
 # Features por partida — jogadores
 # ---------------------------------------------------------------------------
 
-def build_player_match_features(player_stats: pd.DataFrame, lineups: pd.DataFrame | None = None) -> pd.DataFrame:
+def build_player_match_features(
+    player_stats: pd.DataFrame, lineups: pd.DataFrame | None = None, rosters: pd.DataFrame | None = None
+) -> pd.DataFrame:
     if player_stats.empty:
         return pd.DataFrame()
 
@@ -311,6 +326,18 @@ def build_player_match_features(player_stats: pd.DataFrame, lineups: pd.DataFram
         lineup_cols = [c for c in ["match_id", "team", "player_name", "position", "is_starter", "formation"] if c in lineups.columns]
         lineup_info = lineups[lineup_cols].drop_duplicates(["match_id", "team", "player_name"])
         features = features.merge(lineup_info, on=["match_id", "team", "player_name"], how="left")
+
+    # Reservas que nunca entraram em campo têm position="SUB" (sem posição
+    # tática real) — preenche com a posição de elenco/convocação da ESPN
+    # (estável, não depende de ter jogado) para evitar cair no perfil
+    # genérico "meio" por padrão em _player_profile.
+    if rosters is not None and not rosters.empty and "position" in features.columns:
+        no_real_position = features["position"].isna() | (features["position"].astype(str).str.upper() == "SUB")
+        if no_real_position.any():
+            roster_position = rosters[["team", "player_name", "squad_position"]].drop_duplicates(["team", "player_name"])
+            features = features.merge(roster_position, on=["team", "player_name"], how="left")
+            features.loc[no_real_position, "position"] = features.loc[no_real_position, "squad_position"]
+            features = features.drop(columns=["squad_position"])
 
     features["participacoes_gol"] = features["goals"] + features["assists"]
     features["shot_accuracy"] = _safe_divide(features["shots_on_target"], features["shots"])
@@ -411,6 +438,47 @@ def _safe_divide(numerator: Any, denominator: Any) -> pd.Series:
     return (num / den.replace(0, pd.NA)).fillna(0)
 
 
+def _team_per_game_distribution(team_match_features: pd.DataFrame) -> pd.DataFrame:
+    """Mediana, consistência e tendência por time, calculadas jogo a jogo
+    (não a partir dos agregados já somados — precisa da distribuição real).
+
+    - mediana_gols_pro / mediana_chutes_no_alvo: robustas a goleadas/outliers,
+      ao contrário da média que uma goleada isolada distorce.
+    - consistencia_resultado: desvio padrão do aproveitamento por jogo
+      (pontos/3 em cada jogo individual). 0 = sempre o mesmo resultado tipo
+      (ex: 3 vitórias), valores altos = alterna entre extremos. Vira rótulo
+      qualitativo na exibição porque o número bruto não é interpretável
+      sozinho com 3-7 jogos de amostra.
+    - tendencia_resultado: compara o aproveitamento da segunda metade dos
+      jogos com a primeira. Precisa de pelo menos 2 jogos; com 1 jogo não há
+      tendência a calcular.
+    """
+    if team_match_features.empty:
+        return pd.DataFrame(columns=["team", "mediana_gols_pro", "mediana_chutes_no_alvo", "consistencia_resultado", "tendencia_resultado"])
+
+    rows = []
+    for team, group in team_match_features.groupby("team", dropna=False):
+        ordered = group.sort_values("date") if "date" in group.columns else group
+        game_points = ordered["points"] if "points" in ordered.columns else pd.Series(dtype=float)
+        per_game_aproveitamento = (game_points / 3).reset_index(drop=True)
+
+        tendencia = None
+        if len(per_game_aproveitamento) >= 2:
+            mid = len(per_game_aproveitamento) // 2
+            first_half = per_game_aproveitamento.iloc[:mid] if mid > 0 else per_game_aproveitamento.iloc[:1]
+            second_half = per_game_aproveitamento.iloc[mid:] if mid > 0 else per_game_aproveitamento.iloc[1:]
+            tendencia = float(second_half.mean() - first_half.mean())
+
+        rows.append({
+            "team": team,
+            "mediana_gols_pro": float(ordered["goals_for"].median()) if "goals_for" in ordered.columns else None,
+            "mediana_chutes_no_alvo": float(ordered["shots_on_target"].median()) if "shots_on_target" in ordered.columns else None,
+            "consistencia_resultado": float(per_game_aproveitamento.std(ddof=0)) if len(per_game_aproveitamento) >= 2 else None,
+            "tendencia_resultado": tendencia,
+        })
+    return pd.DataFrame(rows)
+
+
 def _zscore_to_100(values: pd.Series, lower_is_better: bool = False) -> pd.Series:
     """Converte série em score 0–100 via z-score, preservando distância absoluta.
 
@@ -443,8 +511,14 @@ def _normalize(values: pd.Series, lower_is_better: bool = False) -> pd.Series:
     return normalized.clip(0, 100)
 
 
-def _sample_confidence(games: pd.Series, full_confidence_games: int = 5) -> pd.Series:
-    """Confiança cresce de 0 a 1 com mais jogos. Sem piso artificial."""
+def _sample_confidence(games: pd.Series, full_confidence_games: int = 3) -> pd.Series:
+    """Confiança cresce de 0 a 1 com mais jogos. Sem piso artificial.
+
+    full_confidence_games=3 porque a fase de grupos da Copa 2026 tem exatamente
+    3 jogos por selecao — e o tamanho de amostra real disponivel antes do
+    mata-mata, nao um numero arbitrario. No mata-mata os jogos seguintes so
+    aumentam a confianca (clip superior em 1.0), nao mudam a referencia.
+    """
     numeric = pd.to_numeric(games, errors="coerce").fillna(0).clip(lower=0)
     return (numeric.clip(upper=full_confidence_games) / full_confidence_games).clip(0, 1)
 

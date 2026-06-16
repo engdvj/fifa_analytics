@@ -73,6 +73,57 @@ def fetch_summary(event_id: str) -> dict[str, Any]:
     return _get_json(f"{_base_url()}/summary", params={"event": event_id})
 
 
+def fetch_teams() -> dict[str, Any]:
+    return _get_json(f"{_base_url()}/teams", params={"limit": "100"})
+
+
+def fetch_team_roster(team_id: str) -> dict[str, Any]:
+    return _get_json(f"{_base_url()}/teams/{team_id}/roster")
+
+
+def fetch_all_rosters(sleep_seconds: float = 0.1) -> dict[str, Any]:
+    """Coleta o roster (elenco completo, com posicao estavel independente de ter
+    jogado) de cada selecao listada pela ESPN. Usado para corrigir o perfil de
+    jogadores reservas que nunca entraram em campo — esses so tem posicao "SUB"
+    nos dados de lineup por partida, o que gera classificacao incorreta."""
+    teams_payload = fetch_teams()
+    rosters: dict[str, Any] = {}
+    team_names: dict[str, str] = {}
+    teams = teams_payload.get("sports", [{}])[0].get("leagues", [{}])[0].get("teams", [])
+    for entry in teams:
+        team = entry.get("team", {})
+        team_id = str(team.get("id"))
+        if not team_id:
+            continue
+        team_names[team_id] = team.get("displayName")
+        rosters[team_id] = fetch_team_roster(team_id)
+        time.sleep(sleep_seconds)
+    return {"rosters": rosters, "team_names": team_names}
+
+
+def normalize_rosters_payload(payload: dict[str, Any]) -> pd.DataFrame:
+    rows = []
+    team_names = payload.get("team_names", {})
+    for team_id, roster_payload in payload.get("rosters", {}).items():
+        team_name = traduzir_selecao(team_names.get(team_id))
+        for athlete in roster_payload.get("athletes", []):
+            position = athlete.get("position") or {}
+            player_name = (athlete.get("fullName") or athlete.get("displayName") or "").strip()
+            rows.append(
+                {
+                    "team": team_name,
+                    "team_id": team_id,
+                    "player_name": player_name,
+                    "squad_position": position.get("abbreviation"),
+                    "squad_position_name": position.get("name"),
+                    "shirt_number": athlete.get("jersey"),
+                    "source": "espn",
+                    "collected_at": utc_now_iso(),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def fetch_tournament(start_date: date = START_DATE, end_date: date = END_DATE, sleep_seconds: float = 0.05) -> dict[str, Any]:
     scoreboards = []
     summaries = {}

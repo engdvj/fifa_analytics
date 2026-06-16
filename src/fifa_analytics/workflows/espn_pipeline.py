@@ -4,6 +4,7 @@ from fifa_analytics.paths import GOLD_DIR, RAW_DIR, SILVER_DIR
 import pandas as pd
 
 from fifa_analytics.sources.espn import (
+    fetch_all_rosters,
     fetch_tournament,
     normalize_commentary_payload,
     normalize_events_payload,
@@ -12,12 +13,41 @@ from fifa_analytics.sources.espn import (
     normalize_matches_payload,
     normalize_player_stats_from_commentary,
     normalize_player_stats_payload,
+    normalize_rosters_payload,
     normalize_shots_payload,
     normalize_team_stats_payload,
 )
 from fifa_analytics.transforms.teams import teams_from_matches
 from fifa_analytics.utils.io import ensure_dir, write_dataframe, write_json
 from fifa_analytics.utils.time import utc_timestamp_compact
+
+
+def run_espn_rosters_pipeline() -> dict[str, Path | int]:
+    """Coleta o elenco completo (convocacao) de cada selecao, com posicao estavel
+    independente do jogador ter entrado em campo. Diferente de run_espn_pipeline,
+    que coleta a escalacao titular por partida — aqui e o roster do time, que nao
+    muda durante o torneio, por isso roda separado e nao precisa ser repetido a
+    cada atualizacao de resultados."""
+    collected_at = utc_timestamp_compact()
+    collection_date = collected_at[:8]
+    raw_dir = ensure_dir(
+        RAW_DIR / "espn" / "competition=world_cup_2026" / f"date={collection_date}" / f"collected_at={collected_at}"
+    )
+
+    payload = fetch_all_rosters()
+    write_json(raw_dir / "rosters.json", payload)
+
+    rosters = normalize_rosters_payload(payload)
+    rosters_path = write_dataframe(SILVER_DIR / "rosters" / "espn_rosters.parquet", rosters)
+    gold_rosters_path = write_dataframe(GOLD_DIR / "rosters" / "espn_rosters.parquet", rosters)
+
+    return {
+        "raw_dir": raw_dir,
+        "rosters_path": rosters_path,
+        "gold_rosters_path": gold_rosters_path,
+        "rosters": len(rosters),
+        "times": rosters["team"].nunique() if not rosters.empty else 0,
+    }
 
 
 def run_espn_pipeline() -> dict[str, Path | int]:
