@@ -365,6 +365,11 @@ def write_canonical_fragments(
     )
     write_fragment(
         match_id,
+        "05_team_stats",
+        render_template("fragments/05_team_stats.md.j2", {"team_stats": _format_match_team_stats(match, match_team_stats)}),
+    )
+    write_fragment(
+        match_id,
         "03_lineups",
         render_template("fragments/03_lineups.md.j2", {"lineups": _format_lineups(match_lineups, match_player_stats)}),
     )
@@ -757,6 +762,68 @@ def _match_info_for_match(match_info: pd.DataFrame, match_id: str) -> dict[str, 
 
 
 
+
+
+# (coluna, rotulo, sufixo de exibicao, multiplicador) — possession ja vem em
+# escala percentual (64.6 = 64.6%) mas pass_accuracy vem fracionaria (0.9 =
+# 90%) na mesma fonte; o multiplicador normaliza as duas para "%" de fato.
+_TEAM_STAT_DISPLAY = [
+    ("possession", "posse", "%", 1),
+    ("shots", "chutes", "", 1),
+    ("shots_on_target", "chutes no alvo", "", 1),
+    ("passes", "passes", "", 1),
+    ("pass_accuracy", "precisao de passe", "%", 100),
+    ("corners", "escanteios", "", 1),
+    ("fouls", "faltas", "", 1),
+    ("yellow_cards", "cartoes amarelos", "", 1),
+    ("red_cards", "cartoes vermelhos", "", 1),
+]
+
+
+def _format_match_team_stats(match: dict[str, Any], match_team_stats: pd.DataFrame) -> str:
+    """Tabela frente-a-frente com as estatisticas-chave da partida, para
+    'bater o olho' — poucas metricas, uma linha por metrica, time casa vs
+    visitante. Estatisticas detalhadas (desarmes, cortes, etc) ficam de fora
+    para manter a secao rapida de ler; quem quiser o detalhe completo encontra
+    no relatorio de cada selecao."""
+    home_team = _display_team(match.get("home_team"))
+    away_team = _display_team(match.get("away_team"))
+
+    rows = []
+    home_score, away_score = match.get("home_score"), match.get("away_score")
+    if pd.notna(home_score) and pd.notna(away_score):
+        rows.append([str(int(home_score)), "gols", str(int(away_score))])
+
+    if not match_team_stats.empty:
+        stats_by_team = match_team_stats.set_index("team")
+        if home_team in stats_by_team.index and away_team in stats_by_team.index:
+            home_row = stats_by_team.loc[home_team]
+            away_row = stats_by_team.loc[away_team]
+            for column, label, suffix, multiplier in _TEAM_STAT_DISPLAY:
+                if column not in home_row.index:
+                    continue
+                home_value = home_row.get(column)
+                away_value = away_row.get(column)
+                if pd.isna(home_value) and pd.isna(away_value):
+                    continue
+                rows.append([
+                    _format_stat_value(home_value, suffix, multiplier),
+                    label,
+                    _format_stat_value(away_value, suffix, multiplier),
+                ])
+
+    if not rows:
+        return ""
+    table = pd.DataFrame(rows, columns=[_team_link(home_team), "estatistica", _team_link(away_team)])
+    return table.to_markdown(index=False)
+
+
+def _format_stat_value(value: Any, suffix: str, multiplier: float = 1) -> str:
+    if pd.isna(value):
+        return ""
+    numeric = float(value) * multiplier
+    text = f"{numeric:g}"
+    return f"{text}{suffix}"
 
 
 def _format_lineups(lineups: pd.DataFrame, player_stats: pd.DataFrame | None = None) -> str:

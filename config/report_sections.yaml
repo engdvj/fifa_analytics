@@ -5,9 +5,12 @@ match_report_sections:
   - id: "01_match_summary"
     title: "Resumo da partida"
     required: true
-  - id: "03_lineups"
-    title: "Escalacoes titulares"
-    required: false
   - id: "01b_story"
     title: "A historia do jogo"
+    required: false
+  - id: "05_team_stats"
+    title: "Estatisticas comparativas"
+    required: false
+  - id: "03_lineups"
+    title: "Escalacoes titulares"
     required: false
