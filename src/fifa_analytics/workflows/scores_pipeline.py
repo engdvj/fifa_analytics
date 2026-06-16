@@ -53,7 +53,8 @@ TEAM_RANKINGS = [
     ("defesa", "score_defesa", "defesa"),
     ("eficiencia", "score_eficiencia", "eficiencia"),
     ("controle", "score_controle", "controle"),
-    ("forma", "forma_score", "forma recente"),
+    ("forca-relativa", "score_forca_relativa", "forca relativa"),
+    ("disciplina", "score_disciplina", "disciplina"),
 ]
 
 
@@ -67,7 +68,8 @@ def run_scores_pipeline() -> dict[str, Any]:
     lineups = _read_optional(GOLD_DIR / "lineups" / "canonical_lineups.parquet")
     rosters = _read_optional(GOLD_DIR / "rosters" / "espn_rosters.parquet")
 
-    team_match_features = build_team_match_features(matches, team_stats)
+    events = _read_optional(GOLD_DIR / "fact_events" / "canonical_events.parquet")
+    team_match_features = build_team_match_features(matches, team_stats, events, lineups)
     team_scores = build_team_scores(team_match_features)
     team_recent_form = build_team_recent_form(team_match_features, n=3)
     player_match_features = build_player_match_features(player_stats, lineups, rosters)
@@ -83,7 +85,9 @@ def run_scores_pipeline() -> dict[str, Any]:
     player_report_paths = write_player_reports(player_match_features)
     team_index_path = write_team_index(team_scores)
     rankings_index_path = write_rankings_index()
-    team_ranking_paths = write_team_rankings(team_scores)
+    team_scores_for_rankings = team_scores.copy()
+    team_scores_for_rankings["tendencia_ranking"] = _ranking_trend(team_scores, team_score_history)
+    team_ranking_paths = write_team_rankings(team_scores_for_rankings)
 
     return {
         "team_match_features_path": team_match_features_path,
@@ -227,9 +231,11 @@ def _render_team_ranking(team_scores: pd.DataFrame, ranking_slug: str, metric: s
         return f"# Ranking de selecoes - {title.title()}\n\nDados de `{metric}` ainda nao disponiveis.\n"
     ranked = team_scores.sort_values([metric, "score_geral", "points", "saldo_gols"], ascending=[False, False, False, False]).reset_index(drop=True)
     ranked["rank_metrica"] = ranked.index + 1
-    score_columns = ["score_geral", "score_resultado", "score_ataque", "score_defesa", "score_eficiencia", "score_controle"]
-    if "forma_score" in ranked.columns:
-        score_columns.append("forma_score")
+    score_columns = ["score_geral", "score_resultado", "score_ataque", "score_defesa", "score_eficiencia", "score_controle", "score_forca_relativa"]
+    if "score_disciplina" in ranked.columns:
+        score_columns.append("score_disciplina")
+    if "tendencia_ranking" in ranked.columns:
+        score_columns.append("tendencia_ranking")
     ordered_columns = [
         "rank_metrica",
         "team",
@@ -322,11 +328,13 @@ generated_at: {utc_now_iso()}
 
 
 _COMPONENT_EXPLANATIONS = {
-    "Resultado": "aproveitamento real de pontos (40% da nota geral)",
-    "Ataque": "gols e chutes no alvo por jogo — mede qualidade, nao volume bruto (20%)",
-    "Defesa": "gols sofridos, chutes no alvo sofridos e jogos sem tomar gol (25%)",
-    "Eficiencia": "conversao de chutes em gol e chutes no alvo por chute (10%)",
-    "Controle": "posse, passes e precisao — estilo de jogo, peso baixo (5%)",
+    "Resultado": "aproveitamento de pontos ponderado pela forca do adversario no momento do jogo — empatar com um time forte vale mais que empatar com um fraco (35% da nota geral)",
+    "Ataque": "gols e chutes no alvo por jogo, ponderados por quao solida e a defesa historica do adversario (15%)",
+    "Defesa": "gols sofridos, chutes no alvo sofridos e jogos sem tomar gol, ponderados por quanto volume o adversario criou — defesa pouco testada (dominio total do proprio time) e atraida para o neutro, ja que nao foi testada (20%)",
+    "Eficiencia": "conversao de chutes em gol e chutes no alvo por chute, com o mesmo ajuste de adversario do Ataque (10%)",
+    "Controle": "posse, passes e precisao — estilo de jogo, peso baixo, mesmo ajuste de adversario (5%)",
+    "Forca Relativa": "rating Elo ponderado por desempenho (gols, chutes no alvo, posse) — vencer um adversario forte vale mais que vencer um fraco (15%)",
+    "Disciplina": "faltas, cartoes amarelos e vermelhos por jogo — nota alta = time disciplinado; vermelho pesa mais que amarelo por ter impacto imediato e irreversivel no jogo. Nao entra na nota geral — e informativo",
 }
 
 
@@ -353,6 +361,8 @@ def _render_team_report(
             ["Defesa", team.get("score_defesa", 0), _COMPONENT_EXPLANATIONS["Defesa"]],
             ["Eficiencia", team.get("score_eficiencia", 0), _COMPONENT_EXPLANATIONS["Eficiencia"]],
             ["Controle", team.get("score_controle", 0), _COMPONENT_EXPLANATIONS["Controle"]],
+            ["Forca Relativa", team.get("score_forca_relativa", 0), _COMPONENT_EXPLANATIONS["Forca Relativa"]],
+            ["Disciplina", team.get("score_disciplina", 0), _COMPONENT_EXPLANATIONS["Disciplina"]],
         ],
         ["componente", "nota", "como e calculado"],
     )
@@ -366,6 +376,12 @@ def _render_team_report(
         # ela e identica ao total e mostrar os dois e redundante.
         gols_label = "gols marcados (mediana por jogo)"
         gols_value = f"{_format_value(team.get('gols_pro', 0))} ({_format_value(team.get('mediana_gols_pro'))})"
+    amarelos = int(team.get("amarelos", 0) or 0)
+    vermelhos = int(team.get("vermelhos", 0) or 0)
+    faltas = int(team.get("faltas", 0) or 0)
+    cartoes_str = f"{amarelos} amarelo{'s' if amarelos != 1 else ''}"
+    if vermelhos:
+        cartoes_str += f", {vermelhos} vermelho{'s' if vermelhos != 1 else ''}"
     summary_rows = [
         ["jogos disputados", jogos],
         ["pontos", _format_value(team.get("points", 0))],
@@ -373,6 +389,10 @@ def _render_team_report(
         [gols_label, gols_value],
         ["gols sofridos", _format_value(team.get("gols_contra", 0))],
         ["aproveitamento de pontos", _percent(team.get("aproveitamento"))],
+        ["faltas cometidas", faltas],
+        ["cartoes", cartoes_str],
+        ["disciplina (ranking)", f"{_format_value(team.get('ranking_disciplina'))} de {total_teams}"],
+        ["rating Elo", f"{team.get('elo_rating', 1500):.0f} (1500 = neutro)"],
     ]
     consistency_label = _consistency_label(team.get("consistencia_resultado"))
     if consistency_label:
@@ -408,7 +428,7 @@ nivel_evidencia: {team.get('nivel_evidencia', '')}
 
 Ranking: **{_format_value(team.get('ranking_score_geral'))} de {total_teams}** selecoes — nivel de evidencia **{team.get('nivel_evidencia', '')}** ({jogos} jogo{'s' if jogos != 1 else ''} disputado{'s' if jogos != 1 else ''} dos 3 da fase de grupos; jogos extras no mata-mata so aumentam a confianca).
 
-A nota geral combina os cinco componentes abaixo por media ponderada (pesos entre parenteses), calculados via z-score entre as selecoes do torneio — isso preserva a distancia real de desempenho, nao so o ranking ordinal.
+A nota geral combina os seis componentes abaixo por media ponderada (pesos entre parenteses), calculados via z-score entre as selecoes do torneio — isso preserva a distancia real de desempenho, nao so o ranking ordinal. Os pesos nao sao iguais (nao e 1/6 para cada): Resultado pesa mais porque e o que decide avanco de fase; Defesa pesa mais que Ataque porque solidez defensiva tende a ser mais estrutural e consistente entre jogos, enquanto producao ofensiva tem mais variancia (depende de financacao, sorte, decisoes individuais). Essa hierarquia e uma escolha de design documentada, nao calibrada estatisticamente com dados historicos de Copas — os pesos exatos podem ser revisados se uma calibracao formal vier a ser feita.
 
 {components}
 {evolution_section}
@@ -551,6 +571,42 @@ def _team_players_by_position(player_events: pd.DataFrame, team_slug: str) -> st
     return "\n\n".join(sections) if sections else "Sem dados de escalação disponíveis."
 
 
+def _ranking_trend(team_scores: pd.DataFrame, history: pd.DataFrame) -> pd.Series:
+    """Delta de posição no ranking geral entre o snapshot anterior e o atual.
+
+    Retorna série indexada como team_scores com strings tipo '↑3', '↓2' ou '→'.
+    No primeiro jogo (sem snapshot anterior) retorna '→' para todos.
+    """
+    result = pd.Series("→", index=team_scores.index)
+    if history is None or history.empty:
+        return result
+
+    current_jogos = int(team_scores["jogos"].max()) if "jogos" in team_scores.columns else 0
+    if current_jogos < 2:
+        return result
+
+    prev = history[history["jogos"] == current_jogos - 1][["team", "score_geral"]].copy()
+    if prev.empty:
+        return result
+
+    prev["ranking_anterior"] = prev["score_geral"].rank(method="min", ascending=False).astype(int)
+    merged = team_scores[["team", "ranking_score_geral"]].merge(prev[["team", "ranking_anterior"]], on="team", how="left")
+
+    def _delta(row: pd.Series) -> str:
+        if pd.isna(row.get("ranking_anterior")):
+            return "→"
+        delta = int(row["ranking_anterior"]) - int(row["ranking_score_geral"])
+        if delta > 0:
+            return f"↑{delta}"
+        if delta < 0:
+            return f"↓{abs(delta)}"
+        return "→"
+
+    trend = merged.apply(_delta, axis=1)
+    trend.index = team_scores.index
+    return trend
+
+
 def _markdown_table(rows: list[list[Any]], columns: list[str]) -> str:
     return pd.DataFrame(rows, columns=columns).to_markdown(index=False)
 
@@ -575,7 +631,9 @@ def _team_ranking_labels(metric: str, title: str) -> dict[str, str]:
         "score_defesa": "defesa",
         "score_eficiencia": "eficiencia",
         "score_controle": "controle",
-        "forma_score": "forma",
+        "score_forca_relativa": "forca_relativa",
+        "score_disciplina": "disciplina",
+        "tendencia_ranking": "tendencia",
         "nivel_evidencia": "evidencia",
         "points": "pontos",
     }
@@ -586,13 +644,15 @@ def _team_ranking_labels(metric: str, title: str) -> dict[str, str]:
 def _team_score_explanation() -> str:
     return """## Como ler a nota
 
-- **Nota geral**: nota de 0 a 100 = resultado (40%) + processo (60%). Componentes calculados via z-score, preservando distancia absoluta entre selecoes.
-- **Resultado** (peso 40%): aproveitamento real de pontos. Quem vence mais jogos tem nota mais alta independente do estilo.
-- **Ataque** (peso 20%): gols e chutes no alvo por jogo. Sem chutes totais — mede qualidade, nao volume bruto.
-- **Defesa** (peso 25%): gols sofridos, chutes no alvo sofridos e jogos sem tomar gol.
+- **Nota geral**: nota de 0 a 100, media ponderada de seis componentes. Calculados via z-score, preservando distancia absoluta entre selecoes.
+- **Resultado** (peso 35%): aproveitamento real de pontos. Quem vence mais jogos tem nota mais alta independente do estilo.
+- **Ataque** (peso 15%): gols e chutes no alvo por jogo. Sem chutes totais — mede qualidade, nao volume bruto.
+- **Defesa** (peso 20%): gols sofridos, chutes no alvo sofridos e jogos sem tomar gol.
 - **Eficiencia** (peso 10%): conversao de chutes em gol e chutes no alvo por chute. Distinto de ataque: ataque mede producao, eficiencia mede aproveitamento.
 - **Controle** (peso 5%): posse, passes e precisao. Peso baixo — estilo de jogo nao e determinante de qualidade.
-- **Forma recente**: aproveitamento dos ultimos 3 jogos (janela da fase de grupos), independente da nota geral acumulada.
+- **Forca relativa** (peso 15%): rating Elo. O placar real decide a faixa do ajuste — vitoria sempre acima de empate, empate sempre acima de derrota, a hierarquia nunca se inverte. Mas a posicao exata dentro de cada faixa vem do indice de desempenho (gols, chutes no alvo, posse): uma vitoria sofrida (ganhou jogando pior que o adversario) ganha menos rating que uma vitoria dominante com a mesma margem de gols, e o mesmo vale para empates (dominado vs. equilibrado) e derrotas. Contextualiza tambem pelo adversario enfrentado — vencer um time forte vale mais que vencer um fraco, efeito que so aparece a partir do 2o jogo de cada selecao, quando os ratings ja deixaram de ser todos iguais.
+- **Disciplina**: faltas, cartoes amarelos e vermelhos por jogo. Nota alta = time disciplinado. Nao entra na nota geral — e informativo.
+- **Tendencia**: variacao de posicao no ranking geral em relacao ao jogo anterior (`↑3` subiu 3, `↓2` caiu 2, `→` estavel ou primeiro jogo).
 - **Evidencia**: estabilidade da nota (`baixa`, `media`, `alta`). Atinge confianca plena com 3 jogos — os 3 da fase de grupos."""
 
 
