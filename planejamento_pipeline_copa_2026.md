@@ -1878,7 +1878,58 @@ Objetivo:
 
 ---
 
-## 18. Resultado esperado
+## 18. Checklist de melhorias
+
+Levantado em 2026-06-16 após revisão completa do repositório. Organizado por prioridade.
+
+### Critico (bloqueia qualidade ou corretude)
+
+- [ ] **`.gitignore` incompleto** — `reports/players/`, `reports/teams/*.md`, `reports/rankings/` não estão ignorados; centenas de arquivos gerados sendo commitados sem intenção
+- [ ] **`manifests/tournament_status.parquet` no lugar errado** — arquivo gerado automaticamente deveria ficar em `data/gold/`, não em `manifests/`; atualizar `.gitignore` e `tournament_status.py`
+
+### Arquitetura (confusao de responsabilidades)
+
+- [ ] **`analytics/standings.py` é re-export inútil** — apenas reexporta `calculate_group_standings` de `transforms/standings.py`; remover o arquivo e ajustar imports nos workflows que o usam
+- [ ] **`slugify()` duplicada** — definida em `analytics/scores.py` e reimportada em `canonical_reports.py`; mover para `utils/` e atualizar todos os imports
+- [ ] **URLs hardcoded nos módulos de fontes** — `worldcup2026.py` e `espn.py` têm `BASE_URL` hardcoded; deveriam ler de `config/sources.yaml` via `load_config()`
+- [ ] **`config/pipeline.yaml` não é carregado** — arquivo bem estruturado mas ignorado pelo código; usar em `cli.py` para defaults globais (status válidos, run_scope, timezone)
+- [ ] **`efficiency.py` trivial** — `goals_per_shot()` é uma linha de fórmula; mover para `utils/` ou absorver em `analytics/scores.py` e remover o arquivo
+
+### Validação e schemas (falta de contrato real)
+
+- [ ] **`schemas/*.yaml` são decorativos** — `load_schema()` existe em `config.py` mas nunca é chamado; implementar validação real via `validation/schemas.py` usando os schemas YAML para verificar colunas obrigatórias nos DataFrames antes de salvar em silver/gold
+- [ ] **`validate_required_columns()` em `validation/schemas.py` está vazia** — implementar com base nos schemas YAML
+
+### Sources stubs (confusão de leitura)
+
+- [ ] **Remover ou isolar stubs não implementados** — `sources/fifa.py`, `sources/football_data.py`, `sources/balldontlie.py` lançam `NotImplementedError`; criar pasta `sources/stubs/` ou adicionar comentário `# not implemented` claro no topo e excluir da discovery automática
+
+### Testes (gaps de cobertura)
+
+- [ ] **Sem testes de CLI** — `cli.py` com 8 comandos não tem nenhum teste; cobrir ao menos argumentos inválidos e saída de ajuda
+- [ ] **Sem testes de I/O real** — `utils/io.py` (write/read parquet, JSON, YAML) não tem testes; adicionar com `tmp_path` do pytest
+- [ ] **Sem testes de integração** — nenhum teste executa um fluxo completo (ingest → canonical → report); adicionar ao menos um teste E2E com dados de sample
+- [ ] **Sem testes de edge cases em Wikipedia** — HTML quebrado, tabelas com formato inesperado, times com caracteres especiais
+
+### Dependências e packaging
+
+- [ ] **`pytest` em `requirements.txt` junto com runtime** — separar em `requirements-dev.txt` ou `[project.optional-dependencies]` no `pyproject.toml`
+- [ ] **`papermill` declarado mas pouco usado** — verificar se notebooks estão sendo executados programaticamente; se não, mover para `requirements-dev.txt`
+
+### README e documentação
+
+- [ ] **Exemplos de output do `amostra` usam nome temporal** — README mostra `mexico_africa_do_sul_2026_06_11` mas o match_id real é `copa_2026_jogo_001`; corrigir exemplos
+- [ ] **Seção "Limitações iniciais" vaga** — especificar quais fontes estão 100% operacionais (worldcup2026 ✅, espn ✅, wikipedia ✅ básico) e quais são stubs (fifa ❌, football_data ❌, balldontlie ❌)
+- [ ] **Falta seção de Troubleshooting** — o que fazer se ESPN cair, como reprocessar um jogo, como limpar cache parcial
+
+### Melhorias de qualidade (quando der)
+
+- [ ] **TLS bypass global em `worldcup2026.py`** — `urllib3.disable_warnings()` afeta toda a sessão; usar `verify=False` inline em `requests.get()` sem desabilitar warnings globalmente
+- [ ] **Type hints imprecisos em workflows** — varios retornam `dict[str, object]`; tipar com `dict[str, Path | str | int]` onde o retorno é conhecido
+
+---
+
+## 20. Resultado esperado
 
 Para cada jogo:
 

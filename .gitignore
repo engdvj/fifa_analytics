@@ -22,9 +22,15 @@ outputs/*
 reports/fragments/*
 reports/final/*
 reports/tournament/*
+reports/players/*
+reports/teams/*.md
+reports/rankings/**
 !reports/fragments/.gitkeep
 !reports/final/.gitkeep
 !reports/tournament/.gitkeep
+!reports/players/.gitkeep
+!reports/teams/.gitkeep
+!reports/rankings/.gitkeep
 manifests/*.parquet
 manifests/*.yaml
 !manifests/.gitkeep
