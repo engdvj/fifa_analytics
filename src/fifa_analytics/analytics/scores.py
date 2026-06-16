@@ -22,17 +22,25 @@ TEAM_SCORE_WEIGHTS = {
 }
 
 # Posições ESPN → perfil interno
+# Inclui tanto os códigos padrão (GK, CB...) quanto os que aparecem nos dados reais
+# da ESPN Copa 2026 (G, CD-L, CD-R, DM, AM-L, CF-L, SUB...)
 _POSITION_TO_PROFILE: dict[str, str] = {
-    "GK": "goleiro",
-    "G": "goleiro",
-    "CB": "defensor", "RB": "defensor", "LB": "defensor",
-    "RWB": "defensor", "LWB": "defensor",
-    "CDM": "meio", "CM": "meio", "CAM": "meio",
-    "RM": "meio", "LM": "meio",
+    # Goleiro
+    "GK": "goleiro", "G": "goleiro",
+    # Defensor — zagueiros, laterais, volantes (sem produção ofensiva esperada)
+    "CB": "defensor", "CD": "defensor", "CD-L": "defensor", "CD-R": "defensor",
+    "SW": "defensor",
+    "RB": "defensor", "LB": "defensor", "RWB": "defensor", "LWB": "defensor",
+    "DM": "defensor", "D": "defensor",
+    # Meia — centroavante criativo e meias de todos os tipos
+    "CDM": "meio", "CM": "meio", "CM-L": "meio", "CM-R": "meio",
+    "CAM": "meio", "AM": "meio", "AM-L": "meio", "AM-R": "meio",
+    "RM": "meio", "LM": "meio", "M": "meio", "MF": "meio",
+    # Atacante — pontas, centroavantes, segundos atacantes
     "RW": "atacante", "LW": "atacante",
-    "CF": "atacante", "ST": "atacante", "SS": "atacante",
-    "F": "atacante",
-    "MF": "meio", "D": "defensor",
+    "CF": "atacante", "CF-L": "atacante", "CF-R": "atacante",
+    "ST": "atacante", "SS": "atacante",
+    "F": "atacante", "LF": "atacante", "RF": "atacante",
 }
 
 
@@ -327,11 +335,9 @@ def build_player_scores(player_match_features: pd.DataFrame) -> pd.DataFrame:
         "assists": "sum",
         "shots": "sum",
         "shots_on_target": "sum",
-        "passes": "sum",
-        "tackles": "sum",
-        "interceptions": "sum",
         "saves": "sum",
-        "goals_conceded": "sum",
+        "fouls_committed": "sum",
+        "fouls_drawn": "sum",
         "yellow_cards": "sum",
         "red_cards": "sum",
         "participacoes_gol": "sum",
@@ -343,20 +349,11 @@ def build_player_scores(player_match_features: pd.DataFrame) -> pd.DataFrame:
 
     scores["gols_por_jogo"] = _safe_divide(scores["goals"], scores["jogos"])
     scores["assistencias_por_jogo"] = _safe_divide(scores["assists"], scores["jogos"])
-    scores["chutes_no_alvo_por_chute"] = _safe_divide(scores["shots_on_target"], scores["shots"])
     scores["participacoes_por_jogo"] = _safe_divide(scores["participacoes_gol"], scores["jogos"])
+    scores["chutes_no_alvo_por_jogo"] = _safe_divide(scores["shots_on_target"], scores["jogos"])
     scores["defesas_por_jogo"] = _safe_divide(scores["saves"], scores["jogos"])
-    scores["tackles_por_jogo"] = _safe_divide(scores["tackles"], scores["jogos"])
-    scores["intercepcoes_por_jogo"] = _safe_divide(scores["interceptions"], scores["jogos"])
-    # Métricas exclusivas de goleiro
-    if "goals_conceded" in scores.columns:
-        scores["gols_sofridos_por_jogo"] = _safe_divide(scores["goals_conceded"], scores["jogos"])
-        scores["defesas_por_gol_sofrido"] = _safe_divide(
-            scores["saves"], scores["saves"] + scores["goals_conceded"]
-        )
-    else:
-        scores["gols_sofridos_por_jogo"] = 0.0
-        scores["defesas_por_gol_sofrido"] = 0.0
+    scores["faltas_sofridas_por_jogo"] = _safe_divide(scores.get("fouls_drawn", pd.Series(0, index=scores.index)), scores["jogos"])
+    scores["faltas_cometidas_por_jogo"] = _safe_divide(scores.get("fouls_committed", pd.Series(0, index=scores.index)), scores["jogos"])
 
     # score_geral calculado dentro do pool de cada perfil via z-score
     # Goleiro não compete com atacante — cada um é ranqueado entre os seus
@@ -486,78 +483,96 @@ def _add_rank(frame: pd.DataFrame, score_col: str, rank_col: str) -> pd.DataFram
 def _player_profile(row: pd.Series) -> str:
     """Classifica jogador por perfil usando posição ESPN quando disponível.
 
-    Fallback por estatísticas: só classifica como goleiro se saves dominar
-    claramente (salvo mais do que gols+assists — típico de goleiro titular).
-    Defensores são identificados por tackles/interceptions sem produção ofensiva.
+    Fallback por estatísticas: tackles e interceptions não existem nos dados ESPN —
+    o fallback usa apenas saves vs produção ofensiva. Sem posição e sem saves,
+    o padrão é "meio" (perfil mais genérico).
     """
     position = str(row.get("position") or "").strip().upper()
     if position in _POSITION_TO_PROFILE:
         return _POSITION_TO_PROFILE[position]
+    # SUB sem posição definida: tenta inferir pelas stats
     saves = float(row.get("saves", 0) or 0)
     goals = float(row.get("goals", 0) or 0)
     assists = float(row.get("assists", 0) or 0)
-    tackles = float(row.get("tackles", 0) or 0)
-    interceptions = float(row.get("interceptions", 0) or 0)
-    shots_on_target = float(row.get("shots_on_target", 0) or 0)
     # Goleiro: saves dominam claramente sobre produção ofensiva
     if saves > 0 and saves > (goals + assists):
         return "goleiro"
-    # Atacante: produção ofensiva presente
-    if goals > 0 or assists > 0 or shots_on_target > 0:
+    # Com produção ofensiva: atacante
+    if goals > 0 or assists > 0 or float(row.get("shots_on_target", 0) or 0) > 0:
         return "atacante"
-    # Defensor: ações defensivas sem produção ofensiva
-    if tackles > 0 or interceptions > 0:
-        return "defensor"
     return "meio"
 
 
 def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
     """Calcula score_geral dentro do pool de cada perfil via z-score.
 
-    Cada perfil usa métricas exclusivas daquela posição. Goleiro penaliza
-    gols sofridos; defensor não usa saves nem gols; atacante não usa tackles.
+    Usa apenas métricas que existem nos dados ESPN Copa 2026.
+    tackles, interceptions e passes são zero em 100% dos registros — não usados.
+
+    Goleiro:  saves/jogo (único indicador disponível)
+    Defensor: fouls_drawn/jogo (+, pressão e duelos ganhos),
+              shots_on_target/jogo (+, contribuição ofensiva quando chega),
+              fouls_committed/jogo (–, disciplina)
+    Meia:     goals+assists/jogo (+, criação),
+              shots_on_target/jogo (+, chutes perigosos),
+              fouls_drawn/jogo (+, agitação e envolvimento),
+              fouls_committed/jogo (–, disciplina)
+    Atacante: goals/jogo (+, peso dobrado — é o trabalho principal),
+              assists/jogo (+),
+              shots_on_target/jogo (+, pressão constante),
+              fouls_drawn/jogo (+, garante faltas e penaltis)
     """
     result = pd.Series(50.0, index=scores.index)
 
-    # (coluna, lower_is_better)
-    # Goleiro: defesas por jogo (+), taxa de defesa (+), gols sofridos (-)
-    # Defensor: tackles (+), interceptações (+) — sem métricas ofensivas
-    # Meia: participações em gol (+), assists (+), tackles (+) — equilibrado
-    # Atacante: gols por jogo (+), participações (+), precisão de chute (+)
-    profile_metrics: dict[str, list[tuple[str, bool]]] = {
-        "goleiro": [
-            ("defesas_por_jogo", False),
-            ("defesas_por_gol_sofrido", False),
-            ("gols_sofridos_por_jogo", True),
-        ],
-        "defensor": [
-            ("tackles_por_jogo", False),
-            ("intercepcoes_por_jogo", False),
-        ],
-        "meio": [
-            ("participacoes_por_jogo", False),
-            ("assistencias_por_jogo", False),
-            ("tackles_por_jogo", False),
-        ],
-        "atacante": [
-            ("gols_por_jogo", False),
-            ("participacoes_por_jogo", False),
-            ("chutes_no_alvo_por_chute", False),
-        ],
-    }
+    # Colunas derivadas necessárias (calculadas se ainda não existirem)
+    def _per_game(col: str, pool: pd.DataFrame) -> pd.Series:
+        if col not in pool.columns:
+            return pd.Series(0.0, index=pool.index)
+        return _safe_divide(pool[col].fillna(0), pool["jogos"])
 
-    for profile, metrics in profile_metrics.items():
+    for profile in ["goleiro", "defensor", "meio", "atacante"]:
         mask = scores["perfil"] == profile
         if not mask.any():
             continue
         pool = scores[mask].copy()
-        component_scores = []
-        for col, lower in metrics:
-            if col in pool.columns:
-                component_scores.append(_zscore_to_100(pool[col], lower_is_better=lower))
-        if not component_scores:
-            continue
-        raw = _mean_score(component_scores)
+
+        if profile == "goleiro":
+            components = [
+                _zscore_to_100(_per_game("saves", pool)),
+            ]
+
+        elif profile == "defensor":
+            components = [
+                _zscore_to_100(_per_game("fouls_drawn", pool)),
+                _zscore_to_100(_per_game("shots_on_target", pool)),
+                _zscore_to_100(_per_game("fouls_committed", pool), lower_is_better=True),
+            ]
+
+        elif profile == "meio":
+            participacoes = (
+                pool["goals"].fillna(0) + pool["assists"].fillna(0)
+                if "goals" in pool.columns and "assists" in pool.columns
+                else pd.Series(0.0, index=pool.index)
+            )
+            components = [
+                _zscore_to_100(_safe_divide(participacoes, pool["jogos"])),
+                _zscore_to_100(_per_game("shots_on_target", pool)),
+                _zscore_to_100(_per_game("fouls_drawn", pool)),
+                _zscore_to_100(_per_game("fouls_committed", pool), lower_is_better=True),
+            ]
+
+        else:  # atacante
+            goals_pg = _per_game("goals", pool)
+            assists_pg = _per_game("assists", pool)
+            components = [
+                _zscore_to_100(goals_pg) * 2,          # peso duplo: função principal
+                _zscore_to_100(assists_pg),
+                _zscore_to_100(_per_game("shots_on_target", pool)),
+                _zscore_to_100(_per_game("fouls_drawn", pool)),
+            ]
+
+        # Média simples entre componentes (pesos já embutidos acima no atacante)
+        raw = pd.concat(components, axis=1).mean(axis=1).fillna(50.0)
         conf = _sample_confidence(pool["jogos"])
         adjusted = _apply_confidence(raw, conf)
         result.loc[mask] = adjusted.values
