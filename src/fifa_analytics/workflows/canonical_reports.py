@@ -827,15 +827,14 @@ def _format_team_score_comparison(match: dict[str, Any], match_team_stats: pd.Da
     summary_columns = [
         "team",
         "score_geral",
+        "score_resultado",
         "score_ataque",
         "score_defesa",
-        "score_controle",
         "score_eficiencia",
-        "score_disciplina",
+        "score_controle",
         "points",
         "gols_pro",
         "gols_contra",
-        "chutes",
         "chutes_no_alvo",
         "posse_media",
     ]
@@ -846,15 +845,14 @@ def _format_team_score_comparison(match: dict[str, Any], match_team_stats: pd.Da
         columns={
             "team": "selecao",
             "score_geral": "nota_jogo",
+            "score_resultado": "resultado",
             "score_ataque": "ataque",
             "score_defesa": "defesa",
-            "score_controle": "controle",
             "score_eficiencia": "eficiencia",
-            "score_disciplina": "fair_play",
+            "score_controle": "controle",
             "points": "pontos",
             "gols_pro": "gols",
             "gols_contra": "gols_contra",
-            "chutes": "chutes",
             "chutes_no_alvo": "no_alvo",
             "posse_media": "posse",
         }
@@ -875,13 +873,12 @@ def _format_team_score_comparison(match: dict[str, Any], match_team_stats: pd.Da
         rows = []
         for column, label in [
             ("score_geral", "nota_jogo"),
+            ("score_resultado", "resultado"),
             ("score_ataque", "ataque"),
             ("score_defesa", "defesa"),
-            ("score_controle", "controle"),
             ("score_eficiencia", "eficiencia"),
-            ("score_disciplina", "fair_play"),
+            ("score_controle", "controle"),
             ("points", "pontos"),
-            ("chutes", "chutes"),
             ("chutes_no_alvo", "chutes_no_alvo"),
             ("posse_media", "posse"),
         ]:
@@ -910,7 +907,7 @@ def _format_lineups(lineups: pd.DataFrame, player_stats: pd.DataFrame | None = N
     if "is_starter" in lineup_players.columns:
         impact_columns = [
             column
-            for column in ["impacto_partida", "goals", "assists", "shots_on_target", "saves", "yellow_cards", "red_cards"]
+            for column in ["contribuicao_partida", "goals", "assists", "shots_on_target", "saves", "yellow_cards", "red_cards"]
             if column in lineup_players.columns
         ]
         if impact_columns:
@@ -924,7 +921,7 @@ def _format_lineups(lineups: pd.DataFrame, player_stats: pd.DataFrame | None = N
         "position",
         "is_starter",
         "nota_jogo",
-        "impacto_partida",
+        "contribuicao_partida",
         "goals",
         "assists",
         "shots_on_target",
@@ -939,7 +936,7 @@ def _format_lineups(lineups: pd.DataFrame, player_stats: pd.DataFrame | None = N
         "position": "posicao",
         "is_starter": "titular",
         "nota_jogo": "nota_jogo",
-        "impacto_partida": "impacto",
+        "contribuicao_partida": "contrib",
         "goals": "gols",
         "assists": "assist",
         "shots_on_target": "no_alvo",
@@ -947,7 +944,7 @@ def _format_lineups(lineups: pd.DataFrame, player_stats: pd.DataFrame | None = N
         "yellow_cards": "amarelos",
         "red_cards": "vermelhos",
     }
-    parts = ["Nota do jogador em escala 0-100, relativa ao maior impacto individual registrado nesta partida.", ""]
+    parts = ["Nota do jogador em escala 0-100, relativa ao maior contribuidor individual registrado nesta partida.", ""]
     sort_ascending = [True] + ([False] + [True] * (len(sort_columns) - 1) if sort_columns else [])
     sorted_lineups = lineup_players.sort_values(["team", *sort_columns], ascending=sort_ascending, na_position="last")
     for team, team_lineup in sorted_lineups.groupby("team", sort=False):
@@ -977,26 +974,30 @@ def _player_match_notes(player_stats: pd.DataFrame | None) -> pd.DataFrame:
     if features.empty:
         return pd.DataFrame()
 
-    max_impact = features["impacto_partida"].max()
-    features["nota_jogo"] = 0 if max_impact <= 0 else (features["impacto_partida"] / max_impact * 100).round(1)
+    # Contribuição bruta por partida: soma ponderada de eventos observáveis
+    contrib = (
+        features.get("goals", 0) * 5
+        + features.get("assists", 0) * 3
+        + features.get("shots_on_target", 0) * 1.5
+        + features.get("saves", 0) * 1.2
+        + features.get("tackles", 0) * 0.4
+        + features.get("interceptions", 0) * 0.4
+        - features.get("yellow_cards", 0) * 0.5
+        - features.get("red_cards", 0) * 2
+    ).clip(lower=0)
+    features["contribuicao_partida"] = contrib
+    max_contrib = float(contrib.max())
+    features["nota_jogo"] = (0.0 if max_contrib <= 0 else (contrib / max_contrib * 100)).round(1)
+
     columns = [
-        "match_id",
-        "team",
-        "player_name",
-        "nota_jogo",
-        "impacto_partida",
-        "goals",
-        "assists",
-        "shots_on_target",
-        "saves",
-        "yellow_cards",
-        "red_cards",
+        "match_id", "team", "player_name", "nota_jogo", "contribuicao_partida",
+        "goals", "assists", "shots_on_target", "saves", "yellow_cards", "red_cards",
     ]
-    available = [column for column in columns if column in features.columns]
+    available = [c for c in columns if c in features.columns]
     notes = features[available].copy()
-    for column in ["nota_jogo", "impacto_partida"]:
-        if column in notes.columns:
-            notes[column] = notes[column].round(1)
+    for col in ["nota_jogo", "contribuicao_partida"]:
+        if col in notes.columns:
+            notes[col] = notes[col].round(1)
     return notes
 
 
@@ -1033,9 +1034,15 @@ def _format_player_stats(player_stats: pd.DataFrame) -> str:
     for column in ["goals", "assists", "shots", "shots_on_target", "saves", "tackles", "interceptions", "yellow_cards", "red_cards"]:
         if column not in stats.columns:
             stats[column] = 0
-    stats["impact_score"] = stats["impacto_partida"]
-    max_impact = stats["impact_score"].max()
-    stats["nota_jogo"] = 0 if max_impact <= 0 else (stats["impact_score"] / max_impact * 100).round(1)
+    contrib = (
+        stats.get("goals", 0) * 5 + stats.get("assists", 0) * 3
+        + stats.get("shots_on_target", 0) * 1.5 + stats.get("saves", 0) * 1.2
+        + stats.get("tackles", 0) * 0.4 + stats.get("interceptions", 0) * 0.4
+        - stats.get("yellow_cards", 0) * 0.5 - stats.get("red_cards", 0) * 2
+    ).clip(lower=0)
+    stats["impact_score"] = contrib
+    max_impact = float(contrib.max())
+    stats["nota_jogo"] = (0.0 if max_impact <= 0 else (contrib / max_impact * 100)).round(1)
     if "minutes_played" not in stats.columns:
         stats["minutes_played"] = 0
     columns = [

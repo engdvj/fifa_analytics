@@ -95,6 +95,65 @@ def build_team_match_features(matches: pd.DataFrame, team_stats: pd.DataFrame | 
 
 
 # ---------------------------------------------------------------------------
+# Forma recente
+# ---------------------------------------------------------------------------
+
+def build_team_recent_form(team_match_features: pd.DataFrame, n: int = 5) -> pd.DataFrame:
+    """Retorna métricas dos últimos N jogos por seleção.
+
+    Usa a coluna `date` para ordenar. Quando não há data disponível, mantém
+    a ordem de inserção. Retorna uma linha por seleção com colunas prefixadas
+    por `forma_` para não colidir com os acumulados de build_team_scores.
+    """
+    if team_match_features.empty:
+        return pd.DataFrame()
+
+    has_date = "date" in team_match_features.columns and team_match_features["date"].notna().any()
+    sort_col = "date" if has_date else "match_id"
+
+    rows = []
+    for team, group in team_match_features.groupby("team", dropna=False):
+        recent = group.sort_values(sort_col, ascending=True).tail(n)
+        jogos = len(recent)
+        pontos = int(recent["points"].sum()) if "points" in recent.columns else 0
+        vitorias = int((recent["result"] == "vitoria").sum()) if "result" in recent.columns else 0
+        empates = int((recent["result"] == "empate").sum()) if "result" in recent.columns else 0
+        derrotas = int((recent["result"] == "derrota").sum()) if "result" in recent.columns else 0
+        gols_pro = float(recent["goals_for"].sum()) if "goals_for" in recent.columns else 0.0
+        gols_contra = float(recent["goals_against"].sum()) if "goals_against" in recent.columns else 0.0
+        aproveitamento = pontos / (jogos * 3) if jogos > 0 else 0.0
+        # Sequência textual: V/E/D dos últimos jogos (mais recente à direita)
+        if "result" in recent.columns:
+            seq = "".join(
+                "V" if r == "vitoria" else ("E" if r == "empate" else "D")
+                for r in recent["result"]
+            )
+        else:
+            seq = ""
+        rows.append({
+            "team": team,
+            "forma_jogos": jogos,
+            "forma_pontos": pontos,
+            "forma_vitorias": vitorias,
+            "forma_empates": empates,
+            "forma_derrotas": derrotas,
+            "forma_gols_pro": gols_pro,
+            "forma_gols_contra": gols_contra,
+            "forma_saldo_gols": gols_pro - gols_contra,
+            "forma_aproveitamento": round(aproveitamento, 3),
+            "forma_score": round(_zscore_to_100(pd.Series([aproveitamento])).iloc[0], 1),
+            "forma_sequencia": seq,
+            "forma_n": n,
+        })
+
+    result = pd.DataFrame(rows)
+    # forma_score normalizado entre todas as seleções (não por time isolado)
+    if len(result) > 1:
+        result["forma_score"] = _zscore_to_100(result["forma_aproveitamento"]).round(1)
+    return result.sort_values("forma_aproveitamento", ascending=False).reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
 # Score de seleções
 # ---------------------------------------------------------------------------
 

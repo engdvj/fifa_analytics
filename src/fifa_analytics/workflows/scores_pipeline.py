@@ -9,6 +9,7 @@ from fifa_analytics.analytics.scores import (
     build_player_match_features,
     build_player_scores,
     build_team_match_features,
+    build_team_recent_form,
     build_team_scores,
 )
 from fifa_analytics.paths import GOLD_DIR, REPORTS_DIR
@@ -25,18 +26,20 @@ TEAM_RANKINGS_DIR = RANKINGS_DIR / "selecoes"
 PLAYER_RANKINGS_DIR = RANKINGS_DIR / "jogadores"
 TEAM_RANKINGS = [
     ("geral", "score_geral", "nota geral"),
+    ("resultado", "score_resultado", "resultado"),
     ("ataque", "score_ataque", "ataque"),
     ("defesa", "score_defesa", "defesa"),
-    ("controle", "score_controle", "controle"),
     ("eficiencia", "score_eficiencia", "eficiencia"),
-    ("fair_play", "score_disciplina", "fair play"),
+    ("controle", "score_controle", "controle"),
+    ("forma", "forma_score", "forma recente"),
 ]
 PLAYER_RANKINGS = [
     ("geral", "score_geral", "nota geral"),
-    ("medio", "score_medio", "impacto medio"),
     ("acumulado", "score_acumulado", "impacto acumulado"),
-    ("ofensivo", "score_ofensivo", "ofensivo"),
-    ("goleiro", "score_goleiro", "goleiro"),
+    ("goleiros", "score_geral", "goleiros"),
+    ("defensores", "score_geral", "defensores"),
+    ("meias", "score_geral", "meias"),
+    ("atacantes", "score_geral", "atacantes"),
 ]
 
 
@@ -51,15 +54,17 @@ def run_scores_pipeline() -> dict[str, Any]:
 
     team_match_features = build_team_match_features(matches, team_stats)
     team_scores = build_team_scores(team_match_features)
+    team_recent_form = build_team_recent_form(team_match_features, n=5)
     player_match_features = build_player_match_features(player_stats, lineups)
     player_scores = build_player_scores(player_match_features)
 
     team_match_features_path = write_dataframe(ANALYTICS_DIR / "team_match_features.parquet", team_match_features)
     team_scores_path = write_dataframe(ANALYTICS_DIR / "team_scores.parquet", team_scores)
+    team_recent_form_path = write_dataframe(ANALYTICS_DIR / "team_recent_form.parquet", team_recent_form)
     player_match_features_path = write_dataframe(ANALYTICS_DIR / "player_match_features.parquet", player_match_features)
     player_scores_path = write_dataframe(ANALYTICS_DIR / "player_scores.parquet", player_scores)
 
-    team_report_paths = write_team_reports(team_scores, team_match_features, player_scores)
+    team_report_paths = write_team_reports(team_scores, team_match_features, player_scores, team_recent_form)
     player_report_paths = write_player_reports(player_scores, player_match_features)
     team_index_path = write_team_index(team_scores)
     player_index_path = write_player_index(player_scores)
@@ -70,6 +75,7 @@ def run_scores_pipeline() -> dict[str, Any]:
     return {
         "team_match_features_path": team_match_features_path,
         "team_scores_path": team_scores_path,
+        "team_recent_form_path": team_recent_form_path,
         "player_match_features_path": player_match_features_path,
         "player_scores_path": player_scores_path,
         "team_reports_dir": TEAM_REPORTS_DIR,
@@ -88,16 +94,26 @@ def run_scores_pipeline() -> dict[str, Any]:
     }
 
 
-def write_team_reports(team_scores: pd.DataFrame, team_match_features: pd.DataFrame, player_scores: pd.DataFrame) -> list[Path]:
+def write_team_reports(
+    team_scores: pd.DataFrame,
+    team_match_features: pd.DataFrame,
+    player_scores: pd.DataFrame,
+    team_recent_form: pd.DataFrame | None = None,
+) -> list[Path]:
     ensure_dir(TEAM_REPORTS_DIR)
     paths = []
     total_teams = len(team_scores)
     team_slug_by_name = dict(zip(team_scores["team"], team_scores["team_slug"]))
+    form_by_team: dict[str, pd.Series] = {}
+    if team_recent_form is not None and not team_recent_form.empty:
+        for _, row in team_recent_form.iterrows():
+            form_by_team[str(row["team"])] = row
     for _, team in team_scores.iterrows():
         matches = team_match_features[team_match_features["team"] == team["team"]].sort_values("date")
-        players = player_scores[player_scores["team"] == team["team"]].sort_values(["score_geral", "impacto_total"], ascending=[False, False])
+        players = player_scores[player_scores["team"] == team["team"]].sort_values("score_geral", ascending=False)
+        recent = form_by_team.get(str(team["team"]))
         path = TEAM_REPORTS_DIR / f"{team['team_slug']}.md"
-        path.write_text(_render_team_report(team, matches, players, total_teams, team_slug_by_name), encoding="utf-8")
+        path.write_text(_render_team_report(team, matches, players, total_teams, team_slug_by_name, recent), encoding="utf-8")
         paths.append(path)
     return paths
 
@@ -142,14 +158,19 @@ def _render_team_rankings_index(team_scores: pd.DataFrame) -> str:
 
 
 def _render_team_ranking(team_scores: pd.DataFrame, ranking_slug: str, metric: str, title: str) -> str:
+    # Para forma recente, a coluna pode não existir se o pipeline não rodou ainda
+    if metric not in team_scores.columns:
+        return f"# Ranking de selecoes - {title.title()}\n\nDados de `{metric}` ainda nao disponiveis.\n"
     ranked = team_scores.sort_values([metric, "score_geral", "points", "saldo_gols"], ascending=[False, False, False, False]).reset_index(drop=True)
     ranked["rank_metrica"] = ranked.index + 1
-    score_columns = ["score_geral", "score_ataque", "score_defesa", "score_controle", "score_eficiencia", "score_disciplina"]
+    score_columns = ["score_geral", "score_resultado", "score_ataque", "score_defesa", "score_eficiencia", "score_controle"]
+    if "forma_score" in ranked.columns:
+        score_columns.append("forma_score")
     ordered_columns = [
         "rank_metrica",
         "team",
         metric,
-        *[column for column in score_columns if column != metric],
+        *[column for column in score_columns if column != metric and column in ranked.columns],
         "nivel_evidencia",
         "jogos",
         "points",
@@ -181,6 +202,9 @@ def write_player_index(player_scores: pd.DataFrame) -> Path:
     return path
 
 
+_PROFILE_SLUGS = {"goleiros": "goleiro", "defensores": "defensor", "meias": "meio", "atacantes": "atacante"}
+
+
 def write_player_rankings(player_scores: pd.DataFrame) -> list[Path]:
     ensure_dir(PLAYER_RANKINGS_DIR)
     paths = []
@@ -188,8 +212,10 @@ def write_player_rankings(player_scores: pd.DataFrame) -> list[Path]:
     index_path.write_text(_render_player_rankings_index(player_scores), encoding="utf-8")
     paths.append(index_path)
     for slug, metric, title in PLAYER_RANKINGS:
+        profile_filter = _PROFILE_SLUGS.get(slug)
+        pool = player_scores[player_scores["perfil"] == profile_filter] if profile_filter else player_scores
         path = PLAYER_RANKINGS_DIR / f"{slug}.md"
-        path.write_text(_render_player_ranking(player_scores, slug, metric, title), encoding="utf-8")
+        path.write_text(_render_player_ranking(pool, slug, metric, title), encoding="utf-8")
         paths.append(path)
     return paths
 
@@ -200,31 +226,27 @@ def _render_player_rankings_index(player_scores: pd.DataFrame) -> str:
 
 
 def _render_player_ranking(player_scores: pd.DataFrame, ranking_slug: str, metric: str, title: str) -> str:
-    ranked = player_scores.sort_values([metric, "score_geral", "impacto_total"], ascending=[False, False, False]).reset_index(drop=True)
+    if player_scores.empty:
+        return f"# Ranking de jogadores - {title.title()}\n\nNenhum jogador encontrado para este perfil.\n"
+    sort_cols = [c for c in [metric, "score_geral", "goals"] if c in player_scores.columns]
+    ranked = player_scores.sort_values(sort_cols, ascending=[False] * len(sort_cols)).reset_index(drop=True)
     ranked["rank_metrica"] = ranked.index + 1
-    score_columns = ["score_geral", "score_medio", "score_acumulado", "score_ofensivo", "score_goleiro"]
-    ordered_columns = [
-        "rank_metrica",
-        "player_slug",
-        "player_name",
-        "team",
-        "perfil",
+    score_columns = ["score_geral", "score_acumulado"]
+    want_columns = [
+        "rank_metrica", "player_slug", "player_name", "team", "perfil",
         metric,
-        *[column for column in score_columns if column != metric],
-        "nivel_evidencia",
-        "impacto_total",
-        "jogos",
-        "goals",
-        "assists",
-        "shots_on_target",
-        "saves",
+        *[c for c in score_columns if c != metric and c in ranked.columns],
+        "nivel_evidencia", "jogos", "goals", "assists", "shots_on_target", "saves",
     ]
-    display = ranked.head(100)[
-        ordered_columns
-    ].copy()
-    display["player_name"] = display.apply(lambda row: _player_link(row["player_name"], row["player_slug"]), axis=1)
-    display["team"] = display["team"].apply(lambda team: _team_link(team, slugify(team)))
-    display = display.drop(columns=["player_slug"]).rename(columns=_player_ranking_labels(metric, title))
+    available = [c for c in want_columns if c in ranked.columns]
+    display = ranked.head(100)[available].copy()
+    if "player_name" in display.columns and "player_slug" in display.columns:
+        display["player_name"] = display.apply(lambda row: _player_link(row["player_name"], row["player_slug"]), axis=1)
+    if "team" in display.columns:
+        display["team"] = display["team"].apply(lambda t: _team_link(t, slugify(t)))
+    if "player_slug" in display.columns:
+        display = display.drop(columns=["player_slug"])
+    display = display.rename(columns=_player_ranking_labels(metric, title))
     nav = _player_rankings_nav(ranking_slug)
     return f"# Ranking de jogadores - {title.title()}\n\nAtualizado em `{utc_now_iso()}`.\n\n{nav}\n\n{_player_score_explanation()}\n\nTop 100 por {title}.\n\n{display.to_markdown(index=False)}\n"
 
@@ -235,28 +257,28 @@ def _render_team_report(
     players: pd.DataFrame,
     total_teams: int,
     team_slug_by_name: dict[str, str],
+    recent: pd.Series | None = None,
 ) -> str:
     generated_at = utc_now_iso()
     components = _markdown_table(
         [
+            ["Resultado", team.get("score_resultado", 0)],
             ["Ataque", team.get("score_ataque", 0)],
             ["Defesa", team.get("score_defesa", 0)],
-            ["Controle", team.get("score_controle", 0)],
             ["Eficiencia", team.get("score_eficiencia", 0)],
-            ["Fair play", team.get("score_disciplina", 0)],
+            ["Controle", team.get("score_controle", 0)],
         ],
         ["componente", "nota"],
     )
     audit = _markdown_table(
         [
-            ["Geral", team.get("score_geral", 0), "", team.get("confianca_score", ""), team.get("nivel_evidencia", "")],
-            ["Ataque", team.get("score_ataque", 0), team.get("score_ataque_bruto", ""), team.get("confianca_ataque", ""), _evidence_level(team.get("confianca_ataque"))],
-            ["Defesa", team.get("score_defesa", 0), team.get("score_defesa_bruto", ""), team.get("confianca_defesa", ""), _evidence_level(team.get("confianca_defesa"))],
-            ["Controle", team.get("score_controle", 0), team.get("score_controle_bruto", ""), team.get("confianca_controle", ""), _evidence_level(team.get("confianca_controle"))],
-            ["Eficiencia", team.get("score_eficiencia", 0), team.get("score_eficiencia_bruto", ""), team.get("confianca_eficiencia", ""), _evidence_level(team.get("confianca_eficiencia"))],
-            ["Fair play", team.get("score_disciplina", 0), team.get("score_disciplina_bruto", ""), team.get("confianca_disciplina", ""), _evidence_level(team.get("confianca_disciplina"))],
+            ["Resultado", team.get("score_resultado", 0), team.get("confianca_amostra", ""), team.get("nivel_evidencia", "")],
+            ["Ataque",    team.get("score_ataque", 0),    team.get("confianca_dados", ""),   _evidence_level(team.get("confianca_dados"))],
+            ["Defesa",    team.get("score_defesa", 0),    team.get("confianca_dados", ""),   _evidence_level(team.get("confianca_dados"))],
+            ["Eficiencia",team.get("score_eficiencia", 0),team.get("confianca_dados", ""),   _evidence_level(team.get("confianca_dados"))],
+            ["Controle",  team.get("score_controle", 0),  team.get("confianca_dados", ""),   _evidence_level(team.get("confianca_dados"))],
         ],
-        ["componente", "nota_usada", "nota_bruta", "peso_evidencia", "evidencia"],
+        ["componente", "nota_usada", "peso_evidencia", "evidencia"],
     )
     summary = _markdown_table(
         [
@@ -265,18 +287,38 @@ def _render_team_report(
             ["saldo_gols", team.get("saldo_gols", 0)],
             ["gols_pro", team.get("gols_pro", 0)],
             ["gols_contra", team.get("gols_contra", 0)],
-            ["chutes", team.get("chutes", 0)],
             ["chutes_no_alvo", team.get("chutes_no_alvo", 0)],
-            ["chutes_sofridos", team.get("chutes_sofridos", 0)],
             ["chutes_no_alvo_sofridos", team.get("chutes_no_alvo_sofridos", 0)],
-            ["teste_defensivo", _evidence_level(team.get("confianca_teste_defensivo"))],
             ["jogos_com_estatisticas", team.get("jogos_com_estatisticas", "")],
             ["aproveitamento", _percent(team.get("aproveitamento"))],
         ],
         ["metrica", "valor"],
     )
+
+    forma_section = ""
+    if recent is not None:
+        forma_section = f"""
+## Forma recente (ultimos {int(recent.get('forma_n', 5))} jogos)
+
+Sequencia: **{recent.get('forma_sequencia', '')}** (V=vitoria, E=empate, D=derrota, mais recente a direita)
+
+{_markdown_table(
+    [
+        ["jogos", recent.get('forma_jogos', 0)],
+        ["pontos", recent.get('forma_pontos', 0)],
+        ["aproveitamento", _percent(recent.get('forma_aproveitamento'))],
+        ["vitorias", recent.get('forma_vitorias', 0)],
+        ["empates", recent.get('forma_empates', 0)],
+        ["derrotas", recent.get('forma_derrotas', 0)],
+        ["gols_pro", recent.get('forma_gols_pro', 0)],
+        ["gols_contra", recent.get('forma_gols_contra', 0)],
+    ],
+    ["metrica", "valor"],
+)}
+"""
+
     match_table = _team_matches_table(matches, team_slug_by_name)
-    player_table = _team_players_table(players)
+    player_table = _team_players_table_by_profile(players)
     return f"""<!--
 team: {team.get('team')}
 generated_at: {generated_at}
@@ -303,7 +345,7 @@ Nivel de evidencia: **{team.get('nivel_evidencia', '')}**
 ## Resumo acumulado
 
 {summary}
-
+{forma_section}
 ## Jogos
 
 {match_table}
@@ -320,53 +362,47 @@ Nivel de evidencia: **{team.get('nivel_evidencia', '')}**
 
 def _render_player_report(player: pd.Series, matches: pd.DataFrame, total_players: int) -> str:
     generated_at = utc_now_iso()
-    components = _markdown_table(
-        [
-            ["Geral", player.get("score_geral", 0)],
-            ["Medio", player.get("score_medio", 0)],
-            ["Acumulado", player.get("score_acumulado", 0)],
-            ["Ofensivo", player.get("score_ofensivo", 0)],
-            ["Goleiro", player.get("score_goleiro", 0)],
-        ],
-        ["componente", "nota"],
-    )
+    profile = player.get("perfil", "")
+    profile_label = {"goleiro": "Goleiro", "defensor": "Defensor", "meio": "Meia", "atacante": "Atacante"}.get(profile, profile)
+    profile_ranking_slug = {"goleiro": "goleiros", "defensor": "defensores", "meio": "meias", "atacante": "atacantes"}.get(profile, "geral")
     summary = _markdown_table(
         [
             ["selecao", player.get("team", "")],
-            ["perfil", player.get("perfil", "")],
+            ["perfil", profile_label],
             ["jogos", player.get("jogos", 0)],
             ["gols", player.get("goals", 0)],
             ["assistencias", player.get("assists", 0)],
             ["participacoes_gol", player.get("participacoes_gol", 0)],
-            ["chutes", player.get("shots", 0)],
             ["chutes_no_alvo", player.get("shots_on_target", 0)],
             ["defesas", player.get("saves", 0)],
-            ["impacto_total", player.get("impacto_total", 0)],
+            ["tackles", player.get("tackles", 0)],
+            ["intercepcoes", player.get("interceptions", 0)],
+            ["score_acumulado", player.get("score_acumulado", 0)],
         ],
         ["metrica", "valor"],
     )
     match_table = _player_matches_table(matches)
+    team_name = player.get("team") or ""
     return f"""<!--
 player: {player.get('player_name')}
-team: {player.get('team')}
+team: {team_name}
+perfil: {profile}
 generated_at: {generated_at}
 -->
 
 # {player.get('player_name')}
 
-[[reports/rankings/jogadores/index|Ranking de jogadores]] · {_team_link(player.get('team'), slugify(player.get('team')))}
+[[reports/rankings/jogadores/index|Ranking geral]] · [[reports/rankings/jogadores/{profile_ranking_slug}|Ranking {profile_label}]] · {_team_link(team_name, slugify(team_name))}
 
 ## Score
 
-Nota geral: **{_format_score(player.get('score_geral'))}/100**
+Nota geral ({profile_label}): **{_format_score(player.get('score_geral'))}/100**
 
 Ranking geral: **{_format_value(player.get('ranking_score_geral'))} de {total_players}**
 
 Nivel de evidencia: **{player.get('nivel_evidencia', '')}**
 
 {_player_score_explanation()}
-
-{components}
 
 ## Resumo acumulado
 
@@ -415,66 +451,63 @@ def _team_matches_table(matches: pd.DataFrame, team_slug_by_name: dict[str, str]
 def _team_players_table(players: pd.DataFrame) -> str:
     if players.empty:
         return "Nenhum jogador com estatistica individual encontrado."
-    display = players.head(20)[
-        [
-            "ranking_score_geral",
-            "player_name",
-            "perfil",
-            "score_geral",
-            "impacto_total",
-            "jogos",
-            "goals",
-            "assists",
-            "shots_on_target",
-            "saves",
-        ]
-    ].copy()
-    display["player_name"] = players.head(20).apply(lambda row: _player_link(row["player_name"], row["player_slug"]), axis=1)
-    display = display.rename(
-        columns={
-            "ranking_score_geral": "rank_geral",
-            "player_name": "jogador",
-            "score_geral": "nota",
-            "goals": "gols",
-            "assists": "assist",
-            "shots_on_target": "no_alvo",
-            "saves": "defesas",
-        }
+    want = ["ranking_score_geral", "player_name", "perfil", "score_geral",
+            "jogos", "goals", "assists", "shots_on_target", "saves"]
+    avail = [c for c in want if c in players.columns]
+    display = players.head(20)[avail].copy()
+    display["player_name"] = players.head(20).apply(
+        lambda row: _player_link(row["player_name"], row["player_slug"]), axis=1
     )
+    display = display.rename(columns={
+        "ranking_score_geral": "rank", "player_name": "jogador",
+        "score_geral": "nota", "goals": "gols",
+        "assists": "assist", "shots_on_target": "no_alvo", "saves": "defesas",
+    })
     return display.fillna("").to_markdown(index=False)
+
+
+def _team_players_table_by_profile(players: pd.DataFrame) -> str:
+    """Tabela de jogadores agrupada por perfil com ranking dentro do perfil."""
+    if players.empty:
+        return "Nenhum jogador com estatistica individual encontrado."
+    profile_order = ["goleiro", "defensor", "meio", "atacante"]
+    profile_labels = {"goleiro": "Goleiros", "defensor": "Defensores", "meio": "Meias", "atacante": "Atacantes"}
+    sections = []
+    for profile in profile_order:
+        pool = players[players["perfil"] == profile] if "perfil" in players.columns else pd.DataFrame()
+        if pool.empty:
+            continue
+        want = ["player_name", "score_geral", "jogos", "goals", "assists", "shots_on_target", "saves", "tackles", "interceptions"]
+        avail = [c for c in want if c in pool.columns]
+        display = pool[avail].copy()
+        display["player_name"] = pool.apply(
+            lambda row: _player_link(row["player_name"], row["player_slug"]), axis=1
+        )
+        display = display.rename(columns={
+            "player_name": "jogador", "score_geral": "nota",
+            "goals": "gols", "assists": "assist",
+            "shots_on_target": "no_alvo", "saves": "defesas",
+        })
+        sections.append(f"### {profile_labels[profile]}\n\n{display.fillna('').to_markdown(index=False)}")
+    return "\n\n".join(sections) if sections else "Nenhum jogador com estatistica individual encontrado."
 
 
 def _player_matches_table(matches: pd.DataFrame) -> str:
     if matches.empty:
         return "Nenhum jogo com estatistica individual encontrado."
     columns = [
-        "match_id",
-        "goals",
-        "assists",
-        "shots",
-        "shots_on_target",
-        "saves",
-        "yellow_cards",
-        "red_cards",
-        "impacto_partida",
+        "match_id", "goals", "assists", "shots_on_target",
+        "saves", "tackles", "interceptions", "yellow_cards", "red_cards",
     ]
-    available = [column for column in columns if column in matches.columns]
+    available = [c for c in columns if c in matches.columns]
     display = matches[available].copy()
     if "match_id" in display.columns:
         display["match_id"] = display["match_id"].apply(_match_link)
-    display = display.rename(
-        columns={
-            "match_id": "jogo",
-            "goals": "gols",
-            "assists": "assist",
-            "shots": "chutes",
-            "shots_on_target": "no_alvo",
-            "saves": "defesas",
-            "yellow_cards": "amarelos",
-            "red_cards": "vermelhos",
-            "impacto_partida": "impacto",
-        }
-    )
+    display = display.rename(columns={
+        "match_id": "jogo", "goals": "gols", "assists": "assist",
+        "shots_on_target": "no_alvo", "saves": "defesas",
+        "yellow_cards": "amarelos", "red_cards": "vermelhos",
+    })
     return display.fillna(0).to_markdown(index=False)
 
 
@@ -507,11 +540,12 @@ def _team_ranking_labels(metric: str, title: str) -> dict[str, str]:
         "rank_metrica": "rank",
         "team": "selecao",
         "score_geral": "nota_geral",
+        "score_resultado": "resultado",
         "score_ataque": "ataque",
         "score_defesa": "defesa",
-        "score_controle": "controle",
         "score_eficiencia": "eficiencia",
-        "score_disciplina": "fair_play",
+        "score_controle": "controle",
+        "forma_score": "forma",
         "nivel_evidencia": "evidencia",
         "points": "pontos",
     }
@@ -525,10 +559,7 @@ def _player_ranking_labels(metric: str, title: str) -> dict[str, str]:
         "player_name": "jogador",
         "team": "selecao",
         "score_geral": "nota_geral",
-        "score_medio": "medio",
         "score_acumulado": "acumulado",
-        "score_ofensivo": "ofensivo",
-        "score_goleiro": "goleiro",
         "nivel_evidencia": "evidencia",
         "goals": "gols",
         "assists": "assist",
@@ -542,26 +573,23 @@ def _player_ranking_labels(metric: str, title: str) -> dict[str, str]:
 def _team_score_explanation() -> str:
     return """## Como ler a nota
 
-- **Nota geral**: nota de 0 a 100 usada no ranking.
-- **Ataque**: volume e producao ofensiva, usando gols, chutes e chutes no alvo por jogo.
-- **Defesa**: solidez defensiva, usando gols sofridos, chutes sofridos, chutes no alvo sofridos e jogos sem sofrer gol.
-- **Controle**: dominio com bola, usando posse, passes e precisao de passe.
-- **Eficiencia**: aproveitamento ofensivo, usando gols por chute e chutes no alvo por chute. Nao e ataque puro: ataque mede volume/producao; eficiencia mede o quanto esse volume vira perigo/gol.
-- **Fair play**: controle disciplinar. Menos faltas, amarelos e vermelhos melhoram a nota. Nao mede qualidade tecnica.
-- **Evidencia**: estabilidade da nota (`baixa`, `media`, `alta`). Nao diz que a nota esta certa ou errada; indica se ja ha amostra/dados suficientes para confiar que ela oscila menos.
-- **Peso de evidencia**: numero tecnico usado na auditoria para puxar notas brutas extremas para uma referencia mais conservadora quando ha poucos jogos, dados incompletos ou baixo teste defensivo."""
+- **Nota geral**: nota de 0 a 100 = resultado (40%) + processo (60%). Componentes calculados via z-score, preservando distancia absoluta entre selecoes.
+- **Resultado** (peso 40%): aproveitamento real de pontos. Quem vence mais jogos tem nota mais alta independente do estilo.
+- **Ataque** (peso 20%): gols e chutes no alvo por jogo. Sem chutes totais — mede qualidade, nao volume bruto.
+- **Defesa** (peso 25%): gols sofridos, chutes no alvo sofridos e jogos sem tomar gol.
+- **Eficiencia** (peso 10%): conversao de chutes em gol e chutes no alvo por chute. Distinto de ataque: ataque mede producao, eficiencia mede aproveitamento.
+- **Controle** (peso 5%): posse, passes e precisao. Peso baixo — estilo de jogo nao e determinante de qualidade.
+- **Forma recente**: aproveitamento dos ultimos 5 jogos, independente da nota geral acumulada.
+- **Evidencia**: estabilidade da nota (`baixa`, `media`, `alta`). Aumenta com o numero de jogos jogados."""
 
 
 def _player_score_explanation() -> str:
     return """## Como ler a nota
 
-- **Nota geral**: nota de 0 a 100 usada no ranking.
-- **Medio**: impacto por jogo.
-- **Acumulado**: impacto total na Copa.
-- **Ofensivo**: gols, assistencias, chutes e chutes no alvo.
-- **Goleiro**: defesas registradas.
-- **Evidencia**: estabilidade da nota (`baixa`, `media`, `alta`). Com poucos jogos, a nota entra no ranking, mas tende a oscilar mais.
-- Cartoes entram como penalizacao no impacto do jogador."""
+- **Nota geral**: nota de 0 a 100 calculada dentro do pool de cada perfil (goleiro, defensor, meia, atacante). Goleiro nao compete com atacante na mesma formula.
+- **Acumulado**: contribuicao total no torneio (gols, assistencias, defesas) — coluna auxiliar, nao entra na nota geral.
+- **Evidencia**: estabilidade da nota (`baixa`, `media`, `alta`). Com poucos jogos a nota tende a oscilar mais.
+- Rankings por posicao: `goleiros`, `defensores`, `meias`, `atacantes` — cada um usa metricas do proprio perfil."""
 
 
 def _format_value(value: Any) -> str:
