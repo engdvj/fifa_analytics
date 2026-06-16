@@ -1,0 +1,56 @@
+sources:
+  sample:
+    enabled: true
+    official: false
+    requires_api_key: false
+    role: desenvolvimento_local
+    base_url: null
+  worldcup2026:
+    enabled: true
+    official: false
+    requires_api_key: false
+    role: operacional_principal
+    base_url: https://worldcup26.ir
+    endpoints:
+      health: /api/health
+      matches: /get/games
+      groups: /get/groups
+      teams: /get/teams
+      stadiums: /get/stadiums
+    observacao: API publica gratuita; pode oscilar e deve ser validada contra fonte oficial.
+  wikipedia:
+    enabled: true
+    official: false
+    requires_api_key: false
+    role: referencia_publica_inicial
+    base_url: https://en.wikipedia.org/wiki/2026_FIFA_World_Cup
+  espn:
+    enabled: true
+    official: false
+    requires_api_key: false
+    role: enriquecimento_analitico_gratuito
+    base_url: https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world
+    endpoints:
+      scoreboard: /scoreboard
+      summary: /summary
+    observacao: Fonte publica sem chave para estatisticas por equipe, eventos, lineups e jogadores.
+  fifa:
+    enabled: true
+    official: true
+    requires_api_key: false
+    role: validacao_oficial
+    base_url: null
+  balldontlie:
+    enabled: false
+    official: false
+    requires_api_key: true
+    api_key_env: BALLDONTLIE_API_KEY
+    role: enriquecimento_analitico
+    base_url: null
+  football_data:
+    enabled: false
+    official: false
+    requires_api_key: true
+    api_key_env: FOOTBALL_DATA_API_KEY
+    role: validacao_secundaria
+    base_url: null

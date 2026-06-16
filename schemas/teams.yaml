@@ -1,0 +1,10 @@
+name: teams
+required_columns:
+  - team_id
+  - team_name
+optional_columns:
+  - team_code
+  - group
+  - confederation
+  - fifa_ranking
+

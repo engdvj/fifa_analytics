@@ -1,0 +1,17 @@
+name: player_stats
+required_columns:
+  - match_id
+  - team
+  - player_name
+optional_columns:
+  - player_id
+  - minutes_played
+  - goals
+  - assists
+  - shots
+  - shots_on_target
+  - passes
+  - tackles
+  - interceptions
+  - saves
+  - cards

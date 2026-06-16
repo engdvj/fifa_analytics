@@ -1,0 +1,35 @@
+competition:
+  id: world_cup_2026
+  name: FIFA World Cup 2026
+  total_matches: 104
+
+defaults:
+  source: worldcup2026
+  run_scope: single_match
+  timezone: UTC
+  write_outputs: true
+  force_refresh: false
+
+statuses:
+  match:
+    - agendado
+    - pre_jogo
+    - ao_vivo
+    - intervalo
+    - finalizado
+    - consolidado
+    - adiado
+    - cancelado
+    - desconhecido
+  report:
+    - nao_iniciado
+    - parcial
+    - completo
+    - precisa_revisao
+    - final
+  quality:
+    - ok
+    - aviso
+    - erro
+    - ausente
+    - desconhecido

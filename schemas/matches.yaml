@@ -1,0 +1,27 @@
+name: matches
+required_columns:
+  - match_id
+  - home_team
+  - away_team
+  - date
+  - status
+optional_columns:
+  - source_match_id
+  - fifa_match_id
+  - home_team_code
+  - away_team_code
+  - kickoff_time
+  - timezone
+  - group
+  - stage
+  - round
+  - stadium
+  - city
+  - country
+  - home_score
+  - away_score
+  - winner
+  - main_source
+  - official_reference
+  - last_updated_at
+

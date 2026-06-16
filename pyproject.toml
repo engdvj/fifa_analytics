@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fifa-analytics"
+version = "0.1.0"
+description = "Pipeline de analises da Copa do Mundo 2026 com Python e Jupyter."
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.scripts]
+fifa-analytics = "fifa_analytics.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

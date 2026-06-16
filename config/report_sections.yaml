@@ -1,0 +1,28 @@
+match_report_sections:
+  - id: "00_metadata"
+    title: "Metadados"
+    required: true
+  - id: "01_match_summary"
+    title: "Resumo da partida"
+    required: true
+  - id: "02_context"
+    title: "Contexto"
+    required: false
+  - id: "05_team_stats"
+    title: "Estatisticas e notas das selecoes"
+    required: false
+  - id: "07_key_insights"
+    title: "Principais insights"
+    required: false
+  - id: "03_lineups"
+    title: "Escalacoes e notas dos jogadores"
+    required: false
+  - id: "06_player_stats"
+    title: "Destaques individuais"
+    required: false
+  - id: "04_timeline"
+    title: "Linha do tempo"
+    required: false
+  - id: "08_data_quality"
+    title: "Qualidade dos dados"
+    required: true

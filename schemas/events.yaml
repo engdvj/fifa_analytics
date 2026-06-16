@@ -1,0 +1,18 @@
+name: events
+required_columns:
+  - match_id
+  - event_type
+  - minute
+optional_columns:
+  - event_id
+  - stoppage_minute
+  - team
+  - team_code
+  - player
+  - player_id
+  - related_player
+  - period
+  - description
+  - source
+  - collected_at
+
