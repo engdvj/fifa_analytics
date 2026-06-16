@@ -1,4 +1,19 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(*)"
+    ],
+    "ask": [
+      "Bash(rm:*)",
+      "Bash(rmdir:*)",
+      "Bash(git push:*)"
+    ],
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(dd:*)",
+      "Bash(shred:*)"
+    ]
+  },
   "hooks": {
     "PostToolUse": [
       {
