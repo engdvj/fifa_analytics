@@ -5,7 +5,9 @@ from fifa_analytics.workflows.sample_pipeline import run_sample_pipeline
 from fifa_analytics.workflows.basic_reports import run_basic_reports
 from fifa_analytics.workflows.canonical_reports import rebuild_match_report, run_canonical_index
 from fifa_analytics.workflows.espn_pipeline import run_espn_pipeline, run_espn_rosters_pipeline
-from fifa_analytics.workflows.scores_pipeline import run_scores_pipeline
+from fifa_analytics.workflows.scores365_pipeline import run_scores365_pipeline
+from fifa_analytics.workflows.scores_pipeline import run_calibration_report, run_scores_pipeline
+from fifa_analytics.workflows.snapshot_pipeline import run_snapshot_jogo
 from fifa_analytics.workflows.tournament_status import run_tournament_status
 from fifa_analytics.workflows.update_pipeline import run_update_pipeline
 from fifa_analytics.workflows.wiki_pipeline import run_wikipedia_pipeline
@@ -55,6 +57,19 @@ LABELS = {
     "espn_eventos": "eventos_espn",
     "espn_estatisticas_selecoes": "estatisticas_selecoes_espn",
     "espn_estatisticas_jogadores": "estatisticas_jogadores_espn",
+    "365scores_status": "status_365scores",
+    "365scores_jogos_coletados": "jogos_coletados_365scores",
+    "365scores_jogadores": "jogadores_365scores",
+    "game_ids_scanned": "ids_varridos",
+    "games_with_stats": "jogos_com_estatisticas",
+    "teams": "selecoes",
+    "players": "jogadores",
+    "team_stat_rows": "linhas_estatisticas_selecoes",
+    "player_stat_rows": "linhas_estatisticas_jogadores",
+    "team_silver": "caminho_estatisticas_selecoes_silver",
+    "player_silver": "caminho_estatisticas_jogadores_silver",
+    "team_gold": "caminho_estatisticas_selecoes_gold_365",
+    "player_gold": "caminho_estatisticas_jogadores_gold_365",
     "partidas_canonicas": "partidas_canonicas",
     "partidas_processadas": "partidas_processadas",
     "caminho_status_torneio": "caminho_status_torneio",
@@ -147,6 +162,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Coleta o elenco completo (convocacao) de cada selecao na ESPN, com posicao estavel. Roda separado por ser raro mudar durante o torneio.",
     )
 
+    subparsers.add_parser(
+        "365scores",
+        help="Coleta estatisticas detalhadas por jogador e por selecao na 365Scores (segunda fonte de validacao).",
+    )
+
     tournament_status = subparsers.add_parser(
         "status-torneio",
         aliases=["tournament-status"],
@@ -192,6 +212,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Gera features, scores e relatorios acumulados por selecao e jogador.",
     )
 
+    calibrar_pesos = subparsers.add_parser(
+        "calibrar-pesos",
+        help="Valida cada componente do score contra sua metrica natural e sugere pesos via regressao (RidgeCV). Nao altera os pesos automaticamente.",
+    )
+    calibrar_pesos.add_argument(
+        "--forcar",
+        action="store_true",
+        help="Gera novo snapshot mesmo sem 2+ jogos novos desde o ultimo.",
+    )
+
+    snap = subparsers.add_parser(
+        "reprocessar-snapshots",
+        help="Processa o próximo jogo (ou --jogo N) e exibe o ranking naquele momento.",
+    )
+    snap.add_argument(
+        "--jogo",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Número do jogo a processar. Se omitido, processa o próximo ainda não processado.",
+    )
+
     update = subparsers.add_parser(
         "atualizar",
         aliases=["refresh", "update"],
@@ -206,6 +248,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--sem-espn",
         action="store_true",
         help="Nao coleta a ESPN nesta rodada.",
+    )
+    update.add_argument(
+        "--sem-365scores",
+        action="store_true",
+        help="Nao coleta a 365Scores nesta rodada (varredura de IDs e mais lenta).",
     )
     update.add_argument(
         "--status",
@@ -235,6 +282,9 @@ def main() -> None:
     elif args.command == "espn-elencos":
         result = run_espn_rosters_pipeline()
         _print_result(result)
+    elif args.command == "365scores":
+        result = run_scores365_pipeline()
+        _print_result(result)
     elif args.command in {"status-torneio", "tournament-status"}:
         result = run_tournament_status(source=args.source)
         _print_result(result)
@@ -250,10 +300,23 @@ def main() -> None:
     elif args.command == "scores":
         result = run_scores_pipeline()
         _print_result(result)
+    elif args.command == "calibrar-pesos":
+        result = run_calibration_report(force=args.forcar)
+        if result["status"] == "pulado":
+            print(f"Calibracao pulada: {result['motivo']}")
+        else:
+            print(f"Relatorio salvo em: {result['calibration_report_path']}")
+            print(f"Snapshot: {result['snapshot_path']}")
+            print(f"Status calibracao geral: {result['weight_calibration'].get('status')}")
+    elif args.command == "reprocessar-snapshots":
+        result = run_snapshot_jogo(n=args.jogo)
+        if result.get("proximo"):
+            print(f"Próximo: fifa-analytics reprocessar-snapshots --jogo {result['proximo']}")
     elif args.command in {"atualizar", "refresh", "update"}:
         result = run_update_pipeline(
             include_worldcup2026=not args.sem_worldcup2026,
             include_espn=not args.sem_espn,
+            include_365scores=not args.sem_365scores,
             status=args.status,
         )
         _print_result(result)

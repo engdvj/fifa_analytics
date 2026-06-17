@@ -51,6 +51,11 @@ Formato: `copa_2026_jogo_NNN` (ex: `copa_2026_jogo_001`). Derivado do número de
 ### Nomes de times
 Normalizados via `config/teams_mapping.yaml` + `transforms/team_names.traduzir_selecao()`. Sempre passar nomes pela função antes de salvar.
 
+### Pesos do score de seleções (calibração incremental)
+`TEAM_SCORE_WEIGHTS` em `analytics/scores.py` define os pesos de design (fixos: `score_resultado`=0.35, `score_forca_relativa`=0.15). Os 4 componentes de processo (`score_ataque`, `score_defesa`, `score_eficiencia`, `score_controle`) são recalibrados a cada 2 jogos novos finalizados via regressão (RidgeCV) em `analytics/calibration.py`, contra saldo de gols real — não confunda com os pesos fixos, que não entram nessa regressão por serem circulares (resultado) ou acumulados (Elo). `scores_pipeline._load_latest_calibrated_weights()` lê o snapshot mais recente em `data/gold/analytics/calibration_history/` e aplica via `apply_calibrated_weights()`. Rode `fifa-analytics calibrar-pesos` após coletar jogos novos para gerar um snapshot; ele só gera se houver +2 jogos desde o último (`--forcar` ignora isso).
+
+`score_forca_relativa` tem peso adicionalmente escalado por `_elo_maturity_factor()`: no início do torneio, com todos os times no rating Elo inicial (1500), vencer não prova força relativa de fato — o peso cresce organicamente conforme os ratings se diferenciam de verdade (variância real do Elo vs. teto teórico simulado via `_simulate_max_elo_variance`). A fração "não ganha" é transferida para `score_resultado`.
+
 ## O que NÃO fazer
 
 - Não salvar DataFrames em `reports/` — Markdown é saída, não base de dados
@@ -75,10 +80,12 @@ fifa-analytics atualizar
 fifa-analytics worldcup2026        # fonte operacional principal
 fifa-analytics espn                # enriquecimento ESPN
 fifa-analytics wikipedia           # referência pública
+fifa-analytics 365scores           # segunda fonte de validação: formação, expected_assists, key_passes, dribbles_won
 fifa-analytics indice-canonico     # reconcilia fontes → gold
 fifa-analytics relatorios-basicos  # gera fragmentos + relatórios finais
 fifa-analytics status-torneio      # standings, status, pendências
 fifa-analytics scores              # scores e rankings de times e jogadores
+fifa-analytics calibrar-pesos      # calibra pesos de score_geral via regressão (RidgeCV); --forcar ignora o intervalo mínimo
 
 # Testes
 pytest -q

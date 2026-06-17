@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -33,6 +34,17 @@ ELO_INITIAL_RATING = 1500.0
 # porque o torneio tem só 3-7 jogos por time — cada resultado precisa pesar
 # mais para o rating se diferenciar dentro de uma amostra tão pequena.
 ELO_K_FACTOR = 40.0
+# Teto do multiplicador de margem de gols. ln(perf_diff+1)+1 cresce sem limite
+# e chega a ~4x numa goleada com domínio total — o teto evita que bater muito
+# num adversário fraco renda Elo desproporcional. 2.5 mantém o realce de
+# vitórias dominantes (≈ +150% sobre uma vitória mínima) sem explodir.
+ELO_MARGIN_CAP = 2.5
+
+# Maior número médio de jogos por time para o qual vale a pena pré-calcular
+# o teto teórico de variância do Elo — a fase de grupos tem 3 jogos por
+# time; números maiores (mata-mata) reusam o teto de 3 jogos como aproximação,
+# já que o fator de maturidade essencialmente satura bem antes disso.
+_ELO_MAX_VARIANCE_MAX_GAMES = 3
 
 # Posições ESPN → perfil interno
 # Inclui tanto os códigos padrão (GK, CB...) quanto os que aparecem nos dados reais
@@ -66,6 +78,7 @@ def build_team_match_features(
     team_stats: pd.DataFrame | None = None,
     events: pd.DataFrame | None = None,
     lineups: pd.DataFrame | None = None,
+    stats_365: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     finished = matches[matches["status"] == "finalizado"].copy()
     rows = []
@@ -90,6 +103,16 @@ def build_team_match_features(
         drop = [c for c in ["source_match_id", "source", "collected_at", "dataset_source"] if c in stats.columns]
         stats = stats.drop(columns=drop)
         features = features.merge(stats, on=["match_id", "team"], how="left", suffixes=("", "_fonte"))
+
+    # Campos exclusivos da 365Scores (formação, expected_assists, key_passes etc.)
+    # — não duplicam nada da ESPN, apenas enriquecem com métricas que ela não tem.
+    # "formation" é tratado separado mais abaixo (fillna sobre o valor da ESPN).
+    if stats_365 is not None and not stats_365.empty:
+        enrich = stats_365.drop(columns=["opponent"], errors="ignore")
+        formation_365 = enrich[["match_id", "team", "formation"]].rename(columns={"formation": "formation_365"})
+        enrich = enrich.drop(columns=["formation"])
+        features = features.merge(enrich, on=["match_id", "team"], how="left", suffixes=("", "_365"))
+        features = features.merge(formation_365, on=["match_id", "team"], how="left")
 
     process_cols = ["shots", "shots_on_target", "passes", "possession", "fouls"]
     available_process = [c for c in process_cols if c in features.columns]
@@ -138,6 +161,13 @@ def build_team_match_features(
             .drop_duplicates(["match_id", "team"])
         )
         features = features.merge(formation_by_match_team, on=["match_id", "team"], how="left")
+
+    # A 365Scores cobre formação para jogos onde a ESPN não tem lineup completo.
+    if "formation_365" in features.columns:
+        if "formation" not in features.columns:
+            features["formation"] = pd.NA
+        features["formation"] = features["formation"].fillna(features["formation_365"])
+        features = features.drop(columns=["formation_365"])
 
     features["team_slug"] = features["team"].apply(slugify)
     return features.sort_values(["date", "match_id", "home_away"]).reset_index(drop=True)
@@ -202,6 +232,64 @@ def build_team_recent_form(team_match_features: pd.DataFrame, n: int = 5) -> pd.
     return result.sort_values("forma_aproveitamento", ascending=False).reset_index(drop=True)
 
 
+def _elo_maturity_factor(elo_rating: pd.Series, jogos: pd.Series) -> pd.Series:
+    """Fator 0-1: o quanto o Elo já diferenciou os times na rodada atual.
+
+    Compara a variância real do Elo observado com o teto teórico de
+    variância para o número médio de jogos disputados (ver
+    _simulate_max_elo_variance) — o teto vem de rodar a MESMA simulação de
+    Elo do projeto (_run_elo_simulation, com o margin_multiplier real) sobre
+    um cenário sintético de máxima divergência possível (metade do campo
+    goleia a outra metade do placar mais largo já observado no torneio, em
+    todos os jogos). Variância real próxima de 0 (rodada 1, todos em 1500)
+    dá fator próximo de 0; variância se aproximando do teto teórico dá fator
+    próximo de 1.
+    """
+    avg_games = int(round(jogos.mean())) if len(jogos) else 0
+    if avg_games <= 0:
+        return pd.Series(0.0, index=elo_rating.index)
+
+    max_variance = _simulate_max_elo_variance(min(avg_games, _ELO_MAX_VARIANCE_MAX_GAMES))
+    observed_variance = elo_rating.var(ddof=0)
+    if pd.isna(observed_variance) or max_variance <= 0:
+        return pd.Series(0.0, index=elo_rating.index)
+
+    factor = min(observed_variance / max_variance, 1.0)
+    return pd.Series(factor, index=elo_rating.index)
+
+
+@lru_cache(maxsize=8)
+def _simulate_max_elo_variance(n_games_per_team: int, n_teams: int = 32, goal_margin: int = 7) -> float:
+    """Roda a simulação real de Elo (_run_elo_simulation) sobre um torneio
+    sintético de máxima divergência possível: metade dos times goleia a
+    outra metade pelo placar mais largo já visto no torneio (goal_margin a
+    1) em todos os jogos, com domínio total de chutes/posse — o cenário que
+    maximiza o delta de Elo a cada partida dado o margin_multiplier real.
+
+    Cacheado porque o resultado só depende de N jogos (determinístico) — sem
+    isso, recalcularia a mesma simulação a cada chamada de build_team_scores.
+    """
+    half = n_teams // 2
+    rows = []
+    match_id = 0
+    for _ in range(n_games_per_team):
+        for i in range(half):
+            match_id += 1
+            strong, weak = f"strong_{i}", f"weak_{i}"
+            rows.append({
+                "match_id": match_id, "date": match_id, "team": strong,
+                "goals_for": goal_margin + 1, "shots_on_target": 25, "possession": 65,
+            })
+            rows.append({
+                "match_id": match_id, "date": match_id, "team": weak,
+                "goals_for": 1, "shots_on_target": 5, "possession": 35,
+            })
+
+    synthetic = pd.DataFrame(rows)
+    ratings, _ = _run_elo_simulation(synthetic)
+    return float(np.var(list(ratings.values())))
+
+
 def calculate_elo_ratings(team_match_features: pd.DataFrame) -> pd.DataFrame:
     """Rating Elo por seleção, com multiplicador de margem de gols.
 
@@ -259,11 +347,49 @@ def calculate_pre_match_opponent_elo(team_match_features: pd.DataFrame) -> pd.Da
     return pd.DataFrame(pre_match_log)
 
 
-def _run_elo_simulation(team_match_features: pd.DataFrame) -> tuple[dict[str, float], list[dict[str, Any]]]:
-    """Roda a simulação de Elo uma única vez, retornando o rating final por
-    time E o log de rating do adversário pré-jogo em cada partida — evita
-    duplicar a lógica entre `calculate_elo_ratings` (rating final) e
-    `calculate_pre_match_opponent_elo` (rating no momento do jogo)."""
+def calculate_post_match_opponent_elo(team_match_features: pd.DataFrame) -> pd.DataFrame:
+    """Rating Elo FINAL do adversário de cada jogo (após todo o torneio rodado).
+
+    Diferente do pré-jogo: na rodada 1 todos os adversários valiam 1500 (ninguém
+    tinha jogado), então o pré-jogo não diferencia "ganhou de quem". O Elo final
+    já incorpora o que cada adversário provou ser ao longo do torneio — ganhar de
+    um time que se confirmou forte vale mais que ganhar de um que afundou. O
+    efeito é pequeno na rodada 1 (os Elos mal se diferenciaram) e cresce conforme
+    mais jogos acontecem. Trade-off aceito: usa informação "do futuro" relativo
+    ao jogo, mas é o sinal mais justo de força real do adversário disponível.
+    """
+    if team_match_features.empty or "match_id" not in team_match_features.columns:
+        return pd.DataFrame(columns=["match_id", "team", "opponent_elo_pre_match"])
+
+    final_ratings, _ = _run_elo_simulation(team_match_features)
+    rows: list[dict[str, Any]] = []
+    for match_id, game in team_match_features.groupby("match_id"):
+        if len(game) != 2:
+            continue
+        team_a, team_b = str(game.iloc[0]["team"]), str(game.iloc[1]["team"])
+        # opponent_elo_pre_match: mantém o nome da coluna p/ reaproveitar a função
+        # de ponderação, mas o valor é o Elo FINAL do adversário.
+        rows.append({"match_id": match_id, "team": team_a,
+                     "opponent_elo_pre_match": final_ratings.get(team_b, ELO_INITIAL_RATING)})
+        rows.append({"match_id": match_id, "team": team_b,
+                     "opponent_elo_pre_match": final_ratings.get(team_a, ELO_INITIAL_RATING)})
+    return pd.DataFrame(rows)
+
+
+def _run_elo_simulation(
+    team_match_features: pd.DataFrame,
+    initial_ratings: dict[str, float] | None = None,
+) -> tuple[dict[str, float], list[dict[str, Any]]]:
+    """Roda UMA passada cronológica da simulação de Elo, retornando o rating
+    final por time E o log de rating do adversário pré-jogo em cada partida.
+
+    `initial_ratings` semeia o rating inicial de cada time. Na 1ª passada é None
+    (todos em ELO_INITIAL_RATING). Nas passadas seguintes (Elo iterativo), recebe
+    os ratings finais da passada anterior — assim, ao reprocessar o jogo da
+    rodada 1, o adversário já entra com o rating que ele provou ter ao longo do
+    torneio, e vencer um fraco deixa de valer Elo cheio (corrige o viés de "na
+    rodada 1 todo mundo era 1500")."""
+    seed = dict(initial_ratings) if initial_ratings else {}
     ratings: dict[str, float] = {}
     pre_match_log: list[dict[str, Any]] = []
     sort_col = "date" if "date" in team_match_features.columns else "match_id"
@@ -274,8 +400,8 @@ def _run_elo_simulation(team_match_features: pd.DataFrame) -> tuple[dict[str, fl
             continue
         a, b = game.iloc[0], game.iloc[1]
         team_a, team_b = str(a["team"]), str(b["team"])
-        rating_a = ratings.setdefault(team_a, ELO_INITIAL_RATING)
-        rating_b = ratings.setdefault(team_b, ELO_INITIAL_RATING)
+        rating_a = ratings.setdefault(team_a, seed.get(team_a, ELO_INITIAL_RATING))
+        rating_b = ratings.setdefault(team_b, seed.get(team_b, ELO_INITIAL_RATING))
 
         pre_match_log.append({"match_id": match_id, "team": team_a, "opponent_elo_pre_match": rating_b})
         pre_match_log.append({"match_id": match_id, "team": team_b, "opponent_elo_pre_match": rating_a})
@@ -298,13 +424,22 @@ def _run_elo_simulation(team_match_features: pd.DataFrame) -> tuple[dict[str, fl
 
         performance_diff = abs(perf_a - perf_b)
         expected_a = 1.0 / (1.0 + 10 ** ((rating_b - rating_a) / 400.0))
-        margin_multiplier = np.log(performance_diff + 1) + 1
+
+        # Multiplicador de margem (goleada conta mais), com TETO. Sem teto,
+        # ln(perf_diff+1) chega a ~4x numa goleada com domínio total (ex.:
+        # Alemanha 7×1, perf_diff ~24), inflando o Elo de forma desproporcional —
+        # bater muito num fraco não deve render quase o quádruplo de uma vitória
+        # simples. O teto em ELO_MARGIN_CAP limita esse ganho: a margem ainda
+        # importa (vitória dominante > sofrida), mas satura num ponto razoável.
+        margin_multiplier = min(np.log(performance_diff + 1) + 1, ELO_MARGIN_CAP)
         delta = ELO_K_FACTOR * margin_multiplier * (score_a - expected_a)
 
         ratings[team_a] = rating_a + delta
         ratings[team_b] = rating_b - delta
 
     return ratings, pre_match_log
+
+
 
 
 def _performance_index(game: pd.Series) -> float:
@@ -322,9 +457,17 @@ def _performance_index(game: pd.Series) -> float:
 # Score de seleções
 # ---------------------------------------------------------------------------
 
-def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
+def build_team_scores(
+    team_match_features: pd.DataFrame,
+    weights: dict[str, float] | None = None,
+) -> pd.DataFrame:
+    """``weights`` permite injetar pesos calibrados (ver analytics/calibration.py)
+    sem acoplar esta função a leitura de arquivo — por padrão usa
+    TEAM_SCORE_WEIGHTS, os pesos de design fixados manualmente."""
     if team_match_features.empty:
         return pd.DataFrame()
+
+    score_weights = weights if weights is not None else TEAM_SCORE_WEIGHTS
 
     aggregations = {
         "match_id": "nunique",
@@ -349,6 +492,11 @@ def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
         "shots_on_target_against": "sum",
         "team_stats_available": "sum",
         "opponent_stats_available": "sum",
+        "key_passes": "sum",
+        "expected_assists": "sum",
+        "dribbles_won": "sum",
+        "touches": "sum",
+        "possession_lost": "sum",
     }
     available = {c: agg for c, agg in aggregations.items() if c in team_match_features.columns}
     scores = team_match_features.groupby("team", dropna=False).agg(available).reset_index()
@@ -373,6 +521,11 @@ def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
         "shots_on_target_against": "chutes_no_alvo_sofridos",
         "team_stats_available": "jogos_com_estatisticas",
         "opponent_stats_available": "jogos_com_estatisticas_adversario",
+        "key_passes": "key_passes",
+        "expected_assists": "expected_assists",
+        "dribbles_won": "dribbles_won",
+        "touches": "touches",
+        "possession_lost": "posse_perdida",
     })
 
     # Métricas por jogo
@@ -383,13 +536,39 @@ def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
     scores["chutes_no_alvo_por_jogo"] = _safe_divide(scores["chutes_no_alvo"], scores["jogos"])
     scores["gols_por_chute"] = _safe_divide(scores["gols_pro"], scores["chutes"])
     scores["chutes_no_alvo_por_chute"] = _safe_divide(scores["chutes_no_alvo"], scores["chutes"])
+    # conversão da finalização CERTA em gol: dos chutes que acertaram o alvo,
+    # quantos viraram gol. Mede eficiência de finalização (não pontaria).
+    scores["gols_por_chute_no_alvo"] = _safe_divide(scores["gols_pro"], scores["chutes_no_alvo"])
     scores["passes_por_jogo"] = _safe_divide(scores["passes"], scores["jogos"])
+    # Precisão de passes REAL = passes certos / passes totais. O pass_accuracy da
+    # ESPN vem arredondado a 1 casa (só 0.6/0.7/0.8/0.9), colapsando times
+    # distintos no mesmo valor (México 89.8%, EUA 85.1% e Coreia 86.7% viravam
+    # todos "0.9"). Recalcular da razão dos totais recupera a granularidade real.
+    # Só sobrescreve quando há passes totais registrados; senão mantém o que veio.
+    _prec_real = _safe_divide(scores["passes_certos"], scores["passes"])
+    scores["precisao_passes_media"] = _prec_real.where(scores["passes"] > 0,
+                                                       scores["precisao_passes_media"])
     scores["faltas_por_jogo"] = _safe_divide(scores["faltas"], scores["jogos"])
     scores["amarelos_por_jogo"] = _safe_divide(scores["amarelos"], scores["jogos"])
     scores["vermelhos_por_jogo"] = _safe_divide(scores["vermelhos"], scores["jogos"])
     scores["clean_sheet_rate"] = _safe_divide(scores["jogos_sem_sofrer_gol"], scores["jogos"])
     scores["chutes_sofridos_por_jogo"] = _safe_divide(scores["chutes_sofridos"], scores["jogos"])
     scores["chutes_no_alvo_sofridos_por_jogo"] = _safe_divide(scores["chutes_no_alvo_sofridos"], scores["jogos"])
+    # key_passes/expected_assists/dribbles_won/touches/posse_perdida só
+    # existem para jogos com dados da 365Scores (hoje os finalizados); para
+    # o resto ficam 0 — não inflar nem penalizar times sem essa fonte ainda,
+    # por isso entram em score_eficiencia/score_controle só quando há
+    # cobertura real (ver checagem `.gt(0).any()` mais abaixo).
+    for _col_365 in ["key_passes", "expected_assists", "dribbles_won", "touches", "posse_perdida"]:
+        if _col_365 not in scores.columns:
+            scores[_col_365] = 0.0
+    scores["key_passes_por_jogo"] = _safe_divide(scores["key_passes"], scores["jogos"])
+    scores["expected_assists_por_jogo"] = _safe_divide(scores["expected_assists"], scores["jogos"])
+    scores["dribbles_won_por_jogo"] = _safe_divide(scores["dribbles_won"], scores["jogos"])
+    # posse_liquida: dribbles ganhos relativos à posse perdida — controle de
+    # qualidade não é só ter a bola, é manter o domínio em duelos (driblar
+    # com sucesso) sem entregá-la com frequência (possession_lost).
+    scores["posse_liquida"] = _safe_divide(scores["dribbles_won"], scores["posse_perdida"].clip(lower=1))
 
     # --- Contexto do adversário por jogo (sem circularidade) ---
     # Segurar 0 gols contra um time que criou muito (chutes, posse, passes)
@@ -419,14 +598,23 @@ def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
     scores = scores.merge(elo_ratings, on="team", how="left")
     scores["elo_rating"] = scores["elo_rating"].fillna(ELO_INITIAL_RATING)
 
+    # Maturidade do Elo: na rodada 1, todo mundo começa em 1500 — vencer não
+    # significa "ser mais forte", só significa "ganhou esse jogo" (que
+    # score_resultado já mede). O Elo só carrega informação de força relativa
+    # de fato quando os ratings já se diferenciaram. Esse fator (0 a 1) mede
+    # isso e é usado para escalar o peso de score_forca_relativa dinamicamente.
+    elo_maturity = _elo_maturity_factor(scores["elo_rating"], scores["jogos"])
+
     # --- Aproveitamento ponderado pela força do adversário no momento do jogo ---
     # Sem isso, empatar com a Alemanha e empatar com Curaçao valem exatamente
     # os mesmos 33,3% de aproveitamento — o "salto drástico" entre vitória/
-    # empate/derrota (~80/~47/~33 hoje) ignora completamente quem era o
-    # rival. Usa o Elo do adversário ANTES daquele jogo (não o Elo final dele,
-    # que incluiria resultados futuros que ainda não existiam no momento).
-    pre_match_elo = calculate_pre_match_opponent_elo(team_match_features)
-    weighted_aproveitamento = _weighted_aproveitamento_by_opponent(team_match_features, pre_match_elo)
+    # empate/derrota ignora completamente quem era o rival. Usa o Elo FINAL do
+    # adversário (não o pré-jogo): na rodada 1 todos valiam 1500, então o
+    # pré-jogo não diferencia "ganhou de quem"; o Elo final já reflete o que cada
+    # adversário provou ser ao longo do torneio. Efeito pequeno agora, cresce com
+    # mais rodadas.
+    opponent_elo = calculate_post_match_opponent_elo(team_match_features)
+    weighted_aproveitamento = _weighted_aproveitamento_by_opponent(team_match_features, opponent_elo)
     scores = scores.merge(weighted_aproveitamento, on="team", how="left")
     scores["aproveitamento_ponderado"] = scores["aproveitamento_ponderado"].fillna(scores["aproveitamento"])
 
@@ -440,15 +628,25 @@ def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
     _saldo_norm = _zscore_to_100(scores["saldo_gols"] / scores["jogos"].clip(lower=1))
     scores["score_resultado"] = (_aprov_norm * 0.85 + _saldo_norm * 0.15).clip(0, 100).round(1)
 
-    # score_ataque: volume ofensivo de qualidade (chutes no alvo + gols, sem chutes totais)
-    # Multiplicado pelo contexto do adversário ANTES do z-score: marcar contra
-    # quem criou muito volume de jogo (defesa provavelmente mais testada,
-    # adversário mais presente) conta mais do que contra quem praticamente
-    # não jogou.
-    scores["score_ataque"] = _mean_score([
-        _zscore_to_100(scores["gols_por_jogo"] * scores["ataque_ctx"]),
-        _zscore_to_100(scores["chutes_no_alvo_por_jogo"] * scores["ataque_ctx"]),
-    ])
+    # Confiança da amostra (cresce de 0 a 1 com mais jogos; 3 = fase de grupos
+    # completa). Aplicada a TODOS os componentes de processo — não só à defesa —
+    # para que um único jogo excepcional (ex.: Alemanha 7×1 num jogo) não produza
+    # um score de quase-100 com falsa precisão: o score é puxado para o neutro
+    # proporcionalmente à pouca evidência, e converge para o valor cheio conforme
+    # os jogos acumulam, se o desempenho se sustentar.
+    _amostra_conf = _sample_confidence(scores["jogos"])
+
+    # score_ataque: poder ofensivo. GOL domina (70%) — é o produto final do
+    # ataque; o VOLUME de chutes no alvo (30%) ainda conta como criação de
+    # chances, mas não infla quem chuta muito e não converte (ex.: Uruguai 1 gol
+    # em 10 chutes no alvo não deve ter ataque ~ EUA que fez 4 gols). A conversão
+    # em si é avaliada à parte em score_eficiencia. Multiplicado pelo contexto do
+    # adversário ANTES do z-score: marcar contra quem criou muito volume de jogo
+    # conta mais do que contra quem praticamente não jogou.
+    _ataque_gol = _zscore_to_100(scores["gols_por_jogo"] * scores["ataque_ctx"])
+    _ataque_vol = _zscore_to_100(scores["chutes_no_alvo_por_jogo"] * scores["ataque_ctx"])
+    _ataque_raw = _ataque_gol * 0.70 + _ataque_vol * 0.30
+    scores["score_ataque"] = _apply_confidence(_ataque_raw, _amostra_conf)
 
     # score_defesa: solidez defensiva — segurar adversário que criou muito
     # volume vale mais do que segurar quem quase não chegou ao ataque.
@@ -464,30 +662,61 @@ def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
     # princípio do _apply_confidence já usado para jogadores com poucos jogos,
     # aqui aplicado a "poucos chutes sofridos por dominar o jogo", não a
     # poucos jogos disputados.
-    scores["score_defesa"] = _apply_confidence(_defesa_raw, scores["defesa_ctx"].clip(upper=1.0))
+    # Dois amortecimentos: (1) quão testada foi a defesa (defesa_ctx) e (2) a
+    # confiança da amostra (poucos jogos). O menor dos dois governa — sem
+    # evidência (poucos jogos OU defesa pouco testada) o score fica perto do neutro.
+    _defesa_conf = pd.concat([scores["defesa_ctx"].clip(upper=1.0), _amostra_conf], axis=1).min(axis=1)
+    scores["score_defesa"] = _apply_confidence(_defesa_raw, _defesa_conf)
 
-    # score_eficiencia: qualidade do ataque (conversão, não volume).
-    # eficiencia_resultado: gols/chute no alvo ponderado pelo aproveitamento —
-    # converter bem e perder não é eficiência real; o resultado contextualiza
-    # se a conversão técnica se traduziu em vantagem concreta.
+    # score_eficiencia: CONVERSÃO de chances em gol, não pontaria nem volume.
+    # eficiencia_resultado: gols/chute ponderado pelo aproveitamento — converter
+    # bem e perder não é eficiência real; o resultado contextualiza se a
+    # conversão técnica se traduziu em vantagem concreta.
+    # Antes havia um componente de "acertar o alvo" (chutes_no_alvo/chutes), que é
+    # PONTARIA, não eficiência: inflava quem chutava no gol sem marcar (ex.:
+    # Uruguai 10 no alvo, 1 gol = 10% de conversão, mas eficiência ~ Japão com
+    # 67%). Trocado por gols/chute_no_alvo: dos chutes certos, quantos viraram
+    # gol — eficiência de finalização de verdade.
     scores["eficiencia_resultado"] = scores["gols_por_chute"] * scores["aproveitamento"].clip(lower=0.1)
-    scores["score_eficiencia"] = _mean_score([
+    _eficiencia_components = [
         _zscore_to_100(scores["gols_por_chute"] * scores["eficiencia_ctx"]),
-        _zscore_to_100(scores["chutes_no_alvo_por_chute"] * scores["eficiencia_ctx"]),
+        _zscore_to_100(scores["gols_por_chute_no_alvo"] * scores["eficiencia_ctx"]),
         _zscore_to_100(scores["eficiencia_resultado"]),
-    ])
+    ]
+    # key_passes_por_jogo: criação de chances que não resultou em gol também é
+    # eficiência ofensiva — um time pode estar errando finalizações mas
+    # achando os espaços certos. Só entra quando há cobertura da 365Scores
+    # (fonte ainda não tem todos os jogos); senão o z-score ficaria comparando
+    # times com dado real contra times com 0 artificial.
+    if scores["key_passes_por_jogo"].gt(0).any():
+        _eficiencia_components.append(_zscore_to_100(scores["key_passes_por_jogo"] * scores["eficiencia_ctx"]))
+    scores["score_eficiencia"] = _apply_confidence(_mean_score(_eficiencia_components), _amostra_conf)
 
-    # score_controle: estilo de jogo — peso baixo, não determina qualidade.
-    # posse_produtiva penaliza posse estéril: ter a bola mas não chegar ao alvo
-    # (ex: Turquia 71% posse perdeu 0x2, Espanha 74% posse empatou 0x0) não é
-    # controle de qualidade — é só que o adversário deixou a bola passar.
+    # score_controle: domínio de bola/jogo — peso baixo, não determina qualidade.
+    # Dois grupos com pesos diferentes (CORE 70% / COMPLEMENTOS 30%):
+    #  • CORE = controle de bola no sentido clássico: posse, volume de passes e
+    #    precisão. É o que define "ter o jogo nos pés" (ex.: a Espanha com 74%
+    #    posse e 90% precisão deve liderar o controle).
+    #  • COMPLEMENTOS = nuances que refinam, mas não definem o controle:
+    #    posse_produtiva (a posse virou finalização? penaliza posse estéril) e
+    #    posse_liquida (domínio nos duelos via dribles). Antes os 5 pesavam
+    #    igual (1/5), e um pico num complemento (ex.: EUA com 22 dribles)
+    #    superava a posse dominante da Espanha — invertendo o que "controle"
+    #    deveria capturar.
     scores["posse_produtiva"] = _safe_divide(scores["chutes_no_alvo_por_jogo"], scores["posse_media"])
-    scores["score_controle"] = _mean_score([
+    _controle_core = _mean_score([
         _zscore_to_100(scores["posse_media"] * scores["controle_ctx"]),
         _zscore_to_100(scores["passes_por_jogo"] * scores["controle_ctx"]),
         _zscore_to_100(scores["precisao_passes_media"] * scores["controle_ctx"]),
-        _zscore_to_100(scores["posse_produtiva"]),
     ])
+    _controle_complementos = [_zscore_to_100(scores["posse_produtiva"])]
+    # posse_liquida (dribbles ganhos / posse perdida): controle em duelos
+    # individuais. Só entra quando há cobertura da 365Scores (mesma lógica de
+    # key_passes em eficiência).
+    if scores["dribbles_won_por_jogo"].gt(0).any():
+        _controle_complementos.append(_zscore_to_100(scores["posse_liquida"] * scores["controle_ctx"]))
+    _controle_raw = _controle_core * 0.70 + _mean_score(_controle_complementos) * 0.30
+    scores["score_controle"] = _apply_confidence(_controle_raw, _amostra_conf)
 
     # score_forca_relativa: contextualiza o resultado pela qualidade do
     # adversário enfrentado — vencer a Alemanha vale mais que vencer Curaçao.
@@ -511,8 +740,33 @@ def build_team_scores(team_match_features: pd.DataFrame) -> pd.DataFrame:
         _disc_vermelhos * 0.4,
     ]) / 0.3  # reescala para manter 0-100 após ponderação
 
-    # score_geral composto
-    scores["score_geral"] = _weighted_score(scores, TEAM_SCORE_WEIGHTS)
+    # score_geral composto. O peso de score_forca_relativa é escalado pela
+    # maturidade do Elo (elo_maturity, 0-1): na rodada 1, todos os times têm
+    # Elo igual (1500) e "vencer" não mede força relativa de fato, é o mesmo
+    # sinal que score_resultado já captura — então a fração de peso "não
+    # ganha" pela força relativa imatura é transferida para score_resultado,
+    # que é o componente que sabidamente mede o que aconteceu naquele jogo
+    # com informação real (saldo de gols, aproveitamento) desde o primeiro
+    # jogo, sem depender de histórico acumulado.
+    base_forca_relativa = score_weights.get("score_forca_relativa", 0.0)
+    effective_forca_relativa = base_forca_relativa * elo_maturity
+    forca_relativa_gap = base_forca_relativa - effective_forca_relativa
+    effective_resultado = score_weights.get("score_resultado", 0.0) + forca_relativa_gap
+
+    scores["score_geral"] = _weighted_score_per_row(
+        scores,
+        score_weights,
+        overrides={
+            "score_forca_relativa": effective_forca_relativa,
+            "score_resultado": effective_resultado,
+        },
+    )
+    # Pesos efetivos expostos para que relatórios mostrem o peso REAL usado
+    # naquele cálculo, não o peso de design — útil porque score_forca_relativa
+    # varia conforme a maturidade do Elo (ver _elo_maturity_factor).
+    scores["peso_efetivo_forca_relativa"] = effective_forca_relativa.round(4) if isinstance(effective_forca_relativa, pd.Series) else round(effective_forca_relativa, 4)
+    scores["peso_efetivo_resultado"] = effective_resultado.round(4) if isinstance(effective_resultado, pd.Series) else round(effective_resultado, 4)
+    scores["elo_maturity"] = elo_maturity.round(4) if isinstance(elo_maturity, pd.Series) else round(elo_maturity, 4)
 
     # Confiança baseada em amostra — sem piso artificial de 0.55
     scores["confianca_amostra"] = _sample_confidence(scores["jogos"])
@@ -886,15 +1140,26 @@ def _normalize(values: pd.Series, lower_is_better: bool = False) -> pd.Series:
 
 
 def _sample_confidence(games: pd.Series, full_confidence_games: int = 3) -> pd.Series:
-    """Confiança cresce de 0 a 1 com mais jogos. Sem piso artificial.
+    """Confiança da amostra (0 a 1) cresce com mais jogos, em curva CÔNCAVA:
 
-    full_confidence_games=3 porque a fase de grupos da Copa 2026 tem exatamente
-    3 jogos por selecao — e o tamanho de amostra real disponivel antes do
-    mata-mata, nao um numero arbitrario. No mata-mata os jogos seguintes so
-    aumentam a confianca (clip superior em 1.0), nao mudam a referencia.
+        0 jogos → 0.0    1 jogo → 0.50    2 jogos → 0.80    3+ jogos → 1.0
+
+    Côncava (e não linear 1/3, 2/3, 1) porque cada jogo adicional traz menos
+    informação nova que o anterior — rendimentos decrescentes. O 1º jogo é o
+    maior salto (de "nada" para "indício forte"), por isso já vale 50%; o 2º
+    confirma (+30%); o 3º refina (+20%). Sem isso, os scores de processo
+    (ataque/defesa/eficiência/controle) ficavam espremidos perto de 50 na
+    rodada 1 (1 jogo valia só 1/3). Interpola linearmente entre os marcos para
+    contagens fracionárias e satura em 1.0 (mata-mata só aumenta jogos, não muda
+    a referência da fase de grupos = full_confidence_games).
     """
+    import numpy as np
     numeric = pd.to_numeric(games, errors="coerce").fillna(0).clip(lower=0)
-    return (numeric.clip(upper=full_confidence_games) / full_confidence_games).clip(0, 1)
+    # marcos da curva côncava ancorados em full_confidence_games (=3): 50/80/100%
+    xp = [0.0, 1.0, 2.0, float(full_confidence_games)]
+    fp = [0.0, 0.50, 0.80, 1.0]
+    interpolated = np.interp(numeric.clip(upper=full_confidence_games), xp, fp)
+    return pd.Series(interpolated, index=numeric.index).clip(0, 1)
 
 
 def _apply_confidence(raw_score: pd.Series, confidence: pd.Series, neutral: float = 50.0) -> pd.Series:
@@ -925,6 +1190,30 @@ def _weighted_score(frame: pd.DataFrame, weights: dict[str, float]) -> pd.Series
     if not parts:
         return pd.Series(0.0, index=frame.index)
     return sum(parts) / sum(used)
+
+
+def _weighted_score_per_row(
+    frame: pd.DataFrame,
+    weights: dict[str, float],
+    overrides: dict[str, pd.Series | float],
+) -> pd.Series:
+    """Como ``_weighted_score``, mas permite que alguns pesos variem por
+    linha (ex: peso de força relativa escalado pela maturidade do Elo,
+    que pode diferir entre snapshots). ``overrides`` substitui o peso fixo
+    de ``weights`` por uma Series/escalar para as colunas informadas.
+    """
+    parts, used = [], []
+    for col, w in weights.items():
+        if col not in frame.columns:
+            continue
+        effective_w = overrides.get(col, w)
+        parts.append(frame[col].fillna(0) * effective_w)
+        used.append(effective_w)
+    if not parts:
+        return pd.Series(0.0, index=frame.index)
+    total_used = sum(used)
+    total_used = total_used if isinstance(total_used, pd.Series) else pd.Series(total_used, index=frame.index)
+    return sum(parts) / total_used.replace(0, 1)
 
 
 def _add_rank(frame: pd.DataFrame, score_col: str, rank_col: str) -> pd.DataFrame:

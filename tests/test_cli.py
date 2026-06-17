@@ -42,9 +42,10 @@ def test_parser_status_torneio_default_source():
 
 def test_parser_atualizar_flags():
     parser = build_parser()
-    args = parser.parse_args(["atualizar", "--sem-worldcup2026", "--sem-espn"])
+    args = parser.parse_args(["atualizar", "--sem-worldcup2026", "--sem-espn", "--sem-365scores"])
     assert args.sem_worldcup2026 is True
     assert args.sem_espn is True
+    assert args.sem_365scores is True
 
 
 def test_parser_atualizar_default_status():
