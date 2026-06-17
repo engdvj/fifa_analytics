@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from fifa_analytics.workflows.basic_reports import run_basic_reports
+from fifa_analytics.workflows.canonical_reports import run_canonical_index
 from fifa_analytics.workflows.espn_pipeline import run_espn_pipeline
 from fifa_analytics.workflows.scores365_pipeline import run_scores365_pipeline
 from fifa_analytics.workflows.scores_pipeline import run_scores_pipeline
@@ -58,6 +59,12 @@ def run_update_pipeline(
         )
     else:
         result["365scores_status"] = "ignorado"
+
+    # Reconcilia as fontes (silver) no índice canônico (gold). Sem isso, o dim_match
+    # nunca reflete novos placares/status — o watcher lê o gold e não veria os jogos
+    # que entraram ao vivo ou finalizaram nesta coleta.
+    canonical_result = run_canonical_index()
+    result["partidas_canonicas_reconciliadas"] = canonical_result.get("info_partidas", 0)
 
     reports_result = run_basic_reports(status=status)
     status_result = run_tournament_status(source="canonical")
