@@ -4,6 +4,7 @@ from typing import Any
 
 from fifa_analytics.workflows.basic_reports import run_basic_reports
 from fifa_analytics.workflows.espn_pipeline import run_espn_pipeline
+from fifa_analytics.workflows.scores365_pipeline import run_scores365_pipeline
 from fifa_analytics.workflows.scores_pipeline import run_scores_pipeline
 from fifa_analytics.workflows.tournament_status import run_tournament_status
 from fifa_analytics.workflows.worldcup2026_pipeline import run_worldcup2026_pipeline
@@ -12,6 +13,7 @@ from fifa_analytics.workflows.worldcup2026_pipeline import run_worldcup2026_pipe
 def run_update_pipeline(
     include_worldcup2026: bool = True,
     include_espn: bool = True,
+    include_365scores: bool = True,
     status: str = "finalizado",
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
@@ -44,6 +46,18 @@ def run_update_pipeline(
         )
     else:
         result["espn_status"] = "ignorado"
+
+    if include_365scores:
+        s365_result = run_scores365_pipeline()
+        result.update(
+            {
+                "365scores_status": "executado",
+                "365scores_jogos_coletados": s365_result.get("games_with_stats", 0),
+                "365scores_jogadores": s365_result.get("players", 0),
+            }
+        )
+    else:
+        result["365scores_status"] = "ignorado"
 
     reports_result = run_basic_reports(status=status)
     status_result = run_tournament_status(source="canonical")

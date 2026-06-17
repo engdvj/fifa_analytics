@@ -50,6 +50,18 @@ sources:
     api_key_env: BALLDONTLIE_API_KEY
     role: enriquecimento_analitico
     base_url: null
+  scores365:
+    enabled: true
+    official: false
+    requires_api_key: false
+    role: validacao_estatisticas_por_partida
+    base_url: https://webws.365scores.com/web
+    competition_id: 5930
+    endpoints:
+      games_by_date: /games/
+      game_detail: /game/
+    observacao: API interna do 365scores.com. Fornece stats por jogador (fouls, shots, passes, tackles, xG) agregaveis por equipe. Sem chave, sem autenticacao. Usar com sleep_seconds >= 0.2.
+
   api_football:
     enabled: false
     official: false
