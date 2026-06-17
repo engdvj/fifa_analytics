@@ -2680,7 +2680,7 @@ const PERCENT_DIRECT = new Set(['posse_media']);
 // de pódio — estilo é descritivo, 50 não é "ruim" nem 90 é "melhor".
 const STYLE_AXES = new Set(['estilo_posse', 'estilo_pressao', 'estilo_verticalidade', 'estilo_largura']);
 // Cada eixo é BIPOLAR: 50 = meio-termo, sobe para o polo alto, desce para o
-// baixo. {low, high, curto} alimenta o card (polos visíveis) e a linha "por que
+// baixo. low/high/curto alimentam o card (polos visíveis) e a linha "por que
 // a flag" (usa o nome curto do lado para onde o time pende).
 const STYLE_POLES = {{
   estilo_posse:         {{ low: 'Direto',     high: 'Posse',       curtoAlto: 'posse',     curtoBaixo: 'jogo direto' }},
