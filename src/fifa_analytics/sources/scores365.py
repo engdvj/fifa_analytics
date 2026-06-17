@@ -196,9 +196,12 @@ def normalize_player_stats(payload: dict[str, Any]) -> pd.DataFrame:
         start_time = g.get("startTime", "")
         match_date = start_time[:10] if start_time else None
 
-        # Mapa id → nome (array g.members tem nomes; lineups.members têm stats)
+        # Mapa id → nome (array g.members tem nomes; lineups.members têm stats).
+        # Alguns membros podem vir sem "id" — ignora esses em vez de quebrar.
         id_to_name: dict[int, str] = {
-            m["id"]: m.get("name", "") for m in g.get("members", [])
+            m["id"]: m.get("name", "")
+            for m in g.get("members", [])
+            if isinstance(m, dict) and "id" in m
         }
 
         for side, competitor in [
