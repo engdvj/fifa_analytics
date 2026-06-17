@@ -1,0 +1,509 @@
+# Informações curadas das seleções da Copa do Mundo 2026.
+#
+# NÃO vem de nenhuma fonte do pipeline — é conhecimento público preenchido à mão.
+# Editável: corrija técnico/dados desatualizados aqui e rode `fifa-analytics scores`
+# (ou o passo de HTML) para refletir na aba Seleções.
+#
+# Campos por seleção (todos opcionais — o card mostra só os preenchidos):
+#   apelido        — como a seleção é conhecida
+#   confederacao   — UEFA, CONMEBOL, CAF, AFC, CONCACAF, OFC
+#   tecnico        — técnico atual (pode mudar; revise)
+#   titulos_copa   — nº de títulos da Copa do Mundo
+#   vices_copa     — nº de vice-campeonatos da Copa do Mundo
+#   participacoes  — nº de participações em Copas (incl. 2026)
+#   estreia        — ano da 1ª participação em Copas
+#   melhor_campanha— melhor resultado histórico em Copas
+#   curiosidade    — uma nota/curiosidade sobre a seleção
+
+teams:
+  # ── CONMEBOL ──────────────────────────────────────────────────────────────
+  Brasil:
+    apelido: Seleção Canarinho
+    confederacao: CONMEBOL
+    tecnico: Carlo Ancelotti
+    titulos_copa: 5
+    vices_copa: 2
+    participacoes: 23
+    estreia: 1930
+    melhor_campanha: Campeã (1958, 1962, 1970, 1994, 2002)
+    curiosidade: Única seleção a disputar todas as edições da Copa do Mundo.
+  Argentina:
+    apelido: Albiceleste
+    confederacao: CONMEBOL
+    tecnico: Lionel Scaloni
+    titulos_copa: 3
+    vices_copa: 3
+    participacoes: 19
+    estreia: 1930
+    melhor_campanha: Campeã (1978, 1986, 2022)
+    curiosidade: Atual campeã mundial, conquistou o título de 2022 no Catar.
+  Uruguai:
+    apelido: La Celeste
+    confederacao: CONMEBOL
+    tecnico: Marcelo Bielsa
+    titulos_copa: 2
+    vices_copa: 0
+    participacoes: 15
+    estreia: 1930
+    melhor_campanha: Campeã (1930, 1950)
+    curiosidade: Venceu a primeira Copa do Mundo da história, em 1930, em casa.
+  Colômbia:
+    apelido: Los Cafeteros
+    confederacao: CONMEBOL
+    tecnico: Néstor Lorenzo
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 7
+    estreia: 1962
+    melhor_campanha: Quartas de final (2014)
+    curiosidade: James Rodríguez foi o artilheiro da Copa de 2014.
+  Equador:
+    apelido: La Tri
+    confederacao: CONMEBOL
+    tecnico: Sebastián Beccacece
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 5
+    estreia: 2002
+    melhor_campanha: Oitavas de final (2006)
+    curiosidade: Joga seus mandos em Quito, a 2.800m de altitude.
+  Paraguai:
+    apelido: La Albirroja
+    confederacao: CONMEBOL
+    tecnico: Gustavo Alfaro
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 9
+    estreia: 1930
+    melhor_campanha: Quartas de final (2010)
+    curiosidade: José Luis Chilavert, goleiro artilheiro, é um de seus ídolos.
+
+  # ── UEFA ──────────────────────────────────────────────────────────────────
+  Alemanha:
+    apelido: Die Mannschaft
+    confederacao: UEFA
+    tecnico: Julian Nagelsmann
+    titulos_copa: 4
+    vices_copa: 4
+    participacoes: 21
+    estreia: 1934
+    melhor_campanha: Campeã (1954, 1974, 1990, 2014)
+    curiosidade: Goleou o Brasil por 7x1 na semifinal da Copa de 2014.
+  França:
+    apelido: Les Bleus
+    confederacao: UEFA
+    tecnico: Didier Deschamps
+    titulos_copa: 2
+    vices_copa: 2
+    participacoes: 17
+    estreia: 1930
+    melhor_campanha: Campeã (1998, 2018)
+    curiosidade: Deschamps venceu a Copa como jogador (1998) e como técnico (2018).
+  Espanha:
+    apelido: La Roja
+    confederacao: UEFA
+    tecnico: Luis de la Fuente
+    titulos_copa: 1
+    vices_copa: 0
+    participacoes: 17
+    estreia: 1934
+    melhor_campanha: Campeã (2010)
+    curiosidade: Conquistou seu único título mundial na África do Sul, em 2010.
+  Inglaterra:
+    apelido: The Three Lions
+    confederacao: UEFA
+    tecnico: Thomas Tuchel
+    titulos_copa: 1
+    vices_copa: 0
+    participacoes: 17
+    estreia: 1950
+    melhor_campanha: Campeã (1966)
+    curiosidade: Venceu sua única Copa em casa, em 1966.
+  Países Baixos:
+    apelido: Laranja Mecânica
+    confederacao: UEFA
+    tecnico: Ronald Koeman
+    titulos_copa: 0
+    vices_copa: 3
+    participacoes: 12
+    estreia: 1934
+    melhor_campanha: Vice-campeã (1974, 1978, 2010)
+    curiosidade: Tricampeã do vice — popularizou o "futebol total" nos anos 70.
+  Portugal:
+    apelido: A Seleção das Quinas
+    confederacao: UEFA
+    tecnico: Roberto Martínez
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 9
+    estreia: 1966
+    melhor_campanha: 3º lugar (1966)
+    curiosidade: Cristiano Ronaldo é o maior artilheiro da história das seleções.
+  Bélgica:
+    apelido: Diabos Vermelhos
+    confederacao: UEFA
+    tecnico: Rudi Garcia
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 14
+    estreia: 1930
+    melhor_campanha: 3º lugar (2018)
+    curiosidade: A "geração de ouro" levou a Bélgica ao topo do ranking FIFA.
+  Croácia:
+    apelido: Vatreni
+    confederacao: UEFA
+    tecnico: Zlatko Dalić
+    titulos_copa: 0
+    vices_copa: 1
+    participacoes: 7
+    estreia: 1998
+    melhor_campanha: Vice-campeã (2018)
+    curiosidade: Luka Modrić levou o país a duas semifinais consecutivas.
+  Suíça:
+    apelido: Nati
+    confederacao: UEFA
+    tecnico: Murat Yakin
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 13
+    estreia: 1934
+    melhor_campanha: Quartas de final (1934, 1938, 1954)
+    curiosidade: Sediou a Copa de 1954 e suas melhores campanhas são antigas.
+  Áustria:
+    apelido: Das Team
+    confederacao: UEFA
+    tecnico: Ralf Rangnick
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 8
+    estreia: 1934
+    melhor_campanha: 3º lugar (1954)
+    curiosidade: O "Wunderteam" dos anos 30 foi uma das seleções mais fortes da época.
+  Suécia:
+    apelido: Blågult
+    confederacao: UEFA
+    tecnico: Jon Dahl Tomasson
+    titulos_copa: 0
+    vices_copa: 1
+    participacoes: 13
+    estreia: 1934
+    melhor_campanha: Vice-campeã (1958)
+    curiosidade: Foi vice em casa, em 1958, perdendo para o Brasil de Pelé.
+  Noruega:
+    apelido: Løvene
+    confederacao: UEFA
+    tecnico: Ståle Solbakken
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 4
+    estreia: 1938
+    melhor_campanha: Oitavas de final (1998)
+    curiosidade: Erling Haaland é a grande estrela da geração atual.
+  Tchéquia:
+    apelido: Národní tým
+    confederacao: UEFA
+    tecnico: Ivan Hašek
+    titulos_copa: 0
+    vices_copa: 2
+    participacoes: 10
+    estreia: 1934
+    melhor_campanha: Vice-campeã (1934, 1962, como Tchecoslováquia)
+    curiosidade: Herda a tradição da antiga Tchecoslováquia, duas vezes vice.
+  Escócia:
+    apelido: The Tartan Army
+    confederacao: UEFA
+    tecnico: Steve Clarke
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 9
+    estreia: 1954
+    melhor_campanha: Fase de grupos
+    curiosidade: Nunca passou da primeira fase em uma Copa do Mundo.
+  Turquia:
+    apelido: Ay-Yıldızlılar
+    confederacao: UEFA
+    tecnico: Vincenzo Montella
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 3
+    estreia: 1954
+    melhor_campanha: 3º lugar (2002)
+    curiosidade: Surpreendeu o mundo com o 3º lugar na Copa de 2002.
+  Bósnia e Herzegovina:
+    apelido: Zmajevi
+    confederacao: UEFA
+    tecnico: Sergej Barbarez
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 1
+    estreia: 2014
+    melhor_campanha: Fase de grupos (2014)
+    curiosidade: Edin Džeko liderou sua única participação anterior, em 2014.
+
+  # ── CAF (África) ──────────────────────────────────────────────────────────
+  Marrocos:
+    apelido: Leões do Atlas
+    confederacao: CAF
+    tecnico: Walid Regragui
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 7
+    estreia: 1970
+    melhor_campanha: 4º lugar (2022)
+    curiosidade: Primeira seleção africana a chegar à semifinal de uma Copa.
+  Senegal:
+    apelido: Leões de Teranga
+    confederacao: CAF
+    tecnico: Pape Thiaw
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 4
+    estreia: 2002
+    melhor_campanha: Quartas de final (2002)
+    curiosidade: Estreou em Copas vencendo a França, então campeã, em 2002.
+  Gana:
+    apelido: Estrelas Negras
+    confederacao: CAF
+    tecnico: Otto Addo
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 5
+    estreia: 2006
+    melhor_campanha: Quartas de final (2010)
+    curiosidade: Parou nas quartas de 2010 após pênalti perdido nos acréscimos.
+  Egito:
+    apelido: Os Faraós
+    confederacao: CAF
+    tecnico: Hossam Hassan
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 4
+    estreia: 1934
+    melhor_campanha: Fase de grupos
+    curiosidade: Recordista de títulos da Copa Africana de Nações.
+  Costa do Marfim:
+    apelido: Os Elefantes
+    confederacao: CAF
+    tecnico: Emerse Faé
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 4
+    estreia: 2006
+    melhor_campanha: Fase de grupos
+    curiosidade: A geração de Drogba nunca passou da primeira fase em Copas.
+  Argélia:
+    apelido: As Raposas do Deserto
+    confederacao: CAF
+    tecnico: Vladimir Petković
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 5
+    estreia: 1982
+    melhor_campanha: Oitavas de final (2014)
+    curiosidade: Em 1982, venceu a Alemanha mas foi eliminada pela "vergonha de Gijón".
+  Tunísia:
+    apelido: Águias de Cartago
+    confederacao: CAF
+    tecnico: Sami Trabelsi
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 7
+    estreia: 1978
+    melhor_campanha: Fase de grupos
+    curiosidade: Em 1978, foi a primeira seleção africana a vencer um jogo na Copa.
+  África do Sul:
+    apelido: Bafana Bafana
+    confederacao: CAF
+    tecnico: Hugo Broos
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 4
+    estreia: 1998
+    melhor_campanha: Fase de grupos
+    curiosidade: Sede da Copa de 2010, primeira no continente africano.
+  Cabo Verde:
+    apelido: Tubarões Azuis
+    confederacao: CAF
+    tecnico: Pedro Leitão Brito (Bubista)
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 1
+    estreia: 2026
+    melhor_campanha: Estreante (2026)
+    curiosidade: Um dos menores países a se classificar para uma Copa do Mundo.
+  RD Congo:
+    apelido: Leopardos
+    confederacao: CAF
+    tecnico: Sébastien Desabre
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 3
+    estreia: 1974
+    melhor_campanha: Quartas de final (1974, como Zaire)
+    curiosidade: Disputou a Copa de 1974 sob o nome de Zaire.
+
+  # ── AFC (Ásia) ────────────────────────────────────────────────────────────
+  Japão:
+    apelido: Samurai Blue
+    confederacao: AFC
+    tecnico: Hajime Moriyasu
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 8
+    estreia: 1998
+    melhor_campanha: Oitavas de final (2002, 2010, 2018, 2022)
+    curiosidade: Venceu Alemanha e Espanha na fase de grupos de 2022.
+  Coreia do Sul:
+    apelido: Os Guerreiros Taegeuk
+    confederacao: AFC
+    tecnico: Hong Myung-bo
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 12
+    estreia: 1954
+    melhor_campanha: 4º lugar (2002)
+    curiosidade: Melhor campanha asiática da história, como anfitriã em 2002.
+  Irã:
+    apelido: Team Melli
+    confederacao: AFC
+    tecnico: Amir Ghalenoei
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 7
+    estreia: 1978
+    melhor_campanha: Fase de grupos
+    curiosidade: Tricampeão asiático, mas nunca passou da primeira fase em Copas.
+  Austrália:
+    apelido: Socceroos
+    confederacao: AFC
+    tecnico: Tony Popovic
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 7
+    estreia: 1974
+    melhor_campanha: Oitavas de final (2006, 2022)
+    curiosidade: Migrou da Oceania (OFC) para a Ásia (AFC) em 2006.
+  Arábia Saudita:
+    apelido: Os Falcões Verdes
+    confederacao: AFC
+    tecnico: Hervé Renard
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 7
+    estreia: 1994
+    melhor_campanha: Oitavas de final (1994)
+    curiosidade: Venceu a Argentina, futura campeã, na estreia da Copa de 2022.
+  Catar:
+    apelido: Annabi
+    confederacao: AFC
+    tecnico: Julen Lopetegui
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 2
+    estreia: 2022
+    melhor_campanha: Fase de grupos
+    curiosidade: Sediou a Copa de 2022, a primeira no mundo árabe.
+  Uzbequistão:
+    apelido: Lobos Brancos
+    confederacao: AFC
+    tecnico: Timur Kapadze
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 1
+    estreia: 2026
+    melhor_campanha: Estreante (2026)
+    curiosidade: Disputa sua primeira Copa do Mundo em 2026.
+  Iraque:
+    apelido: Leões da Mesopotâmia
+    confederacao: AFC
+    tecnico: Graham Arnold
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 2
+    estreia: 1986
+    melhor_campanha: Fase de grupos (1986)
+    curiosidade: Campeão asiático em 2007, em meio a um período de guerra no país.
+  Jordânia:
+    apelido: Al-Nashama
+    confederacao: AFC
+    tecnico: Jamal Sellami
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 1
+    estreia: 2026
+    melhor_campanha: Estreante (2026)
+    curiosidade: Foi vice da Copa Asiática de 2023, sua melhor campanha continental.
+
+  # ── CONCACAF ──────────────────────────────────────────────────────────────
+  México:
+    apelido: El Tri
+    confederacao: CONCACAF
+    tecnico: Javier Aguirre
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 18
+    estreia: 1930
+    melhor_campanha: Quartas de final (1970, 1986)
+    curiosidade: Co-anfitrião da Copa de 2026, ao lado de EUA e Canadá.
+  Estados Unidos:
+    apelido: The Stars and Stripes
+    confederacao: CONCACAF
+    tecnico: Mauricio Pochettino
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 12
+    estreia: 1930
+    melhor_campanha: 3º lugar (1930)
+    curiosidade: Co-anfitrião de 2026; seu melhor resultado foi na 1ª Copa, em 1930.
+  Canadá:
+    apelido: Les Rouges
+    confederacao: CONCACAF
+    tecnico: Jesse Marsch
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 3
+    estreia: 1986
+    melhor_campanha: Fase de grupos
+    curiosidade: Co-anfitrião de 2026; disputa só sua 3ª Copa da história.
+  Panamá:
+    apelido: La Marea Roja
+    confederacao: CONCACAF
+    tecnico: Thomas Christiansen
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 2
+    estreia: 2018
+    melhor_campanha: Fase de grupos (2018)
+    curiosidade: Estreou em Copas em 2018, feriado nacional no dia da classificação.
+  Haiti:
+    apelido: Les Grenadiers
+    confederacao: CONCACAF
+    tecnico: Sébastien Migné
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 2
+    estreia: 1974
+    melhor_campanha: Fase de grupos (1974)
+    curiosidade: Sua única Copa anterior foi em 1974, na Alemanha.
+  Curaçao:
+    apelido: Azul
+    confederacao: CONCACAF
+    tecnico: Dick Advocaat
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 1
+    estreia: 2026
+    melhor_campanha: Estreante (2026)
+    curiosidade: Menor território (em população) a se classificar para uma Copa.
+
+  # ── OFC (Oceania) ─────────────────────────────────────────────────────────
+  Nova Zelândia:
+    apelido: All Whites
+    confederacao: OFC
+    tecnico: Darren Bazeley
+    titulos_copa: 0
+    vices_copa: 0
+    participacoes: 3
+    estreia: 1982
+    melhor_campanha: Fase de grupos (2010, invicta)
+    curiosidade: Em 2010, foi a única seleção invicta da Copa, com três empates.

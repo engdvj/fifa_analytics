@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import yaml
 
 SNAPSHOTS_DIR = Path("data/gold/analytics/snapshots")
 OUTPUT = Path("reports/tournament/ranking_race.html")
@@ -57,6 +58,11 @@ METRIC_COLS = {
     "faltas_por_jogo": "faltas_por_jogo",
     "amarelos_por_jogo": "amarelos_por_jogo",
     "vermelhos_por_jogo": "vermelhos_por_jogo",
+    # estilo de jogo (eixos descritivos 0-100, 50 = média do torneio)
+    "estilo_posse": "estilo_posse",
+    "estilo_pressao": "estilo_pressao",
+    "estilo_verticalidade": "estilo_verticalidade",
+    "estilo_largura": "estilo_largura",
 }
 
 tl = pd.read_parquet(SNAPSHOTS_DIR / "snapshot_timeline.parquet")
@@ -119,6 +125,9 @@ for n in jogos:
                 entry[key] = round(float(val), 2) if val is not None and not pd.isna(val) else None
             except (TypeError, ValueError):
                 entry[key] = None
+        # estilo_jogo é o rótulo textual (não numérico) — vai no cabeçalho do modal
+        estilo = row.get("estilo_jogo")
+        entry["estilo_jogo"] = str(estilo) if estilo is not None and not pd.isna(estilo) else None
         teams.append(entry)
 
     data[str(n)] = {
@@ -159,6 +168,155 @@ def _read_optional(path: Path) -> pd.DataFrame:
 
 _lineups = _read_optional(Path("data/gold/lineups/canonical_lineups.parquet"))
 _pstats = _read_optional(Path("data/gold/fact_player_match_stats/canonical_player_stats.parquet"))
+_events = _read_optional(Path("data/gold/fact_events/canonical_events.parquet"))
+_tstats = _read_optional(Path("data/gold/fact_team_match_stats/canonical_team_stats.parquet"))
+_commentary = _read_optional(Path("data/gold/fact_commentary/canonical_commentary.parquet"))
+
+
+def _strip_name_cols(df: pd.DataFrame, cols: tuple[str, ...]) -> pd.DataFrame:
+    """Normaliza nomes de jogador (tira espaços nas pontas). Fontes às vezes trazem
+    'Gavi ', 'Raphinha ' etc., o que quebra o match por nome entre lineup, eventos,
+    substituições e cartões — destaque/troca não casava. Limpa na raiz."""
+    if df.empty:
+        return df
+    for c in cols:
+        if c in df.columns:
+            # não checar dtype==object: colunas pyarrow são dtype 'str', não object,
+            # e seriam puladas. map() lida com qualquer backend de string.
+            df[c] = df[c].map(lambda v: v.strip() if isinstance(v, str) else v)
+    return df
+
+
+_p365 = _read_optional(Path("data/gold/fact_player_match_stats/365scores.parquet"))
+
+_lineups = _strip_name_cols(_lineups, ("player_name",))
+_pstats = _strip_name_cols(_pstats, ("player_name",))
+_events = _strip_name_cols(_events, ("player", "related_player"))
+_commentary = _strip_name_cols(_commentary, ("player", "participants"))
+_p365 = _strip_name_cols(_p365, ("player_name",))
+
+import re as _re
+import unicodedata as _ud
+
+
+def _name_key(s) -> str:
+    """Chave de nome sem acento/caixa, p/ casar 365scores (sem match_id) com canonical."""
+    if not isinstance(s, str):
+        return ""
+    return _ud.normalize("NFKD", s).encode("ASCII", "ignore").decode().lower().strip()
+
+
+def _num0(v):
+    try:
+        return None if v is None or pd.isna(v) else (int(v) if float(v) == int(float(v)) else round(float(v), 2))
+    except (TypeError, ValueError):
+        return None
+
+
+def _player_stats_for(mid: str, team: str, date: str) -> dict:
+    """Stats por jogador deste jogo: canonical (ESPN, por match_id) + 365scores
+    (rating/xA/passes, casado por nome normalizado). Retorna {nome → dict de stats}."""
+    out = {}
+    if not _pstats.empty:
+        cps = _pstats[(_pstats["match_id"] == mid) & (_pstats["team"] == team)]
+        for _, r in cps.iterrows():
+            nm = r.get("player_name")
+            if not nm:
+                continue
+            out[nm] = {
+                "goals": _num0(r.get("goals")), "assists": _num0(r.get("assists")),
+                "shots": _num0(r.get("shots")), "on_target": _num0(r.get("shots_on_target")),
+                "saves": _num0(r.get("saves")),
+                "fouls_committed": _num0(r.get("fouls_committed")), "fouls_drawn": _num0(r.get("fouls_drawn")),
+                "offsides": _num0(r.get("offsides")),
+                "yellow": _num0(r.get("yellow_cards")), "red": _num0(r.get("red_cards")),
+            }
+    # enriquecimento 365scores (rating, minutos, xA, key passes, % passes) por nome+time
+    if not _p365.empty:
+        s365 = _p365[(_p365["team"] == team)]
+        by_key = {_name_key(r.get("player_name")): r for _, r in s365.iterrows()}
+        for nm, st in out.items():
+            r = by_key.get(_name_key(nm))
+            if r is None:
+                continue
+            st["rating"] = _num0(r.get("rating"))
+            st["minutes"] = _num0(r.get("minutes"))
+            st["xa"] = _num0(r.get("expected_assists"))
+            st["key_passes"] = _num0(r.get("key_passes"))
+            ap, pc = _num0(r.get("accurate_passes")), _num0(r.get("passes"))
+            st["pass_acc"] = round(ap / pc * 100) if ap and pc else None
+    return out
+
+def _subs_for(match_id: str, team: str) -> list[dict]:
+    """Substituições de um time num jogo, do fact_commentary (ESPN).
+    Texto 'X replaces Y' → entra=X, sai=Y. Retorna [{minute, in, out, reason}]."""
+    if _commentary.empty or "play_type" not in _commentary.columns:
+        return []
+    sub = _commentary[
+        (_commentary["match_id"] == match_id)
+        & (_commentary["play_type"] == "substitution")
+        & (_commentary["team"] == team)
+    ]
+    out = []
+    for _, r in sub.sort_values("minute_sort" if "minute_sort" in sub.columns else "minute").iterrows():
+        txt = str(r.get("text") or "")
+        mt = _re.match(r"Substitution,.*?\.\s*(.+?)\s+replaces\s+(.+?)(\s+because[^.]*)?\.?\s*$", txt)
+        if mt:
+            entra, saiu, reason = mt.group(1).strip(), mt.group(2).strip(), mt.group(3)
+        else:
+            parts = [p.strip() for p in str(r.get("participants") or "").split(",")]
+            entra = parts[0] if parts else None
+            saiu = parts[1] if len(parts) > 1 else None
+            reason = None
+        if not entra and not saiu:
+            continue
+        out.append({
+            "minute": str(r.get("minute") or ""),
+            "in": entra, "out": saiu,
+            "reason": "lesão" if reason and "injur" in reason.lower() else None,
+        })
+    return out
+
+# Narrativa ("A história do jogo") — lê o fragmento markdown de cada jogo, sem o
+# marcador HTML e o título "## A historia do jogo".
+def _read_story(match_id: str) -> str | None:
+    p = Path("reports/fragments") / match_id / "01b_story.md"
+    if not p.exists():
+        return None
+    txt = p.read_text(encoding="utf-8")
+    lines = [
+        ln for ln in txt.splitlines()
+        if not ln.strip().startswith("<!--") and not ln.strip().startswith("## ")
+    ]
+    return "\n".join(lines).strip() or None
+
+
+# Rótulos de tipo de evento → símbolo para a linha do tempo
+_EVENT_LABEL = {
+    "gol": ("⚽", "Gol"),
+    "gol_penalti": ("⚽", "Gol (pênalti)"),
+    "gol_contra": ("🥅", "Gol contra"),
+    "cartao_amarelo": ("🟨", "Cartão amarelo"),
+    "cartao_vermelho": ("🟥", "Cartão vermelho"),
+    "substituicao": ("🔄", "Substituição"),
+}
+
+# Estatísticas de time a comparar no detalhe do jogo: (coluna, rótulo, formato)
+# formato: "num" = número cru | "pct100" = já em 0-100 | "ratio" = razão calculada (×100)
+# "ratio" usa (col_num / col_den) — precisão de passe = passes certos / total de passes.
+_MATCH_STAT_ROWS = [
+    ("possession", "Posse de bola", "pct100"),
+    ("shots", "Finalizações", "num"),
+    ("shots_on_target", "No alvo", "num"),
+    ("corners", "Escanteios", "num"),
+    ("fouls", "Faltas", "num"),
+    (("accurate_passes", "passes"), "Precisão de passe", "ratio"),
+    ("offsides", "Impedimentos", "num"),
+]
+
+# Infos curadas das seleções (títulos, técnico, histórico) — config/teams_info.yaml
+_info_path = Path("config/teams_info.yaml")
+TEAMS_INFO = (yaml.safe_load(_info_path.read_text(encoding="utf-8")) or {}).get("teams", {}) if _info_path.exists() else {}
 
 # Confederação de cada seleção da Copa 2026 (não existe nos dados — mapa fixo).
 CONFEDERATION = {
@@ -220,6 +378,194 @@ def _num(v, nd=0):
         return None
 
 
+# Posição horizontal (x: 0=esquerda, 100=direita) a partir do código de posição.
+# O sufixo -L/-R e prefixos L/R indicam o lado; centro fica em ~50.
+def _pos_x_hint(position: str | None) -> float | None:
+    if not position:
+        return None
+    p = position.upper()
+    if p.endswith("-L") or p.startswith("L"):
+        return 25.0
+    if p.endswith("-R") or p.startswith("R"):
+        return 75.0
+    if p in ("CD", "CM", "AM", "DM", "CF", "M", "F", "G", "SW"):
+        return 50.0
+    return None
+
+
+# "Altura" tática de cada código de posição: menor = mais defensivo (perto do gol),
+# maior = mais ofensivo. Usado para agrupar os jogadores nas linhas da formação.
+_POS_DEPTH = {
+    "G": 0,
+    "SW": 1, "CD": 2, "CD-L": 2, "CD-R": 2, "LB": 2, "RB": 2,
+    "DM": 3,
+    "CM": 4, "CM-L": 4, "CM-R": 4, "LM": 4, "RM": 4, "M": 4,
+    "AM": 5, "AM-L": 5, "AM-R": 5,
+    "LF": 6, "RF": 6, "CF-L": 6, "CF-R": 6, "F": 6,
+}
+
+
+def _build_pitch(starters: list[dict], formation: str | None) -> list[dict]:
+    """Deriva coordenadas (x,y) de cada titular para desenhar o campo.
+
+    y: 8 (goleiro, fundo) → 92 (atacantes, topo). x: 0..100 (esq→dir).
+    Agrupa os jogadores em linhas pela profundidade tática da position (não pela
+    ordem do array, que é por camisa) e distribui cada linha conforme a formation."""
+    if not formation or not starters:
+        return []
+    try:
+        line_counts = [int(n) for n in formation.split("-")]
+    except ValueError:
+        return []
+    if sum(line_counts) != 10:  # formação descreve os 10 de linha (sem o goleiro)
+        return []
+
+    gk = [p for p in starters if (p.get("pos") or "").upper() == "G"]
+    field = [p for p in starters if (p.get("pos") or "").upper() != "G"]
+    if len(field) != sum(line_counts):
+        return []
+
+    # ordena os jogadores de linha por profundidade tática (defensivo → ofensivo)
+    field_sorted = sorted(field, key=lambda p: _POS_DEPTH.get((p.get("pos") or "").upper(), 4))
+
+    n_lines = len(line_counts)
+    pitch = []
+    if gk:
+        pitch.append({**gk[0], "x": 50.0, "y": 8.0})
+
+    idx = 0
+    for li, count in enumerate(line_counts):
+        y = 24 + li * (68 / max(n_lines - 1, 1)) if n_lines > 1 else 50
+        linha = field_sorted[idx: idx + count]
+        idx += count
+        # ordena a linha esquerda→direita pela dica de lado da position
+        linha_lr = sorted(
+            linha,
+            key=lambda p: (_pos_x_hint(p.get("pos")) if _pos_x_hint(p.get("pos")) is not None else 50.0),
+        )
+        for ci, p in enumerate(linha_lr):
+            x = (100 / (count + 1)) * (ci + 1) if count > 1 else 50.0
+            pitch.append({**p, "x": round(x, 1), "y": round(y, 1)})
+    return pitch
+
+
+def _build_team_lineup(mid: str, team: str) -> dict:
+    """Monta a escalação completa de um time num jogo: titulares + reservas (com
+    marcações de gol/cartão/substituição) + coordenadas do campo. Reutilizável
+    para os DOIS times do confronto."""
+    lu = _lineups[(_lineups["match_id"] == mid) & (_lineups["team"] == team)]
+    formation = None
+    starters, subs = [], []
+    if not lu.empty:
+        fvals = lu["formation"].dropna().unique()
+        formation = str(fvals[0]) if len(fvals) else None
+        for _, p in lu.sort_values("shirt_number", na_position="last").iterrows():
+            _pname = p.get("player_name")
+            item = {
+                "name": _pname.strip() if isinstance(_pname, str) else _pname,
+                "num": _num(p.get("shirt_number")),
+                "pos": p.get("position") if not pd.isna(p.get("position")) else None,
+            }
+            (starters if bool(p.get("is_starter")) else subs).append(item)
+
+    nrm = lambda s: (s or "").strip()
+    game_subs = _subs_for(mid, team)
+    entrou_min = {nrm(s["in"]): s["minute"] for s in game_subs if s.get("in")}
+    saiu_min = {nrm(s["out"]): s["minute"] for s in game_subs if s.get("out")}
+    partner_of = {}
+    for s in game_subs:
+        if s.get("in") and s.get("out"):
+            partner_of[nrm(s["in"])] = nrm(s["out"])
+            partner_of[nrm(s["out"])] = nrm(s["in"])
+
+    roster_names = [it["name"] for it in starters + subs if it.get("name")]
+
+    def resolve_name(ply):
+        ply = (ply or "").strip()
+        mt = _re.match(r"^([A-Z])\.\s+(.+)$", ply)
+        if mt:
+            ini, surname = mt.group(1), mt.group(2)
+            for full in roster_names:
+                parts = full.split()
+                if parts and parts[0][:1] == ini and surname.lower() in full.lower():
+                    return full
+        return ply
+
+    cards_of, goals_of = {}, {}
+    if not _events.empty:
+        ce = _events[(_events["match_id"] == mid) & (_events["team"] == team)]
+        for _, e in ce.iterrows():
+            et, ply = e.get("event_type"), resolve_name(e.get("player"))
+            if not ply:
+                continue
+            if et == "cartao_vermelho":
+                cards_of[ply] = "vermelho"
+            elif et == "cartao_amarelo" and cards_of.get(ply) != "vermelho":
+                cards_of[ply] = "vermelho" if cards_of.get(ply) == "amarelo" else "amarelo"
+            elif et in ("gol", "gol_penalti"):
+                goals_of[ply] = goals_of.get(ply, 0) + 1
+
+    pstats_map = _player_stats_for(mid, team, "")
+    for it in starters + subs:
+        nm = it.get("name")
+        if nm in entrou_min:
+            it["entered"] = entrou_min[nm]
+        if nm in saiu_min:
+            it["exited"] = saiu_min[nm]
+        if nm in partner_of:
+            it["sub_with"] = partner_of[nm]
+        if nm in cards_of:
+            it["card"] = cards_of[nm]
+        if nm in goals_of:
+            it["goals"] = goals_of[nm]
+        if nm in pstats_map:
+            # só guarda chaves com valor, p/ o card não mostrar campos vazios
+            it["stats"] = {k: v for k, v in pstats_map[nm].items() if v is not None}
+
+    return {
+        "formation": formation, "starters": starters, "subs": subs,
+        "pitch": _build_pitch(starters, formation), "game_subs": game_subs,
+    }
+
+
+def _timeline_for(mid: str, team: str, game_subs: list) -> list:
+    """Linha do tempo: gols/cartões de AMBOS os times + substituições do time visto.
+    mine=True nos eventos do `team`."""
+    timeline = []
+    if not _events.empty:
+        ev = _events[_events["match_id"] == mid]
+        sort_col = "minute_sort" if "minute_sort" in ev.columns else "minute"
+        for _, e in ev.sort_values(sort_col, na_position="last").iterrows():
+            sym_lbl = _EVENT_LABEL.get(e.get("event_type"))
+            if not sym_lbl:
+                continue
+            sym, lbl = sym_lbl
+            ply = e.get("player") if not pd.isna(e.get("player")) else None
+            timeline.append({
+                "minute": str(e.get("minute") or ""), "player": ply,
+                "team": e.get("team") if not pd.isna(e.get("team")) else None,
+                "mine": e.get("team") == team, "sym": sym, "label": lbl, "hl_name": ply,
+            })
+    for s in game_subs:
+        entra, saiu = s.get("in"), s.get("out")
+        extra = f" ({s['reason']})" if s.get("reason") else ""
+        timeline.append({
+            "minute": s["minute"],
+            "player": f"{entra} ↔ {saiu}{extra}" if entra and saiu else (entra or saiu),
+            "team": team, "mine": True, "sym": "🔄", "label": "Substituição",
+            "is_sub": True, "hl_name": entra or saiu,
+        })
+
+    def _min_key(t):
+        mm = str(t.get("minute") or "0").replace("'", "").split("+")
+        try:
+            return int(mm[0]) * 100 + (int(mm[1]) if len(mm) > 1 else 0)
+        except ValueError:
+            return 0
+    timeline.sort(key=_min_key)
+    return timeline
+
+
 _finalizados = matches_df[matches_df["status"] == "finalizado"]
 # Todas as seleções da Copa (não só as que já jogaram) — para a grade da aba.
 _all_cup_teams = sorted(
@@ -228,14 +574,17 @@ _all_cup_teams = sorted(
 )
 teams_detail: dict[str, dict] = {}
 for _team in _all_cup_teams:
-    mine = _finalizados[
-        (_finalizados["home_team"] == _team) | (_finalizados["away_team"] == _team)
+    # todos os jogos do time com adversário definido (finalizados + agendados);
+    # confrontos de mata-mata ainda indefinidos (sem adversário) ficam de fora.
+    mine = matches_df[
+        (matches_df["home_team"] == _team) | (matches_df["away_team"] == _team)
     ].sort_values(["temporal_order", "date", "kickoff_time"])
 
     # — jogos + escalações
     jogos_list = []
     for _, m in mine.iterrows():
         mid = m["match_id"]
+        is_finalizado = m.get("status") == "finalizado"
         is_home = m["home_team"] == _team
         opp = m["away_team"] if is_home else m["home_team"]
         gf = m["home_score"] if is_home else m["away_score"]
@@ -250,32 +599,75 @@ for _team in _all_cup_teams:
         else:
             res = "E"
 
-        lu = _lineups[(_lineups["match_id"] == mid) & (_lineups["team"] == _team)]
-        formation = None
-        starters, subs = [], []
-        if not lu.empty:
-            fvals = lu["formation"].dropna().unique()
-            formation = str(fvals[0]) if len(fvals) else None
-            for _, p in lu.sort_values("shirt_number", na_position="last").iterrows():
-                item = {
-                    "name": p.get("player_name"),
-                    "num": _num(p.get("shirt_number")),
-                    "pos": p.get("position") if not pd.isna(p.get("position")) else None,
-                }
-                if bool(p.get("is_starter")):
-                    starters.append(item)
-                else:
-                    subs.append(item)
+        # escalação dos DOIS times (campo + reservas com marcações)
+        lineup = _build_team_lineup(mid, _team)
+        formation, starters, subs = lineup["formation"], lineup["starters"], lineup["subs"]
+        opp_lineup = _build_team_lineup(mid, opp)
 
+        # linha do tempo do jogo (eventos de ambos; mine=True nos do time visto)
+        timeline = _timeline_for(mid, _team, lineup["game_subs"])
+
+        # — estatísticas comparadas (meu time × adversário) nesta partida
+        stats_cmp = []
+        if not _tstats.empty:
+            mine_row = _tstats[(_tstats["match_id"] == mid) & (_tstats["team"] == _team)]
+            opp_row = _tstats[(_tstats["match_id"] == mid) & (_tstats["team"] == opp)]
+            if not mine_row.empty and not opp_row.empty:
+                mr, orow = mine_row.iloc[0], opp_row.iloc[0]
+
+                def _ratio_pct(row, num_col, den_col):
+                    num, den = _num(row.get(num_col)), _num(row.get(den_col))
+                    if num is None or not den:
+                        return None
+                    return round(num / den * 100, 1)
+
+                for col, lbl, fmt in _MATCH_STAT_ROWS:
+                    is_pct = fmt in ("pct100", "ratio")
+                    if fmt == "ratio":
+                        num_col, den_col = col
+                        if num_col not in _tstats.columns or den_col not in _tstats.columns:
+                            continue
+                        mv, ov = _ratio_pct(mr, num_col, den_col), _ratio_pct(orow, num_col, den_col)
+                    else:
+                        if col not in _tstats.columns:
+                            continue
+                        mv = _num(mr.get(col), 1 if is_pct else 0)
+                        ov = _num(orow.get(col), 1 if is_pct else 0)
+                    if mv is None and ov is None:
+                        continue
+                    stats_cmp.append({"label": lbl, "mine": mv, "opp": ov, "pct": is_pct})
+
+        try:
+            _round = int(m.get("round") or 0)
+        except (TypeError, ValueError):
+            _round = 0
+        # nomes/bandeiras/placar em ORDEM REAL (mandante × visitante), p/ o card
+        home_team, away_team = m.get("home_team"), m.get("away_team")
+        home_score = _num(m.get("home_score"))
+        away_score = _num(m.get("away_score"))
         jogos_list.append({
             "match_id": mid,
+            "finalizado": bool(is_finalizado),
             "opp": opp, "opp_flag": FLAGS.get(opp, "🏳️"),
             "home": bool(is_home),
-            "gf": gf_i, "ga": ga_i, "res": res,
+            # ordem real do confronto (independe da seleção sendo vista)
+            "home_team": home_team, "home_flag": FLAGS.get(home_team, "🏳️"), "home_score": home_score,
+            "away_team": away_team, "away_flag": FLAGS.get(away_team, "🏳️"), "away_score": away_score,
+            "gf": gf_i, "ga": ga_i, "res": res if is_finalizado else "",
             "date": str(m.get("date", ""))[:10],
             "stage": _STAGE_LABEL.get(m.get("stage"), m.get("stage") or ""),
+            "stage_key": m.get("stage") or "fase_de_grupos",
+            "round": _round,
             "formation": formation,
             "starters": starters, "subs": subs,
+            "pitch": lineup["pitch"],
+            # escalação do adversário (campo + reservas) p/ a vista de 2 times
+            "opp_formation": opp_lineup["formation"],
+            "opp_pitch": opp_lineup["pitch"],
+            "opp_subs": opp_lineup["subs"],
+            "timeline": timeline,
+            "stats_cmp": stats_cmp,
+            "story": _read_story(mid),
         })
 
     # — elenco agregado (stats somadas em todos os jogos)
@@ -320,16 +712,38 @@ for _team in _all_cup_teams:
     # — fase atual (do último jogo) e flag de eliminada
     stage_now = jogos_list[-1]["stage"] if jogos_list else None
 
+    # — infos curadas (YAML); confederação do YAML tem prioridade sobre o mapa local
+    info = TEAMS_INFO.get(_team, {}) or {}
+    confed = info.get("confederacao") or CONFEDERATION.get(_team)
+
+    # — artilheiro do time nesta Copa (do elenco agregado)
+    artilheiro = None
+    if players:
+        top = max(players, key=lambda p: (p.get("gols") or 0, p.get("assist") or 0))
+        if (top.get("gols") or 0) > 0:
+            artilheiro = {"name": top["name"], "gols": top["gols"]}
+
     teams_detail[_team] = {
         "team": _team,
         "flag": FLAGS.get(_team, "🏳️"),
         "rank": rank,
         "n_jogos": len(jogos_list),
         "group": TEAM_GROUP.get(_team),
-        "confed": CONFEDERATION.get(_team),
+        "confed": confed,
         "stage_now": stage_now,
         "scores": scores,
         "campanha": campanha,
+        "artilheiro": artilheiro,
+        "info": {
+            "apelido": info.get("apelido"),
+            "tecnico": info.get("tecnico"),
+            "titulos_copa": info.get("titulos_copa"),
+            "vices_copa": info.get("vices_copa"),
+            "participacoes": info.get("participacoes"),
+            "estreia": info.get("estreia"),
+            "melhor_campanha": info.get("melhor_campanha"),
+            "curiosidade": info.get("curiosidade"),
+        },
         "score_labels": {k: v for k, v in _SCORE_KEYS},
         "jogos": jogos_list,
         "players": players,
@@ -451,6 +865,15 @@ METRIC_GROUPS = [
         ("amarelos_por_jogo", "Amarelos"),
         ("vermelhos_por_jogo", "Vermelhos"),
     ]),
+    # Estilo de jogo: eixos descritivos 0-100 (50 = média do torneio). Não é
+    # qualidade — caracteriza COMO o time joga. O rótulo textual (estilo_jogo)
+    # aparece à parte, no cabeçalho do modal; aqui ficam só os eixos numéricos.
+    ("Estilo de jogo · onde o time pende em cada eixo (centro = média do torneio)", "tt-col-estilo", [
+        ("estilo_posse", "Construção"),
+        ("estilo_pressao", "Recuperação"),
+        ("estilo_verticalidade", "Chegada ao ataque"),
+        ("estilo_largura", "Largura"),
+    ]),
 ]
 
 # Métricas onde menor = melhor (barra mais comprida = mais destaque negativo)
@@ -494,10 +917,10 @@ METRIC_RELATIONS: dict[str, list[str]] = {
 
     # ── score_controle ← posse + passes + precisao_passes + posse_produtiva (chutes_no_alvo/posse) + dribbles
     "score_controle":          ["posse_media", "passes_por_jogo", "precisao_passes", "dribbles_won_por_jogo", "chutes_no_alvo_por_jogo"],
-    "posse_media":             ["passes_por_jogo", "precisao_passes", "chutes_no_alvo_por_jogo", "score_controle"],
-    "passes_por_jogo":         ["posse_media", "precisao_passes", "key_passes_por_jogo", "score_controle"],
-    "precisao_passes":         ["passes_por_jogo", "posse_media", "score_controle"],
-    "dribbles_won_por_jogo":   ["posse_media", "key_passes_por_jogo", "score_controle"],
+    "posse_media":             ["passes_por_jogo", "precisao_passes", "chutes_no_alvo_por_jogo", "score_controle", "estilo_posse"],
+    "passes_por_jogo":         ["posse_media", "precisao_passes", "key_passes_por_jogo", "score_controle", "estilo_posse"],
+    "precisao_passes":         ["passes_por_jogo", "posse_media", "score_controle", "estilo_posse"],
+    "dribbles_won_por_jogo":   ["posse_media", "key_passes_por_jogo", "score_controle", "estilo_largura"],
 
     # ── score_disciplina ← faltas + amarelos + vermelhos por jogo
     "score_disciplina":        ["faltas_por_jogo", "amarelos_por_jogo", "vermelhos_por_jogo"],
@@ -512,6 +935,14 @@ METRIC_RELATIONS: dict[str, list[str]] = {
     # ── score_geral ← todos os 6 componentes
     "score_geral":             ["score_resultado", "score_ataque", "score_defesa",
                                 "score_eficiencia", "score_controle", "score_forca_relativa", "score_disciplina"],
+
+    # ── Estilo de jogo (descritivo): acende as métricas brutas do painel que
+    # compõem cada eixo. Insumos sem coluna no painel (recuperação no terço
+    # final, desarmes, cruzamentos certos) entram só como indireta (amarelo).
+    "estilo_posse":            ["posse_media", "passes_por_jogo", "precisao_passes"],
+    "estilo_verticalidade":    ["chutes_por_jogo", "chutes_no_alvo_por_jogo"],
+    "estilo_largura":          ["dribbles_won_por_jogo", "key_passes_por_jogo"],
+    "estilo_pressao":          [],  # nenhum insumo direto tem coluna no painel
 }
 
 # Relações indiretas: correlações naturais que NÃO entram diretamente no cálculo do score,
@@ -546,14 +977,23 @@ METRIC_RELATIONS_INDIRECT: dict[str, list[str]] = {
     "score_forca_relativa":    ["score_resultado", "aproveitamento"],
     "elo_rating":              ["score_resultado", "saldo_gols"],
 
-    # disciplina: faltas geram escanteios/cartões
-    "faltas_por_jogo":         ["escanteios_por_jogo"],
+    # disciplina: faltas geram escanteios/cartões (e correlacionam com pressão alta)
+    "faltas_por_jogo":         ["escanteios_por_jogo", "estilo_pressao"],
     "amarelos_por_jogo":       ["escanteios_por_jogo"],
 
     # escanteios: resultado de pressão ofensiva
-    "escanteios_por_jogo":     ["score_ataque", "gols_por_jogo", "chutes_por_jogo"],
-    "chutes_por_jogo":         ["score_ataque", "gols_por_jogo"],
-    "key_passes_por_jogo":     ["chutes_por_jogo", "escanteios_por_jogo", "score_ataque"],
+    "escanteios_por_jogo":     ["score_ataque", "gols_por_jogo", "chutes_por_jogo", "estilo_largura"],
+    "chutes_por_jogo":         ["score_ataque", "gols_por_jogo", "estilo_verticalidade"],
+    "key_passes_por_jogo":     ["chutes_por_jogo", "escanteios_por_jogo", "score_ataque", "estilo_largura"],
+
+    # ── Estilo (descritivo): correlatos sem coluna própria no painel.
+    # Pressão alta correlaciona com mais faltas (disputa no campo de frente) e
+    # escanteios (pressão ofensiva); verticalidade com escanteios; largura com
+    # escanteios (cruzamentos viram escanteios).
+    "estilo_posse":            ["key_passes_por_jogo", "dribbles_won_por_jogo"],
+    "estilo_pressao":          ["faltas_por_jogo", "escanteios_por_jogo"],
+    "estilo_verticalidade":    ["escanteios_por_jogo", "gols_por_jogo"],
+    "estilo_largura":          ["escanteios_por_jogo"],
 }
 metric_relations_json = json.dumps(METRIC_RELATIONS, ensure_ascii=False)
 metric_relations_indirect_json = json.dumps(METRIC_RELATIONS_INDIRECT, ensure_ascii=False)
@@ -856,9 +1296,19 @@ input[type=range] {{
 }}
 
 /* ── MAIN LAYOUT ── */
+/* wrapper da aba Race: precisa ser flex-column que preenche o body, senão o
+   .main não recebe altura limitada e a .bars-viewport não rola. */
+#viewRace {{
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}}
 .main {{
   display: flex;
   flex: 1;
+  min-height: 0;
   overflow: hidden;
 }}
 
@@ -1039,8 +1489,40 @@ input[type=range] {{
 .tt-col-campanha  {{ grid-column: span 1; grid-row: span 2; border-bottom: none; border-right: 2px solid #30363d; }}
 .tt-col-ataque    {{ grid-column: span 2; }}
 .tt-col-defesa    {{ grid-column: span 2; border-right: none; }}
-.tt-col-controle  {{ grid-column: span 2; border-bottom: none; }}
-.tt-col-disciplina {{ grid-column: span 2; border-right: none; border-bottom: none; }}
+.tt-col-controle  {{ grid-column: span 2; }}
+.tt-col-disciplina {{ grid-column: span 2; border-right: none; }}
+/* Estilo ocupa uma 3ª linha inteira (6 colunas): os 4 eixos viram um grid
+   horizontal dentro do bloco, para não esticar uma única coluna estreita. */
+.tt-col-estilo {{ grid-column: 1 / -1; border-right: none; border-bottom: none; }}
+/* Estilo: 4 eixos bipolares lado a lado (25% cada), cada um com polos + barra. */
+.tt-style-row {{
+  display: inline-block; width: 24.5%; vertical-align: top;
+  padding: 6px 12px 8px; box-sizing: border-box;
+}}
+.tt-style-row.related      {{ background: rgba(74,222,128,0.10); }}
+.tt-style-row.related-indirect {{ background: rgba(240,192,64,0.10); }}
+.tt-style-poles {{
+  display: flex; justify-content: space-between;
+  font-size: 0.6rem; color: #8b949e; margin-bottom: 3px;
+}}
+.tt-style-bar {{
+  position: relative; height: 5px; background: #21262d;
+  border-radius: 3px; margin: 2px 0 5px;
+}}
+.tt-style-mid {{
+  position: absolute; left: 50%; top: -1px; width: 1px; height: 7px;
+  background: #484f58;  /* marca o centro = média do torneio */
+}}
+.tt-style-dot {{
+  position: absolute; top: 50%; width: 9px; height: 9px;
+  background: #58a6ff; border-radius: 50%;
+  transform: translate(-50%, -50%); box-shadow: 0 0 0 2px #0d1117;
+}}
+.tt-style-foot {{
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 0.66rem;
+}}
+.tt-style-name {{ color: #c9d1d9; }}
 .tt-col-title {{
   font-size: 0.63rem;
   font-weight: 700;
@@ -1131,6 +1613,7 @@ input[type=range] {{
 .drag-flag {{ font-size: 1.1rem; flex-shrink: 0; }}
 .drag-name {{ color: #e6edf3; font-weight: 700; font-size: 0.95rem; white-space: nowrap; }}
 .drag-sub {{ color: #6b7280; font-size: 0.7rem; white-space: nowrap; }}
+.drag-why {{ color: #8b949e; font-style: italic; }}
 .modal-card-close {{
   background: none;
   border: none;
@@ -1242,7 +1725,9 @@ input[type=range] {{
 .tab.active {{ background: #1f6feb22; color: #58a6ff; }}
 
 /* ── VIEW Seleções ── */
-#viewTeams {{ flex: 1; display: flex; flex-direction: column; overflow: hidden; }}
+/* min-height:0 é essencial: sem isso o item flex não encolhe abaixo do conteúdo
+   e a grade cresce além da viewport em vez de rolar internamente. */
+#viewTeams {{ flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }}
 .teams-toolbar {{
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 12px 20px; border-bottom: 1px solid #21262d; flex-shrink: 0;
@@ -1263,44 +1748,69 @@ input[type=range] {{
 .tb-check input {{ accent-color: #1f6feb; cursor: pointer; }}
 .teams-count {{ color: #6b7280; font-size: 0.74rem; }}
 .teams-grid {{
-  flex: 1; overflow-y: auto; padding: 18px 20px;
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 16px; align-content: start;
+  flex: 1; overflow-y: auto; padding: 26px 28px;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 30px; align-content: start;
 }}
 .team-card {{
-  background: #0d1117; border: 1px solid #21262d; border-radius: 14px;
-  padding: 18px 20px; cursor: pointer;
+  background: #0d1117; border: 1px solid #21262d; border-radius: 16px;
+  padding: 22px 24px; cursor: pointer;
   transition: border-color 0.15s, transform 0.1s, background 0.15s, box-shadow 0.15s;
 }}
 .team-card:hover {{
   border-color: #1f6feb; background: #11161f; transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(31,111,235,0.12);
+  box-shadow: 0 8px 26px rgba(31,111,235,0.14);
 }}
-.tc-head {{ display: flex; align-items: center; gap: 14px; }}
-.team-card .tc-flag {{ font-size: 2.9rem; line-height: 1; flex-shrink: 0; }}
+.tc-head {{ display: flex; align-items: center; gap: 18px; }}
+.team-card .tc-flag {{ font-size: 3.6rem; line-height: 1; flex-shrink: 0; }}
 .team-card .tc-info {{ min-width: 0; flex: 1; }}
-.team-card .tc-name {{ font-weight: 800; font-size: 1.12rem; color: #e6edf3; line-height: 1.15; }}
-.team-card .tc-sub {{ font-size: 0.74rem; color: #8b949e; margin-top: 3px; }}
+.team-card .tc-name {{ font-weight: 800; font-size: 1.35rem; color: #e6edf3; line-height: 1.15; }}
+.team-card .tc-sub {{ font-size: 0.82rem; color: #8b949e; margin-top: 4px; }}
 .team-card .tc-rank {{
-  font-size: 1.15rem; font-weight: 900; color: #58a6ff;
-  background: #1f6feb18; border-radius: 8px; padding: 6px 11px; flex-shrink: 0;
+  font-size: 1.3rem; font-weight: 900; color: #58a6ff;
+  background: #1f6feb18; border-radius: 9px; padding: 7px 13px; flex-shrink: 0;
 }}
-/* mini-stats no card */
+/* destaque da métrica ativa */
+.tc-metric {{
+  display: flex; align-items: baseline; gap: 12px;
+  margin-top: 18px; padding-top: 16px; border-top: 1px solid #161b22;
+}}
+.tc-metric .m-val {{ font-size: 2.6rem; font-weight: 900; line-height: 1; font-variant-numeric: tabular-nums; }}
+.tc-metric .m-lbl {{ font-size: 0.78rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; }}
+.tc-metric .m-rank {{
+  margin-left: auto; font-size: 0.74rem; font-weight: 700; color: #9ca3af;
+  background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 3px 9px;
+}}
+/* mini-stats secundárias no card */
 .tc-stats {{
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
-  margin-top: 14px; padding-top: 14px; border-top: 1px solid #161b22;
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+  margin-top: 16px;
 }}
-.tc-stat {{ text-align: center; }}
-.tc-stat .v {{ font-size: 1.05rem; font-weight: 800; color: #e6edf3; font-variant-numeric: tabular-nums; }}
-.tc-stat .v.geral {{ color: #58a6ff; }}
-.tc-stat .l {{ font-size: 0.62rem; color: #6b7280; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.3px; }}
-.tc-badges {{ display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }}
+.tc-stat {{ text-align: center; background: #11161f; border-radius: 8px; padding: 8px 4px; }}
+.tc-stat .v {{ font-size: 1.2rem; font-weight: 800; color: #e6edf3; font-variant-numeric: tabular-nums; }}
+.tc-stat .l {{ font-size: 0.66rem; color: #6b7280; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.3px; }}
+.tc-badges {{ display: flex; gap: 7px; margin-top: 14px; flex-wrap: wrap; }}
 .tc-badge {{
-  font-size: 0.64rem; font-weight: 600; color: #9ca3af;
-  background: #161b22; border: 1px solid #21262d; border-radius: 5px; padding: 2px 7px;
+  font-size: 0.7rem; font-weight: 600; color: #9ca3af;
+  background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 3px 9px;
 }}
 .team-card.tc-empty {{ opacity: 0.45; cursor: default; }}
 .team-card.tc-empty:hover {{ border-color: #21262d; transform: none; background: #0d1117; box-shadow: none; }}
+
+/* ── paginação ── */
+.teams-pager {{
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 14px 20px; border-top: 1px solid #21262d; flex-shrink: 0;
+}}
+.pager-btn {{
+  background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+  color: #c9d1d9; font-size: 0.82rem; font-weight: 600; min-width: 34px; height: 32px;
+  padding: 0 10px; cursor: pointer; transition: border-color 0.15s, background 0.15s, color 0.15s;
+}}
+.pager-btn:hover:not(:disabled) {{ border-color: #1f6feb; color: #58a6ff; }}
+.pager-btn.active {{ background: #1f6feb; border-color: #1f6feb; color: #fff; }}
+.pager-btn:disabled {{ opacity: 0.35; cursor: default; }}
+.pager-info {{ color: #6b7280; font-size: 0.74rem; margin: 0 6px; }}
 
 /* ── MODAL ── */
 .modal-overlay {{
@@ -1310,27 +1820,25 @@ input[type=range] {{
 }}
 .modal {{
   background: #0d1117; border: 1px solid #30363d; border-radius: 14px;
-  width: min(860px, 100%); max-height: 88vh; display: flex; flex-direction: column;
+  width: min(1000px, 100%); max-height: 90vh; display: flex; flex-direction: column;
   box-shadow: 0 20px 60px rgba(0,0,0,0.6);
 }}
-.modal-head {{
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 16px 20px; border-bottom: 1px solid #21262d; flex-shrink: 0;
+/* topbar: identidade compacta + abas + fechar, tudo numa linha */
+.modal-topbar {{
+  display: flex; align-items: center; gap: 14px;
+  padding: 6px 16px 0 20px; border-bottom: 1px solid #21262d; flex-shrink: 0;
 }}
-.modal-title {{ display: flex; align-items: center; gap: 12px; font-size: 1.15rem; font-weight: 800; }}
-.modal-flag {{ font-size: 1.9rem; line-height: 1; }}
-.modal-rank {{
-  font-size: 0.78rem; font-weight: 700; color: #58a6ff;
-  background: #1f6feb18; border-radius: 6px; padding: 3px 9px;
+.modal-mini {{
+  display: flex; align-items: center; gap: 9px; font-size: 1rem; font-weight: 800;
+  color: #e6edf3; white-space: nowrap; padding-bottom: 8px; flex-shrink: 0;
 }}
+.modal-mini .modal-flag {{ font-size: 1.6rem; line-height: 1; }}
 .modal-close {{
   background: transparent; border: none; color: #8b949e; cursor: pointer;
-  font-size: 1.1rem; padding: 4px 8px; border-radius: 6px;
+  font-size: 1.1rem; padding: 4px 8px; border-radius: 6px; margin-bottom: 4px;
 }}
 .modal-close:hover {{ background: #21262d; color: #e6edf3; }}
-.modal-tabs {{
-  display: flex; gap: 2px; padding: 8px 20px 0; border-bottom: 1px solid #21262d; flex-shrink: 0;
-}}
+.modal-tabs {{ display: flex; gap: 2px; }}
 .modal-tab {{
   background: transparent; border: none; border-bottom: 2px solid transparent; cursor: pointer;
   color: #8b949e; font-size: 0.8rem; font-weight: 600; padding: 8px 12px; transition: color 0.15s;
@@ -1339,7 +1847,68 @@ input[type=range] {{
 .modal-tab.active {{ color: #58a6ff; border-bottom-color: #58a6ff; }}
 .modal-body {{ overflow-y: auto; padding: 18px 20px; }}
 
-/* blocos do modal */
+/* blocos do modal — aba Resumo (hero + 2 colunas) */
+.rs-hero {{
+  position: relative;
+  display: flex; align-items: center; gap: 18px;
+  padding: 18px 20px; border-radius: 12px; margin-bottom: 16px;
+  background: linear-gradient(135deg, #1f6feb1f, #0d1117 70%);
+  border: 1px solid #1f6feb33;
+}}
+/* lâmpada de curiosidade no canto superior direito do hero */
+.rs-lamp {{
+  position: absolute; top: 50%; right: 16px; transform: translateY(-50%);
+  font-size: 1.3rem; cursor: help; line-height: 1; opacity: 0.8;
+  transition: opacity 0.15s, transform 0.1s;
+}}
+.rs-lamp:hover, .rs-lamp:focus {{ opacity: 1; transform: translateY(-50%) scale(1.12); outline: none; }}
+.rs-lamp-tip {{
+  display: none; position: absolute; top: 130%; right: 0; z-index: 10;
+  width: 260px; font-size: 0.82rem; font-weight: 400; line-height: 1.45;
+  color: #c9d1d9; background: #161b22; border: 1px solid #1f6feb55;
+  border-radius: 10px; padding: 11px 14px; box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+}}
+.rs-lamp:hover .rs-lamp-tip, .rs-lamp:focus .rs-lamp-tip {{ display: block; }}
+.rs-hero-flag {{ font-size: 3rem; line-height: 1; flex-shrink: 0; }}
+.rs-hero-info {{ min-width: 0; }}
+.rs-hero-top {{ display: flex; align-items: center; gap: 10px; }}
+.rs-hero-name {{ font-size: 1.4rem; font-weight: 900; color: #e6edf3; line-height: 1.1; }}
+.rs-hero-rank {{
+  font-size: 0.74rem; font-weight: 700; color: #58a6ff;
+  background: #1f6feb22; border-radius: 6px; padding: 3px 8px;
+}}
+.rs-hero-nick {{ font-size: 0.92rem; color: #58a6ff; font-weight: 600; margin-top: 3px; }}
+.rs-hero-meta {{ font-size: 0.82rem; color: #8b949e; margin-top: 5px; }}
+
+.rs-cols {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: stretch; }}
+@media (max-width: 620px) {{ .rs-cols {{ grid-template-columns: 1fr; }} }}
+.rs-col {{
+  background: #0d1117; border: 1px solid #21262d; border-radius: 12px; padding: 16px 18px;
+  display: flex; flex-direction: column;
+}}
+.rs-col-title {{
+  font-size: 0.7rem; color: #58a6ff; text-transform: uppercase; letter-spacing: 0.6px;
+  font-weight: 700; margin-bottom: 8px;
+}}
+.rs-kv {{
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 9px 0; border-bottom: 1px solid #161b22;
+}}
+.rs-kv:last-of-type {{ border-bottom: none; }}
+.rs-k {{ font-size: 0.84rem; color: #8b949e; }}
+.rs-v {{ font-size: 1.15rem; font-weight: 800; color: #e6edf3; font-variant-numeric: tabular-nums; }}
+.rs-highlight {{
+  font-size: 0.82rem; color: #c9d1d9; margin-top: auto; line-height: 1.4;
+  background: #11161f; border-radius: 8px; padding: 10px 12px;
+}}
+.rs-highlight + .rs-highlight {{ margin-top: 8px; }}
+.rs-na {{ font-size: 0.82rem; color: #6b7280; padding: 6px 0; }}
+.rs-curio {{
+  font-size: 0.86rem; color: #c9d1d9; margin-top: 16px; padding: 13px 16px;
+  background: #1f6feb10; border: 1px solid #1f6feb33; border-radius: 10px; line-height: 1.5;
+}}
+
+/* (mantido p/ compat — não usado mais na aba Resumo) */
 .md-scores {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(130px,1fr)); gap: 10px; }}
 .md-score {{ background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 10px 12px; }}
 .md-score .ms-val {{ font-size: 1.35rem; font-weight: 800; color: #e6edf3; }}
@@ -1378,6 +1947,266 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 .md-xi.subs .pl {{ opacity: 0.7; }}
 .md-sub-label {{ font-size: 0.68rem; color: #6b7280; margin: 8px 0 4px; text-transform: uppercase; letter-spacing: 0.4px; }}
 .md-empty {{ color: #6b7280; font-size: 0.82rem; padding: 12px 0; }}
+
+/* ── aba Jogos: card de jogo (accordion) ── */
+.mg {{
+  background: #161b22; border: 1px solid #21262d; border-radius: 10px;
+  margin-bottom: 10px; overflow: hidden; transition: border-color 0.15s;
+}}
+.mg.open {{ border-color: #1f6feb55; }}
+.mg-head {{
+  display: flex; align-items: center; gap: 12px; padding: 12px 16px; cursor: pointer;
+  transition: background 0.15s;
+}}
+.mg-head:hover {{ background: #1a212b; }}
+/* lados do confronto: mandante (esq) e visitante (dir), agrupados à esquerda */
+.mg-side {{ min-width: 0; color: #8b949e; white-space: nowrap; }}
+.mg-side.me {{ color: #e6edf3; }}                 /* a seleção sendo vista, destacada */
+.mg-score {{
+  font-weight: 800; font-size: 1rem; flex-shrink: 0; padding: 3px 12px; border-radius: 6px;
+  background: #21262d; font-variant-numeric: tabular-nums; text-align: center; min-width: 64px;
+}}
+.mg-score.res-V {{ background: #22c55e22; color: #22c55e; }}
+.mg-score.res-E {{ background: #6b728022; color: #9ca3af; }}
+.mg-score.res-D {{ background: #ef444422; color: #ef4444; }}
+.mg-score.res-next {{ background: #21262d; color: #6b7280; }}
+.mg-meta {{ flex-shrink: 0; margin-left: auto; }}  /* empurra data + chevron pra direita */
+.mg-chevron {{ color: #6b7280; font-size: 0.7rem; flex-shrink: 0; }}
+.mg-detail {{ padding: 4px 16px 16px; border-top: 1px solid #21262d; }}
+/* título de fase + jogos agendados (não clicáveis) */
+.mg-phase {{
+  font-size: 0.72rem; color: #58a6ff; text-transform: uppercase; letter-spacing: 0.6px;
+  font-weight: 700; margin: 16px 0 8px;
+}}
+.mg-phase:first-child {{ margin-top: 4px; }}
+.mg.scheduled {{ opacity: 0.7; border-style: dashed; }}
+.mg.scheduled .mg-head {{ cursor: default; }}
+.mg.scheduled .mg-head:hover {{ background: transparent; }}
+
+.gd-block {{ margin-top: 16px; }}
+.gd-block:first-child {{ margin-top: 12px; }}
+.gd-title {{
+  font-size: 0.72rem; color: #58a6ff; text-transform: uppercase; letter-spacing: 0.5px;
+  font-weight: 700; margin-bottom: 10px;
+}}
+.gd-story {{ font-size: 0.86rem; color: #c9d1d9; line-height: 1.6; }}
+.gd-story p {{ margin: 0 0 10px; }}
+.gd-story p:last-child {{ margin-bottom: 0; }}
+.gd-story b {{ color: #e6edf3; }}
+.gd-list {{ margin: 0 0 10px; padding-left: 4px; list-style: none; }}
+.gd-list li {{ position: relative; padding: 3px 0 3px 16px; }}
+.gd-list li::before {{ content: '▸'; position: absolute; left: 0; color: #58a6ff; }}
+
+.gd-ev {{ display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 0.82rem; }}
+.gd-ev.opp {{ flex-direction: row-reverse; text-align: right; }}
+.gd-min {{ color: #8b949e; font-variant-numeric: tabular-nums; min-width: 38px; flex-shrink: 0; }}
+.gd-ev.opp .gd-min {{ min-width: 38px; }}
+.gd-sym {{ font-size: 1rem; flex-shrink: 0; }}
+.gd-evp {{ flex: 1; color: #e6edf3; }}
+.gd-evp.clickable {{ cursor: pointer; }}
+.gd-evp.clickable:hover {{ color: #58a6ff; text-decoration: underline; }}
+
+.gd-stat {{ margin-bottom: 10px; }}
+.gd-stat-vals {{ display: flex; align-items: center; font-size: 0.82rem; color: #8b949e; }}
+.gd-stat-vals span:first-child {{ width: 56px; text-align: left; font-weight: 700; color: #c9d1d9; }}
+.gd-stat-vals span:last-child {{ width: 56px; text-align: right; font-weight: 700; color: #c9d1d9; }}
+.gd-stat-vals .gd-stat-lbl {{ flex: 1; text-align: center; font-weight: 400; color: #8b949e; }}
+.gd-stat-vals .hi {{ color: #58a6ff !important; }}
+.gd-bar {{ height: 5px; background: #ef444433; border-radius: 3px; margin-top: 4px; overflow: hidden; }}
+.gd-bar-mine {{ height: 100%; background: #58a6ff; border-radius: 3px; transition: width 0.3s; }}
+.gd-stat-head {{ display: flex; justify-content: space-between; font-size: 0.74rem; font-weight: 700; color: #8b949e; margin-bottom: 10px; }}
+
+/* mini-abas dentro do jogo */
+.gd-tabs {{ display: flex; gap: 2px; margin: 12px 0 4px; border-bottom: 1px solid #21262d; }}
+.gd-tab {{
+  background: transparent; border: none; border-bottom: 2px solid transparent; cursor: pointer;
+  color: #8b949e; font-size: 0.76rem; font-weight: 600; padding: 6px 11px; transition: color 0.15s;
+}}
+.gd-tab:hover {{ color: #c9d1d9; }}
+.gd-tab.active {{ color: #58a6ff; border-bottom-color: #58a6ff; }}
+.gd-content {{ padding-top: 12px; }}
+
+/* campo de futebol (esquema tático) */
+.pitch {{
+  position: relative; width: 100%; max-width: 360px; margin: 6px auto 0;
+  aspect-ratio: 2 / 3;
+  background:
+    repeating-linear-gradient(0deg, #1f7a3a 0 11.11%, #1c6f35 11.11% 22.22%);
+  border: 2px solid #ffffff40; border-radius: 8px; overflow: hidden;
+}}
+.pitch-lines {{ position: absolute; inset: 0; pointer-events: none; }}
+.pl-line {{ position: absolute; border: 2px solid #ffffff40; }}
+/* linha do meio + círculo central */
+.pl-half {{ left: 0; right: 0; top: 50%; height: 0; border-width: 0; border-top: 2px solid #ffffff40; }}
+.pl-circle {{
+  left: 50%; top: 50%; transform: translate(-50%,-50%);
+  width: 90px; height: 90px; border-radius: 50%;
+}}
+.pl-spot {{ left: 50%; top: 50%; transform: translate(-50%,-50%); width: 4px; height: 4px; background: #ffffff66; border: 0; border-radius: 50%; }}
+/* grande área (defesa = embaixo, ataque = em cima) */
+.pl-box {{ left: 50%; transform: translateX(-50%); width: 58%; height: 16%; }}
+.pl-box.bottom {{ bottom: -2px; border-bottom: 0; }}
+.pl-box.top {{ top: -2px; border-top: 0; }}
+/* pequena área */
+.pl-box-s {{ left: 50%; transform: translateX(-50%); width: 30%; height: 7%; }}
+.pl-box-s.bottom {{ bottom: -2px; border-bottom: 0; }}
+.pl-box-s.top {{ top: -2px; border-top: 0; }}
+/* gol */
+.pl-goal {{ left: 50%; transform: translateX(-50%); width: 16%; height: 6px; background: #ffffff22; }}
+.pl-goal.bottom {{ bottom: -3px; }}
+.pl-goal.top {{ top: -3px; }}
+/* curva da grande área (meia-lua) — círculo centrado na borda da área (16% de altura).
+   O círculo fica metade dentro/metade fora; o clip mostra só a metade que sai da área. */
+.pl-arc {{
+  position: absolute; left: 50%; transform: translate(-50%, 50%);
+  width: 24%; aspect-ratio: 1 / 1; border: 2px solid #ffffff40; border-radius: 50%;
+}}
+.pl-arc.bottom {{ bottom: 16%; clip-path: inset(0 0 50% 0); }}   /* mostra só a metade de cima */
+.pl-arc.top {{ top: 16%; transform: translate(-50%, -50%); clip-path: inset(50% 0 0 0); }}
+.pitch-player {{
+  position: absolute; transform: translate(-50%, 50%);
+  display: flex; flex-direction: column; align-items: center;
+  width: 84px; z-index: 1;
+}}
+.pitch-shirt {{
+  width: 30px; height: 30px; border-radius: 50%;
+  background: #d6342c; border: 2px solid #fff; color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.8rem; font-weight: 800; box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+}}
+.pitch-name {{
+  font-size: 0.62rem; color: #fff; font-weight: 600; margin-top: 3px;
+  text-align: center; line-height: 1.15; text-shadow: 0 1px 3px rgba(0,0,0,1), 0 0 2px rgba(0,0,0,1);
+  word-break: break-word; max-width: 84px;
+}}
+.pitch-form {{ text-align: center; font-size: 0.8rem; font-weight: 700; color: #58a6ff; margin-bottom: 6px; }}
+
+.lv-col-title {{
+  font-size: 0.68rem; color: #58a6ff; text-transform: uppercase; letter-spacing: 0.5px;
+  font-weight: 700; margin-bottom: 8px;
+}}
+
+/* ── vista do confronto: campo T1 | timeline | campo T2 ── */
+.pitch-form-inline {{ font-size: 0.72rem; color: #58a6ff; font-weight: 700; margin: 0 6px; }}
+
+/* ── vista do confronto: UM campo vertical ── */
+.lv1 {{ display: flex; flex-direction: column; align-items: center; }}
+.lv1-head {{
+  display: flex; justify-content: space-between; width: 100%;
+  font-size: 0.92rem; color: #e6edf3; margin-bottom: 8px;
+}}
+.lv1-home b {{ color: #ff8a80; }}   /* time visto (esquerda) em vermelho */
+.lv1-away b {{ color: #6ea8ff; }}   /* adversário (direita) em azul */
+/* campo único HORIZONTAL, grande */
+.pitch-h.pitch-vs {{
+  position: relative; width: 100%; aspect-ratio: 3 / 2; margin: 0 auto;
+  background: repeating-linear-gradient(90deg, #1f7a3a 0 11.11%, #1c6f35 11.11% 22.22%);
+  border: 2px solid #ffffff40; border-radius: 8px; overflow: hidden;
+}}
+.pitch-vs .pitch-player {{
+  position: absolute; transform: translate(-50%, -50%);
+  display: flex; flex-direction: column; align-items: center; width: 76px; z-index: 1;
+}}
+.pitch-vs .pitch-name {{ max-width: 76px; font-size: 0.6rem; }}
+.pitch-vs .pitch-shirt {{ width: 28px; height: 28px; font-size: 0.76rem; }}
+/* cores por time: visto (home) vermelho, adversário (away) azul */
+.pitch-player.home .pitch-shirt {{ background: #d6342c; }}
+.pitch-player.away .pitch-shirt {{ background: #2f6fed; }}
+/* marcações do campo horizontal */
+.plh-half {{ top: 0; bottom: 0; left: 50%; width: 0; border-left: 2px solid #ffffff40; position: absolute; }}
+.plh-box {{ top: 50%; transform: translateY(-50%); height: 56%; width: 11%; position: absolute; }}
+.plh-box.left {{ left: -2px; border-left: 0; }}
+.plh-box.right {{ right: -2px; border-right: 0; }}
+.plh-box-s {{ top: 50%; transform: translateY(-50%); height: 28%; width: 5%; position: absolute; }}
+.plh-box-s.left {{ left: -2px; border-left: 0; }}
+.plh-box-s.right {{ right: -2px; border-right: 0; }}
+.pl-goal-h {{ top: 50%; transform: translateY(-50%); height: 14%; width: 5px; background: #ffffff22; position: absolute; }}
+.pl-goal-h.left {{ left: -3px; }}
+.pl-goal-h.right {{ right: -3px; }}
+
+/* card flutuante de dados do jogador (popover ancorado no jogador) */
+.pcard {{
+  position: absolute; bottom: 115%; left: 50%; transform: translateX(-50%);
+  z-index: 5; width: 190px; cursor: default;
+  background: #0d1117; border: 1px solid #30363d; border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.7); padding: 10px 12px; text-align: left;
+}}
+/* jogadores perto da borda: joga o card pra dentro */
+.pcard-away {{ left: auto; right: 50%; transform: translateX(50%); }}
+.pc-head {{ display: flex; align-items: center; gap: 7px; }}
+.pc-num {{
+  background: #21262d; color: #c9d1d9; font-size: 0.66rem; font-weight: 800;
+  border-radius: 5px; padding: 1px 6px; flex-shrink: 0;
+}}
+.pc-name {{ font-size: 0.84rem; font-weight: 800; color: #e6edf3; flex: 1; line-height: 1.1; }}
+.pc-close {{ background: transparent; border: none; color: #8b949e; cursor: pointer; font-size: 0.8rem; padding: 0 2px; }}
+.pc-close:hover {{ color: #e6edf3; }}
+.pc-pos {{ font-size: 0.66rem; color: #8b949e; margin-top: 2px; }}
+.pc-ctx {{ font-size: 0.72rem; color: #f5c542; margin: 7px 0; }}
+.pc-stats {{ display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; margin-top: 6px; }}
+.pc-row {{ display: flex; justify-content: space-between; font-size: 0.72rem; color: #8b949e; padding: 2px 0; }}
+.pc-row b {{ color: #e6edf3; font-variant-numeric: tabular-nums; }}
+.pc-empty {{ font-size: 0.72rem; color: #6b7280; grid-column: 1/-1; }}
+
+/* campo ocupa toda a largura em cima */
+.lv1-center {{ width: 100%; min-width: 0; }}
+/* embaixo: reservas T1 | linha do tempo | reservas T2 */
+.lv1-bottom {{
+  display: grid; grid-template-columns: 1fr 1.3fr 1fr; gap: 18px;
+  width: 100%; margin-top: 18px; align-items: start;
+}}
+.lv1-subs {{ min-width: 0; }}
+.lv1-subs .md-xi {{ flex-direction: column; gap: 4px; }}
+.lv1-subs .md-xi .pl {{ display: flex; align-items: center; gap: 6px; }}
+.lv1-subs .md-xi .pl .pn {{ min-width: 18px; text-align: center; flex-shrink: 0; margin-right: 0; }}
+.lv1-mid {{ min-width: 0; }}
+.lv1-mid .gd-ev {{ font-size: 0.8rem; }}
+@media (max-width: 760px) {{
+  .lv1-bottom {{ grid-template-columns: 1fr; }}
+}}
+/* marcação de substituição no campo / reservas */
+.pitch-shirt {{ position: relative; }}
+.pitch-player.subbed-out .pitch-shirt {{ opacity: 0.6; }}
+.sub-out {{
+  position: absolute; top: -6px; right: -14px;
+  font-size: 0.56rem; font-weight: 800; color: #fff;
+  background: #ef4444; border-radius: 8px; padding: 1px 4px; white-space: nowrap;
+}}
+.md-xi .pl.used {{ border-color: #22c55e66; background: #14241a; opacity: 1; }}
+.sub-in {{ color: #22c55e; font-weight: 700; }}
+/* cartão no jogador do campo (cantinho da camisa) */
+.pl-card {{
+  position: absolute; top: -4px; left: -8px; width: 8px; height: 11px;
+  border-radius: 1.5px; border: 1px solid rgba(0,0,0,0.4);
+}}
+.pl-card.amarelo {{ background: #f5c542; }}
+.pl-card.vermelho {{ background: #ef4444; }}
+/* bolinha de gol no jogador do campo (canto direito da camisa) */
+.pl-goal-mark {{
+  position: absolute; top: -7px; right: -10px;
+  font-size: 0.7rem; line-height: 1; display: flex; align-items: center;
+  filter: drop-shadow(0 1px 1px rgba(0,0,0,0.6));
+}}
+.pl-goal-mark b {{
+  font-size: 0.56rem; color: #fff; background: #1f6feb; border-radius: 7px;
+  padding: 0 3px; margin-left: -2px;
+}}
+/* evento da linha do tempo clicável */
+.gd-ev.clickable {{ cursor: pointer; border-radius: 6px; transition: background 0.12s; }}
+.gd-ev.clickable:hover {{ background: #1a212b; }}
+/* clique para destacar a troca */
+.pitch-player.clickable, .md-xi .pl.clickable {{ cursor: pointer; }}
+/* destaque: escurece o gramado e esmaece os outros jogadores; o(s) realçado(s) sobressaem */
+.dim-others {{ position: relative; }}
+.dim-others::after {{
+  content: ''; position: absolute; inset: 0; z-index: 2;
+  background: rgba(0,0,0,0.55); pointer-events: none; transition: background 0.15s;
+}}
+.dim-others .pitch-player {{ opacity: 0.3; transition: opacity 0.15s; }}
+.dim-others .pitch-player.hi {{ opacity: 1; z-index: 3; }}  /* acima do overlay */
+.pitch-player.hi .pitch-shirt {{ box-shadow: 0 0 0 3px #f5c542, 0 0 14px 3px #f5c54288; opacity: 1; }}
+.pitch-player.hi .pitch-name {{ color: #f5c542; }}
+.md-xi .pl.hi {{ border-color: #f5c542; background: #2a2410; color: #f5c542; opacity: 1; }}
 </style>
 </head>
 <body>
@@ -1453,43 +2282,40 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 <!-- ══ VIEW: Seleções (grade de países) ══ -->
 <div id="viewTeams" style="display:none">
   <div class="teams-toolbar">
-    <input type="text" id="teamSearch" class="teams-search" placeholder="Buscar seleção…" oninput="renderTeamsGrid()">
+    <input type="text" id="teamSearch" class="teams-search" placeholder="Buscar seleção…" oninput="applyTeamFilters()">
 
     <label class="tb-field">Ordenar
-      <select id="teamSort" onchange="renderTeamsGrid()"></select>
+      <select id="teamSort" onchange="applyTeamFilters()"></select>
     </label>
     <button class="btn tb-dir" id="teamSortDir" onclick="toggleTeamSortDir()" title="Inverter ordem">↓</button>
 
     <label class="tb-field">Grupo
-      <select id="filterGroup" onchange="renderTeamsGrid()"><option value="">Todos</option></select>
+      <select id="filterGroup" onchange="applyTeamFilters()"><option value="">Todos</option></select>
     </label>
     <label class="tb-field">Confederação
-      <select id="filterConfed" onchange="renderTeamsGrid()"><option value="">Todas</option></select>
+      <select id="filterConfed" onchange="applyTeamFilters()"><option value="">Todas</option></select>
     </label>
     <label class="tb-field">Fase
-      <select id="filterStage" onchange="renderTeamsGrid()"><option value="">Todas</option></select>
+      <select id="filterStage" onchange="applyTeamFilters()"><option value="">Todas</option></select>
     </label>
-    <label class="tb-check"><input type="checkbox" id="filterPlayed" onchange="renderTeamsGrid()"> Só com jogos</label>
+    <label class="tb-check"><input type="checkbox" id="filterPlayed" onchange="applyTeamFilters()"> Só com jogos</label>
 
     <div style="flex:1"></div>
     <button class="btn" onclick="resetTeamFilters()" title="Limpar filtros">✕ Limpar</button>
     <span class="teams-count" id="teamsCount"></span>
   </div>
   <div class="teams-grid" id="teamsGrid"></div>
+  <div class="teams-pager" id="teamsPager"></div>
 </div>
 
 <!-- ══ MODAL: detalhe da seleção ══ -->
 <div id="teamModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeTeamModal()">
   <div class="modal" role="dialog" aria-modal="true">
-    <div class="modal-head">
-      <div class="modal-title">
-        <span class="modal-flag" id="modalFlag"></span>
-        <span id="modalTeam">—</span>
-        <span class="modal-rank" id="modalRank"></span>
-      </div>
+    <div class="modal-topbar">
+      <nav class="modal-tabs" id="modalTabs"></nav>
+      <div style="flex:1"></div>
       <button class="modal-close" onclick="closeTeamModal()" title="Fechar (Esc)">✕</button>
     </div>
-    <nav class="modal-tabs" id="modalTabs"></nav>
     <div class="modal-body" id="modalBody"></div>
   </div>
 </div>
@@ -1850,6 +2676,36 @@ function toggleDir() {{
 // aproveitamento e clean_sheet_rate estão em fração (0–1); posse_media já é %
 const PERCENT_FRAC = new Set(['aproveitamento', 'precisao_chute', 'precisao_passes']);
 const PERCENT_DIRECT = new Set(['posse_media']);
+// Eixos de estilo: escala 0-100 (como os scores) para as barras, mas SEM medalha
+// de pódio — estilo é descritivo, 50 não é "ruim" nem 90 é "melhor".
+const STYLE_AXES = new Set(['estilo_posse', 'estilo_pressao', 'estilo_verticalidade', 'estilo_largura']);
+// Cada eixo é BIPOLAR: 50 = meio-termo, sobe para o polo alto, desce para o
+// baixo. {low, high, curto} alimenta o card (polos visíveis) e a linha "por que
+// a flag" (usa o nome curto do lado para onde o time pende).
+const STYLE_POLES = {{
+  estilo_posse:         {{ low: 'Direto',     high: 'Posse',       curtoAlto: 'posse',     curtoBaixo: 'jogo direto' }},
+  estilo_pressao:       {{ low: 'Recua',      high: 'Pressiona',   curtoAlto: 'pressão',   curtoBaixo: 'bloco baixo' }},
+  estilo_verticalidade: {{ low: 'Paciente',   high: 'Vertical',    curtoAlto: 'verticalidade', curtoBaixo: 'jogo apoiado' }},
+  estilo_largura:       {{ low: 'Por dentro', high: 'Pelas pontas',curtoAlto: 'pontas',    curtoBaixo: 'jogo interior' }},
+}};
+
+// "Por que a flag": pega os 1-2 eixos onde o time MAIS se afasta da média (50),
+// e descreve o lado para onde pende — conecta a flag aos eixos que a definiram.
+function styleWhy(t) {{
+  const traits = Object.keys(STYLE_POLES)
+    .map(k => {{
+      const v = t[k];
+      if (v === null || v === undefined) return null;
+      const dist = Math.abs(v - 50);
+      const pole = STYLE_POLES[k];
+      return {{ dist, label: v >= 50 ? pole.curtoAlto : pole.curtoBaixo }};
+    }})
+    .filter(x => x && x.dist >= 8)            // só traços de fato marcantes
+    .sort((a, b) => b.dist - a.dist)
+    .slice(0, 2)
+    .map(x => x.label);
+  return traits.length ? traits.join(' + ') : '';
+}}
 
 function formatVal(v, metric) {{
   if (v === null || v === undefined) return '—';
@@ -1920,10 +2776,11 @@ function renderJogo(n) {{
   //    quando a diferença real é pequena)
   const vals = teams.map(t => t[currentMetric]).filter(v => v !== null && v !== undefined);
   const isScore = currentMetric.startsWith('score_') ||
+                  STYLE_AXES.has(currentMetric) ||
                   PERCENT_FRAC.has(currentMetric) || PERCENT_DIRECT.has(currentMetric);
   const maxV = Math.max(...vals, 0);
   const maxRef = PERCENT_FRAC.has(currentMetric) ? 1
-               : (PERCENT_DIRECT.has(currentMetric) || currentMetric.startsWith('score_')) ? 100
+               : (PERCENT_DIRECT.has(currentMetric) || currentMetric.startsWith('score_') || STYLE_AXES.has(currentMetric)) ? 100
                : (maxV || 1);
 
   // hide all — pool armazena {{ row, rankEl, nameEl, fillEl, valEl, tipEl }}
@@ -2008,7 +2865,7 @@ function renderSidebar(n) {{
     .filter(v => v !== null);
   const _maxV = Math.max(...vals, 0);
   const maxRef = PERCENT_FRAC.has(currentMetric) ? 1
-               : (PERCENT_DIRECT.has(currentMetric) || currentMetric.startsWith('score_')) ? 100
+               : (PERCENT_DIRECT.has(currentMetric) || currentMetric.startsWith('score_') || STYLE_AXES.has(currentMetric)) ? 100
                : (_maxV || 1);
 
   bodyEl.innerHTML = '';
@@ -2098,6 +2955,37 @@ function buildCardBody(team) {{
   let colsHtml = '';
   METRIC_GROUPS.forEach(([groupLabel, colCls, metrics]) => {{
     colsHtml += `<div class="tt-col ${{colCls}}"><div class="tt-col-title">${{groupLabel}}</div>`;
+    // ── Estilo: layout BIPOLAR (polo baixo ◄─●─► polo alto + nota) ──
+    if (colCls === 'tt-col-estilo') {{
+      metrics.forEach(([key, label]) => {{
+        const val = t[key];
+        const pole = STYLE_POLES[key] || {{ low: '', high: '' }};
+        const isActive   = key === currentMetric;
+        const isRelated  = !isActive && related.has(key);
+        const isIndirect = !isActive && !isRelated && indirect.has(key);
+        const cls = isActive ? ' active' : isRelated ? ' related' : isIndirect ? ' related-indirect' : '';
+        // posição do marcador na barra: 0-100, 50 = centro (média do torneio)
+        const pos = val === null || val === undefined ? 50 : Math.max(0, Math.min(100, val));
+        const mr = metricRank(key, allTeams, team, sortDir);
+        const rkBadge = mr ? `<span class="tt-rank">${{mr.rank}}°${{mr.tied ? '=' : ''}}</span>` : '';
+        colsHtml += `<div class="tt-row tt-style-row${{cls}}" data-metric="${{key}}">
+          <div class="tt-style-poles">
+            <span class="tt-pole-low">${{pole.low}}</span>
+            <span class="tt-pole-high">${{pole.high}}</span>
+          </div>
+          <div class="tt-style-bar">
+            <span class="tt-style-mid"></span>
+            <span class="tt-style-dot" style="left:${{pos}}%"></span>
+          </div>
+          <div class="tt-style-foot">
+            <span class="tt-style-name">${{label}}</span>
+            <span class="tt-valwrap"><span class="tt-val">${{formatVal(val, key)}}</span>${{rkBadge}}</span>
+          </div>
+        </div>`;
+      }});
+      colsHtml += '</div>';
+      return;
+    }}
     metrics.forEach(([key, label]) => {{
       const val = t[key];
       const isActive   = key === currentMetric;
@@ -2108,7 +2996,8 @@ function buildCardBody(team) {{
       // badge segue a MESMA direção da barra (sortDir): inverte junto com o botão
       const mr = metricRank(key, allTeams, team, sortDir);
       // medalha (ouro/prata/bronze) só para posição ISOLADA; empate fica neutro com "="
-      const rkCls = mr && !mr.tied ? rankClass(mr.rank) : '';
+      // Estilo não recebe medalha — é descritivo, não há "1º melhor estilo".
+      const rkCls = mr && !mr.tied && !STYLE_AXES.has(key) ? rankClass(mr.rank) : '';
       const tie = mr && mr.tied ? '=' : '';
       const rkBadge = mr ? `<span class="tt-rank${{rkCls}}">${{mr.rank}}°${{tie}}</span>` : '';
       colsHtml += `<div class="tt-row${{cls}}" data-metric="${{key}}">
@@ -2139,9 +3028,14 @@ function buildCardHeader(team) {{
   const gr = metricRank('score_geral', frame.teams, team, 'desc');
   const rank = gr ? gr.rank : '?';
   const rankTie = gr && gr.tied ? '=' : '';
+  // flag de estilo + por que ela: os 1-2 eixos que mais definiram a classificação
+  const why = styleWhy(t);
+  const estilo = t.estilo_jogo
+    ? ` · 🎭 ${{t.estilo_jogo}}${{why ? ` <span class="drag-why">(${{why}})</span>` : ''}}`
+    : '';
   return `<span class="drag-flag">${{t.flag || ''}}</span>
     <span class="drag-name">${{t.team}}</span>
-    <span class="drag-sub">#${{rank}}${{rankTie}} no ranking · ${{t.jogos}} jogo${{t.jogos !== 1 ? 's' : ''}}</span>`;
+    <span class="drag-sub">#${{rank}}${{rankTie}} no ranking · ${{t.jogos}} jogo${{t.jogos !== 1 ? 's' : ''}}${{estilo}}</span>`;
 }}
 
 function makeDraggable(card, dragBar) {{
@@ -2322,7 +3216,7 @@ function switchTab(tab) {{
   if (tab === 'teams') {{
     if (playing) togglePlay();
     if (!_teamsInit) {{ initTeamsControls(); _teamsInit = true; }}
-    renderTeamsGrid();
+    applyTeamFilters();
   }}
 }}
 let _teamsInit = false;
@@ -2336,24 +3230,39 @@ const STAGE_LABELS_TEAMS = {{
   'Semifinais': 'Semifinais', 'Disputa 3º Lugar': 'Disputa 3º Lugar', 'Final': 'Final',
 }};
 
-// opções de ordenação: chave especial + acessor do valor por seleção
+// formatadores reutilizáveis para o destaque da métrica
+const _f1 = v => v == null ? '—' : v.toFixed(1);                    // 1 casa (scores)
+const _fi = v => v == null ? '—' : Math.round(v);                   // inteiro
+const _fs = v => v == null ? '—' : (v > 0 ? '+' + v : '' + v);     // saldo com sinal
+const _fp = v => v == null ? '—' : Math.round(v * 100) + '%';      // fração → %
+
+// opções de ordenação: k, label (dropdown), short (rótulo do destaque), get (acessor),
+// fmt (formatação do destaque), asc (direção default). Sem fmt → score 1 casa.
 const TEAM_SORTS = [
-  {{ k: 'rank',       label: 'Ranking (#)',     get: d => d.rank, asc: true }},
-  {{ k: 'alpha',      label: 'Alfabética (A–Z)', get: d => null,  asc: true }},
-  {{ k: 'score_geral',        label: 'Score Geral',    get: d => (d.scores||{{}}).score_geral }},
-  {{ k: 'score_resultado',    label: 'Score Resultado',get: d => (d.scores||{{}}).score_resultado }},
-  {{ k: 'score_ataque',       label: 'Score Ataque',   get: d => (d.scores||{{}}).score_ataque }},
-  {{ k: 'score_defesa',       label: 'Score Defesa',   get: d => (d.scores||{{}}).score_defesa }},
-  {{ k: 'score_eficiencia',   label: 'Score Eficiência',get: d => (d.scores||{{}}).score_eficiencia }},
-  {{ k: 'score_controle',     label: 'Score Controle', get: d => (d.scores||{{}}).score_controle }},
-  {{ k: 'score_forca_relativa',label:'Score Força Rel.',get: d => (d.scores||{{}}).score_forca_relativa }},
-  {{ k: 'score_disciplina',   label: 'Score Disciplina',get: d => (d.scores||{{}}).score_disciplina }},
-  {{ k: 'pontos',     label: 'Pontos',          get: d => (d.campanha||{{}}).pontos }},
-  {{ k: 'gols_pro',   label: 'Gols Marcados',   get: d => (d.campanha||{{}}).gols_pro }},
-  {{ k: 'saldo_gols', label: 'Saldo de Gols',   get: d => (d.campanha||{{}}).saldo_gols }},
-  {{ k: 'elo_rating', label: 'Rating Elo',      get: d => (d.campanha||{{}}).elo_rating }},
-  {{ k: 'n_jogos',    label: 'Jogos disputados',get: d => d.n_jogos }},
+  {{ k: 'rank',       label: 'Ranking (#)',      short: 'Geral',        get: d => d.rank, asc: true }},
+  {{ k: 'alpha',      label: 'Alfabética (A–Z)', short: 'Geral',        get: d => null,  asc: true }},
+  {{ k: 'score_geral',        label: 'Score Geral',     short: 'Geral',         get: d => (d.scores||{{}}).score_geral,         fmt: _f1 }},
+  {{ k: 'score_resultado',    label: 'Score Resultado', short: 'Resultado',     get: d => (d.scores||{{}}).score_resultado,     fmt: _f1 }},
+  {{ k: 'score_ataque',       label: 'Score Ataque',    short: 'Ataque',        get: d => (d.scores||{{}}).score_ataque,        fmt: _f1 }},
+  {{ k: 'score_defesa',       label: 'Score Defesa',    short: 'Defesa',        get: d => (d.scores||{{}}).score_defesa,        fmt: _f1 }},
+  {{ k: 'score_eficiencia',   label: 'Score Eficiência',short: 'Eficiência',    get: d => (d.scores||{{}}).score_eficiencia,    fmt: _f1 }},
+  {{ k: 'score_controle',     label: 'Score Controle',  short: 'Controle',      get: d => (d.scores||{{}}).score_controle,      fmt: _f1 }},
+  {{ k: 'score_forca_relativa',label:'Score Força Rel.', short: 'Força Rel.',    get: d => (d.scores||{{}}).score_forca_relativa,fmt: _f1 }},
+  {{ k: 'score_disciplina',   label: 'Score Disciplina',short: 'Disciplina',    get: d => (d.scores||{{}}).score_disciplina,    fmt: _f1 }},
+  {{ k: 'pontos',     label: 'Pontos',          short: 'Pontos',       get: d => (d.campanha||{{}}).pontos,        fmt: _fi }},
+  {{ k: 'gols_pro',   label: 'Gols Marcados',   short: 'Gols',         get: d => (d.campanha||{{}}).gols_pro,      fmt: _fi }},
+  {{ k: 'saldo_gols', label: 'Saldo de Gols',   short: 'Saldo',        get: d => (d.campanha||{{}}).saldo_gols,    fmt: _fs }},
+  {{ k: 'elo_rating', label: 'Rating Elo',      short: 'Elo',          get: d => (d.campanha||{{}}).elo_rating,    fmt: _fi }},
+  {{ k: 'n_jogos',    label: 'Jogos disputados',short: 'Jogos',        get: d => d.n_jogos,                        fmt: _fi }},
 ];
+
+// qual métrica destacar no card: para rank/alpha usa o Score Geral
+function _highlightSort(sortKey) {{
+  if (sortKey === 'rank' || sortKey === 'alpha') {{
+    return TEAM_SORTS.find(s => s.k === 'score_geral');
+  }}
+  return TEAM_SORTS.find(s => s.k === sortKey) || TEAM_SORTS.find(s => s.k === 'score_geral');
+}}
 
 let teamSortDir = null;  // null = usa o default da opção; senão 'asc'/'desc'
 
@@ -2375,10 +3284,25 @@ function initTeamsControls() {{
     '<option value="">Todas</option>' + stages.map(s => `<option value="${{s}}">${{s}}</option>`).join('');
 }}
 
+const TEAMS_PER_PAGE = 24;
+let teamPage = 1;
+
+// mudou filtro/ordenação → volta pra página 1 e re-renderiza
+function applyTeamFilters() {{
+  teamPage = 1;
+  renderTeamsGrid();
+}}
+
+function goTeamPage(p) {{
+  teamPage = p;
+  renderTeamsGrid();
+  document.getElementById('teamsGrid').scrollTop = 0;
+}}
+
 function toggleTeamSortDir() {{
   const cur = _effectiveSortDir();
   teamSortDir = cur === 'asc' ? 'desc' : 'asc';
-  renderTeamsGrid();
+  applyTeamFilters();
 }}
 
 function _effectiveSortDir() {{
@@ -2395,7 +3319,18 @@ function resetTeamFilters() {{
   document.getElementById('filterStage').value = '';
   document.getElementById('filterPlayed').checked = false;
   teamSortDir = null;
-  renderTeamsGrid();
+  applyTeamFilters();
+}}
+
+function renderTeamsPager(totalPages) {{
+  const pager = document.getElementById('teamsPager');
+  if (totalPages <= 1) {{ pager.innerHTML = ''; return; }}
+  let btns = `<button class="pager-btn" onclick="goTeamPage(${{teamPage - 1}})" ${{teamPage === 1 ? 'disabled' : ''}}>‹</button>`;
+  for (let p = 1; p <= totalPages; p++) {{
+    btns += `<button class="pager-btn${{p === teamPage ? ' active' : ''}}" onclick="goTeamPage(${{p}})">${{p}}</button>`;
+  }}
+  btns += `<button class="pager-btn" onclick="goTeamPage(${{teamPage + 1}})" ${{teamPage === totalPages ? 'disabled' : ''}}>›</button>`;
+  pager.innerHTML = btns + `<span class="pager-info">página ${{teamPage}} de ${{totalPages}}</span>`;
 }}
 
 function renderTeamsGrid() {{
@@ -2441,22 +3376,57 @@ function renderTeamsGrid() {{
   document.getElementById('teamsCount').textContent =
     teams.length + ' de ' + TEAMS_GRID.length + ' seleções';
 
-  grid.innerHTML = teams.map(t => {{
+  // — destaque da métrica ativa: valor + posição entre TODAS as seleções que têm a métrica
+  const hl = _highlightSort(sortKey);
+  const hlFmt = hl.fmt || _f1;
+  // ranking da métrica destacada sobre todas as seleções (maior = melhor, salvo saldo já tratado)
+  // empate = mesma posição (standard competition ranking: 1, 2, 2, 4…)
+  const ranked = TEAMS_GRID
+    .map(t => ({{ t, v: hl.get(TEAMS_DETAIL[t] || {{}}) }}))
+    .filter(x => x.v != null)
+    .sort((a, b) => b.v - a.v);
+  const hlPos = {{}};
+  ranked.forEach((x, i) => {{
+    hlPos[x.t] = (i > 0 && x.v === ranked[i - 1].v) ? hlPos[ranked[i - 1].t] : i + 1;
+  }});
+  const hlTotal = ranked.length;
+
+  // — paginação: 24 por página
+  const totalPages = Math.max(1, Math.ceil(teams.length / TEAMS_PER_PAGE));
+  if (teamPage > totalPages) teamPage = totalPages;
+  const start = (teamPage - 1) * TEAMS_PER_PAGE;
+  const pageTeams = teams.slice(start, start + TEAMS_PER_PAGE);
+  renderTeamsPager(totalPages);
+
+  grid.innerHTML = pageTeams.map(t => {{
     const d = TEAMS_DETAIL[t] || {{}};
     const flag = d.flag || TEAM_FLAGS[t] || '🏳️';
     const nj = d.n_jogos || 0;
     const empty = nj === 0;
-    const rankBadge = d.rank != null ? `<span class="tc-rank">#${{d.rank}}</span>` : '';
+    // o badge # reflete a POSIÇÃO na métrica escolhida (não o ranking geral fixo)
+    const rankBadge = (!empty && hlPos[t]) ? `<span class="tc-rank">#${{hlPos[t]}}</span>` : '';
     const sub = empty ? 'sem jogos ainda · ' + (d.group ? 'Grupo ' + d.group : '')
       : nj + (nj === 1 ? ' jogo' : ' jogos') + ' · ' + (d.players ? d.players.length : 0) + ' jogadores';
 
-    const sc = d.scores || {{}}, cp = d.campanha || {{}};
+    const cp = d.campanha || {{}};
+
+    // destaque: reflete a métrica escolhida na ordenação
+    const hlVal = hl.get(d);
+    const hlColor = (hl.k.startsWith('score_') && hlVal != null) ? _scoreColor(hlVal) : '#e6edf3';
+    const posBadge = (!empty && hlPos[t]) ? `<span class="m-rank">${{hlPos[t]}}º de ${{hlTotal}}</span>` : '';
+    const metric = empty ? '' : `<div class="tc-metric">
+      <span class="m-val" style="color:${{hlColor}}">${{hlFmt(hlVal)}}</span>
+      <span class="m-lbl">${{hl.short}}</span>
+      ${{posBadge}}
+    </div>`;
+
+    // mini-stats secundárias: campanha resumida (sempre visível, contexto)
     const fmt = v => v == null ? '—' : v;
     const stats = empty ? '' : `<div class="tc-stats">
-      <div class="tc-stat"><div class="v geral">${{sc.score_geral != null ? sc.score_geral.toFixed(1) : '—'}}</div><div class="l">Score</div></div>
       <div class="tc-stat"><div class="v">${{fmt(cp.pontos)}}</div><div class="l">Pts</div></div>
       <div class="tc-stat"><div class="v">${{fmt(cp.gols_pro)}}</div><div class="l">Gols</div></div>
       <div class="tc-stat"><div class="v">${{cp.saldo_gols != null ? (cp.saldo_gols > 0 ? '+' + cp.saldo_gols : cp.saldo_gols) : '—'}}</div><div class="l">Saldo</div></div>
+      <div class="tc-stat"><div class="v">${{fmt(cp.elo_rating)}}</div><div class="l">Elo</div></div>
     </div>`;
 
     const badges = [
@@ -2475,6 +3445,7 @@ function renderTeamsGrid() {{
         ${{rankBadge}}
       </div>
       ${{badges ? `<div class="tc-badges">${{badges}}</div>` : ''}}
+      ${{metric}}
       ${{stats}}
     </div>`;
   }}).join('');
@@ -2482,20 +3453,18 @@ function renderTeamsGrid() {{
 
 let modalTeam = null;
 let modalTab = 'scores';
+let expandedGame = null;  // índice do jogo expandido na aba Jogos (accordion)
 
 function openTeamModal(team) {{
   const d = TEAMS_DETAIL[team];
   if (!d) return;
   modalTeam = team;
   modalTab = 'scores';
-  document.getElementById('modalFlag').textContent = d.flag || '🏳️';
-  document.getElementById('modalTeam').textContent = team;
-  document.getElementById('modalRank').textContent = d.rank != null ? ('#' + d.rank + ' no ranking') : '';
+  expandedGame = null;
   const tabs = [
     ['scores', 'Resumo'],
     ['jogos', 'Jogos (' + (d.jogos ? d.jogos.length : 0) + ')'],
     ['elenco', 'Elenco (' + (d.players ? d.players.length : 0) + ')'],
-    ['escalacoes', 'Escalações'],
   ];
   document.getElementById('modalTabs').innerHTML = tabs.map(([k, l]) =>
     `<button class="modal-tab${{k === 'scores' ? ' active' : ''}}" data-mt="${{k}}" onclick="switchModalTab('${{k}}')">${{l}}</button>`
@@ -2511,9 +3480,256 @@ function closeTeamModal() {{
 
 function switchModalTab(t) {{
   modalTab = t;
+  expandedGame = null;  // ao trocar de aba, fecha qualquer jogo expandido
   document.querySelectorAll('.modal-tab').forEach(b =>
     b.classList.toggle('active', b.dataset.mt === t));
   renderModalBody();
+}}
+
+function toggleGame(i) {{
+  cardPlayer = null; highlightedPlayer = null;
+  if (expandedGame === i) {{ expandedGame = null; }}
+  else {{ expandedGame = i; gameDetailTab = 'historia'; }}  // abre na História
+  renderModalBody();
+}}
+
+let gameDetailTab = 'historia';  // mini-aba ativa dentro do jogo expandido
+let highlightedPlayer = null;     // jogador destacado no campo (par da troca)
+let cardPlayer = null;            // jogador com o card de dados aberto (popover)
+
+function switchGameTab(t) {{
+  gameDetailTab = t;
+  highlightedPlayer = null;
+  cardPlayer = null;
+  renderModalBody();
+}}
+
+// clica num jogador no campo → abre o card de dados + destaca (e o par da troca)
+function showPlayerCard(name) {{
+  if (cardPlayer === name) {{ cardPlayer = null; highlightedPlayer = null; }}
+  else {{ cardPlayer = name; highlightedPlayer = name; }}
+  renderModalBody();
+}}
+
+// clica num reserva/timeline → destaca a troca (sem abrir card)
+function highlightSub(name) {{
+  highlightedPlayer = (highlightedPlayer === name) ? null : name;
+  cardPlayer = null;
+  renderModalBody();
+}}
+
+// clica num jogador na linha do tempo → vai pra escalação e abre o card dele
+function focusPlayer(name) {{
+  if (!name) return;
+  gameDetailTab = 'escalacao';
+  cardPlayer = name;
+  highlightedPlayer = name;
+  renderModalBody();
+}}
+
+// monta o card flutuante com as stats do jogador na partida
+const _STAT_ROWS = [
+  ['rating', 'Nota', v => v.toFixed ? v.toFixed(1) : v],
+  ['goals', 'Gols'], ['assists', 'Assistências'],
+  ['shots', 'Finalizações'], ['on_target', 'No alvo'],
+  ['key_passes', 'Passes-chave'], ['xa', 'xA', v => (+v).toFixed(2)],
+  ['pass_acc', '% passes', v => v + '%'],
+  ['saves', 'Defesas'],
+  ['fouls_committed', 'Faltas'], ['fouls_drawn', 'Faltas sofridas'],
+  ['offsides', 'Impedimentos'], ['minutes', 'Minutos', v => v + "'"],
+];
+function _playerCardHtml(p, who) {{
+  const st = p.stats || {{}};
+  const ctx = [];
+  if (p.goals) ctx.push(`⚽ ${{p.goals}} gol${{p.goals > 1 ? 's' : ''}}`);
+  if (p.card) ctx.push(p.card === 'vermelho' ? '🟥 expulso' : '🟨 amarelo');
+  if (p.exited) ctx.push(`↓ saiu ${{p.exited}}'`);
+  if (p.entered) ctx.push(`↑ entrou ${{p.entered}}'`);
+  const rows = _STAT_ROWS
+    .filter(([k]) => st[k] != null)
+    .map(([k, lbl, fmt]) => `<div class="pc-row"><span>${{lbl}}</span><b>${{fmt ? fmt(st[k]) : st[k]}}</b></div>`)
+    .join('');
+  const body = rows || '<div class="pc-empty">Sem estatísticas detalhadas.</div>';
+  return `<div class="pcard pcard-${{who}}" onclick="event.stopPropagation()">
+    <div class="pc-head"><span class="pc-num">${{p.num ?? ''}}</span><span class="pc-name">${{p.name}}</span>
+      <button class="pc-close" onclick="event.stopPropagation();showPlayerCard('${{(p.name||'').replace(/'/g, "\\\\'")}}')">✕</button></div>
+    ${{p.pos ? `<div class="pc-pos">${{p.pos}}</div>` : ''}}
+    ${{ctx.length ? `<div class="pc-ctx">${{ctx.join(' · ')}}</div>` : ''}}
+    <div class="pc-stats">${{body}}</div>
+  </div>`;
+}}
+
+// escapa HTML para evitar injeção e tags acidentais vindas dos dados
+function _esc(t) {{
+  return (t || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}}
+
+// converte a narrativa markdown (wikilinks, **negrito**, listas, parágrafos) em HTML
+function _renderStory(raw) {{
+  if (!raw) return '';
+  // wikilinks [[a|b]]/[[a]] → texto puro (antes de escapar, pois usam [])
+  let t = raw.replace(/\[\[[^|\]]*\|([^\]]+)\]\]/g, '$1').replace(/\[\[([^\]]+)\]\]/g, '$1');
+  t = _esc(t);
+  // **negrito** e *itálico*
+  t = t.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/\*([^*]+)\*/g, '<i>$1</i>');
+
+  // agrupa linhas em parágrafos e listas
+  const lines = t.split('\\n');
+  let html = '', list = [];
+  const flushList = () => {{ if (list.length) {{ html += '<ul class="gd-list">' + list.map(li => `<li>${{li}}</li>`).join('') + '</ul>'; list = []; }} }};
+  for (let ln of lines) {{
+    ln = ln.trim();
+    if (!ln) {{ flushList(); continue; }}
+    const m = ln.match(/^[-•]\s+(.*)/);
+    if (m) {{ list.push(m[1]); }}
+    else {{ flushList(); html += `<p>${{ln}}</p>`; }}
+  }}
+  flushList();
+  return html;
+}}
+
+// detalhe expandido de um jogo, em mini-abas
+function renderGameDetail(g) {{
+  const minitabs = [
+    ['historia', 'História', !!g.story],
+    ['stats', 'Estatísticas', !!(g.stats_cmp && g.stats_cmp.length)],
+    ['escalacao', 'Escalação', !!(g.starters && g.starters.length)],
+  ].filter(([, , has]) => has);
+  if (!minitabs.length) return '<div class="md-empty">Sem detalhes adicionais para este jogo.</div>';
+
+  // garante que a mini-aba ativa existe pra este jogo (senão usa a 1ª disponível)
+  let active = gameDetailTab;
+  if (!minitabs.some(([k]) => k === active)) active = minitabs[0][0];
+
+  const nav = `<div class="gd-tabs">${{minitabs.map(([k, l]) =>
+    `<button class="gd-tab${{k === active ? ' active' : ''}}" onclick="event.stopPropagation();switchGameTab('${{k}}')">${{l}}</button>`
+  ).join('')}}</div>`;
+
+  let content = '';
+  if (active === 'historia') {{
+    content = `<div class="gd-story">${{_renderStory(g.story)}}</div>`;
+  }} else if (active === 'stats') {{
+    content = `<div class="gd-stat-head"><span>${{modalTeam}}</span><span>${{g.opp}}</span></div>` +
+      g.stats_cmp.map(s => {{
+        const mv = s.mine == null ? 0 : s.mine, ov = s.opp == null ? 0 : s.opp;
+        const mpct = Math.round(mv / ((mv + ov) || 1) * 100);
+        const suf = s.pct ? '%' : '';
+        return `<div class="gd-stat">
+          <div class="gd-stat-vals"><span class="${{mv >= ov ? 'hi' : ''}}">${{s.mine == null ? '—' : s.mine}}${{suf}}</span>
+            <span class="gd-stat-lbl">${{s.label}}</span>
+            <span class="${{ov > mv ? 'hi' : ''}}">${{s.opp == null ? '—' : s.opp}}${{suf}}</span></div>
+          <div class="gd-bar"><div class="gd-bar-mine" style="width:${{mpct}}%"></div></div>
+        </div>`;
+      }}).join('');
+  }} else if (active === 'escalacao') {{
+    content = renderLineupView(g);
+  }}
+
+  return nav + `<div class="gd-content">${{content}}</div>`;
+}}
+
+// linha do tempo (gols/cartões/subs) — clicável nos jogadores do time visto
+function _timelineHtml(g) {{
+  if (!g.timeline || !g.timeline.length) return '<div class="md-empty">Sem eventos.</div>';
+  const escEv = (s) => (s || '').replace(/'/g, "\\\\'");
+  return g.timeline.map(e => {{
+    const clickable = !!e.hl_name;               // qualquer evento com jogador (os 2 times)
+    const cls = `gd-ev ${{e.mine ? 'mine' : 'opp'}}${{clickable ? ' clickable' : ''}}`;
+    const oc = clickable ? ` onclick="focusPlayer('${{escEv(e.hl_name)}}')"` : '';
+    return `<div class="${{cls}}"${{oc}}>
+      <span class="gd-min">${{e.minute}}'</span><span class="gd-sym">${{e.sym}}</span>
+      <span class="gd-evp">${{e.player || ''}}${{e.team ? ` <span class="md-game-meta">(${{e.team}})</span>` : ''}}</span>
+    </div>`;
+  }}).join('');
+}}
+
+// lista de reservas (clicável p/ destacar a troca)
+// helper de destaque: o jogador clicado + o par da troca (em qualquer dos dois times)
+function _mkIsHi(allPlayers) {{
+  return (nm) => highlightedPlayer && (nm === highlightedPlayer
+    || (allPlayers.find(x => x.name === highlightedPlayer) || {{}}).sub_with === nm);
+}}
+
+// lista de reservas de um time (clicável p/ destacar a troca)
+function _subsListHtml(subs, isHi) {{
+  const esc = (s) => (s || '').replace(/'/g, "\\\\'");
+  if (!subs || !subs.length) return '<div class="md-empty">—</div>';
+  return `<div class="md-xi subs">${{subs.map(p => {{
+    const cls = `pl${{p.entered ? ' used' : ''}}${{isHi(p.name) ? ' hi' : ''}}${{p.sub_with ? ' clickable' : ''}}`;
+    const oc = p.sub_with ? ` onclick="highlightSub('${{esc(p.name)}}')"` : '';
+    const goal = p.goals ? ` ⚽${{p.goals > 1 ? p.goals : ''}}` : '';
+    return `<span class="${{cls}}"${{oc}}><span class="pn">${{p.num ?? ''}}</span>${{p.name}}${{goal}}${{p.entered ? ` <span class="sub-in">↑${{p.entered}}'</span>` : ''}}</span>`;
+  }}).join('')}}</div>`;
+}}
+
+// vista do confronto: UM campo vertical (time visto embaixo, adversário em cima),
+// e abaixo: reservas T1 | linha do tempo | reservas T2.
+function renderLineupView(g) {{
+  const allPlayers = (g.pitch || []).concat(g.subs || [], g.opp_pitch || [], g.opp_subs || []);
+  const isHi = _mkIsHi(allPlayers);
+  const homeFlag = (TEAMS_DETAIL[modalTeam] || {{}}).flag || '';
+  return `<div class="lv1">
+    <div class="lv1-center">
+      <div class="lv1-head">
+        <span class="lv1-home">${{homeFlag}} <b>${{modalTeam}}</b> ${{g.formation ? `<span class="pitch-form-inline">${{g.formation}}</span>` : ''}}</span>
+        <span class="lv1-away">${{g.opp_formation ? `<span class="pitch-form-inline">${{g.opp_formation}}</span>` : ''}} <b>${{g.opp}}</b> ${{g.opp_flag}}</span>
+      </div>
+      ${{renderPitch(g.pitch, g.opp_pitch, isHi)}}
+    </div>
+    <div class="lv1-bottom">
+      <div class="lv1-subs">
+        <div class="lv-col-title">Reservas · ${{modalTeam}}</div>
+        ${{_subsListHtml(g.subs, isHi)}}
+      </div>
+      <div class="lv1-mid"><div class="lv-col-title">Linha do tempo</div>${{_timelineHtml(g)}}</div>
+      <div class="lv1-subs">
+        <div class="lv-col-title">Reservas · ${{g.opp}}</div>
+        ${{_subsListHtml(g.opp_subs, isHi)}}
+      </div>
+    </div>
+  </div>`;
+}}
+
+// UM campo HORIZONTAL com os dois times. Time visto na metade esquerda (gol à esq,
+// ataca p/ centro); adversário na metade direita, espelhado (gol à dir).
+// coords originais por jogador: x=lado (0..100), y=profundidade (8=gol..92=ataque).
+function renderPitch(homePitch, awayPitch, isHi) {{
+  const splitName = (full) => {{
+    const parts = (full || '').trim().split(/\\s+/);
+    if (parts.length <= 1) return parts[0] || '';
+    return `${{parts[0]}}<br>${{parts.slice(1).join(' ')}}`;
+  }};
+  const dimmed = highlightedPlayer ? ' dim-others' : '';
+  const esc = (s) => (s || '').replace(/'/g, "\\\\'");
+  const cardMark = (p) => p.card ? `<span class="pl-card ${{p.card}}"></span>` : '';
+  const goalMark = (p) => p.goals ? `<span class="pl-goal-mark">⚽${{p.goals > 1 ? `<b>${{p.goals}}</b>` : ''}}</span>` : '';
+
+  // horizontal: profundidade (y) → eixo X; lado (x) → eixo Y (top).
+  // home: metade esquerda (left 2..48%); away: metade direita espelhada (98..52%).
+  const dot = (p, who) => {{
+    const half = (p.y / 100) * 46;
+    const left = who === 'home' ? (2 + half) : (98 - half);
+    const top = p.x;
+    // todo jogador é clicável → abre o card de dados (e destaca a troca, se houver)
+    const cls = `pitch-player ${{who}} clickable${{p.exited ? ' subbed-out' : ''}}${{isHi(p.name) ? ' hi' : ''}}`;
+    const card = (cardPlayer === p.name) ? _playerCardHtml(p, who) : '';
+    return `<div class="${{cls}}" style="left:${{left}}%;top:${{top}}%" onclick="showPlayerCard('${{esc(p.name)}}')">
+      <div class="pitch-shirt">${{p.num ?? ''}}${{cardMark(p)}}${{goalMark(p)}}${{p.exited ? `<span class="sub-out">↓${{p.exited}}'</span>` : ''}}</div>
+      <div class="pitch-name">${{splitName(p.name)}}</div>
+      ${{card}}
+    </div>`;
+  }};
+  const dots = (homePitch || []).map(p => dot(p, 'home')).join('')
+    + (awayPitch || []).map(p => dot(p, 'away')).join('');
+  // marcações horizontais: meio (vertical), círculo, áreas/gols nas laterais
+  const lines = `<div class="pitch-lines">
+    <div class="pl-line plh-half"></div>
+    <div class="pl-line pl-circle"></div>
+    <div class="pl-line pl-spot"></div>
+    <div class="pl-line plh-box left"></div><div class="pl-line plh-box-s left"></div><div class="pl-goal-h left"></div>
+    <div class="pl-line plh-box right"></div><div class="pl-line plh-box-s right"></div><div class="pl-goal-h right"></div>
+  </div>`;
+  return `<div class="pitch-h pitch-vs${{dimmed}}">${{lines}}${{dots}}</div>`;
 }}
 
 function _scoreColor(v) {{
@@ -2531,35 +3747,117 @@ function renderModalBody() {{
   if (!d) {{ body.innerHTML = ''; return; }}
 
   if (modalTab === 'scores') {{
-    const labels = d.score_labels || {{}};
-    const sc = d.scores || {{}};
-    const keys = Object.keys(labels);
-    if (!keys.length) {{ body.innerHTML = '<div class="md-empty">Sem scores calculados ainda.</div>'; return; }}
-    body.innerHTML = '<div class="md-scores">' + keys.map(k => {{
-      const v = sc[k];
-      const cls = k === 'score_geral' ? ' ms-geral' : '';
-      return `<div class="md-score${{cls}}">
-        <div class="ms-val" style="color:${{_scoreColor(v)}}">${{v != null ? v.toFixed(1) : '—'}}</div>
-        <div class="ms-lbl">${{labels[k]}}</div>
-      </div>`;
-    }}).join('') + '</div>';
+    const info = d.info || {{}};
+    const cp = d.campanha || {{}};
+
+    // — HERO: bandeira + nome + #rank + apelido + meta (técnico · confederação · grupo)
+    const metaParts = [
+      info.tecnico ? 'Téc. ' + info.tecnico : null,
+      d.confed || null,
+      d.group ? 'Grupo ' + d.group : null,
+    ].filter(Boolean);
+    const rankChip = d.rank != null ? `<span class="rs-hero-rank">#${{d.rank}}</span>` : '';
+    // lâmpada no canto: curiosidade aparece no hover
+    const lamp = info.curiosidade
+      ? `<span class="rs-lamp" tabindex="0">💡<span class="rs-lamp-tip">${{info.curiosidade}}</span></span>`
+      : '';
+    const hero = `<div class="rs-hero">
+      <span class="rs-hero-flag">${{d.flag || '🏳️'}}</span>
+      <div class="rs-hero-info">
+        <div class="rs-hero-top">
+          <span class="rs-hero-name">${{d.team}}</span>
+          ${{rankChip}}
+        </div>
+        ${{info.apelido ? `<div class="rs-hero-nick">${{info.apelido}}</div>` : ''}}
+        ${{metaParts.length ? `<div class="rs-hero-meta">${{metaParts.join(' · ')}}</div>` : ''}}
+      </div>
+      ${{lamp}}
+    </div>`;
+
+    // — COLUNA 1: História em Copas
+    const kv = (k, v) => `<div class="rs-kv"><span class="rs-k">${{k}}</span><span class="rs-v">${{v}}</span></div>`;
+    const histStats = [];
+    if (info.titulos_copa != null)
+      histStats.push(kv(info.titulos_copa === 1 ? 'Título mundial' : 'Títulos mundiais', info.titulos_copa));
+    if (info.vices_copa != null)
+      histStats.push(kv(info.vices_copa === 1 ? 'Vice-campeonato' : 'Vice-campeonatos', info.vices_copa));
+    if (info.participacoes != null)
+      histStats.push(kv('Participações', info.participacoes));
+    if (info.estreia != null)
+      histStats.push(kv('Estreia em Copas', info.estreia));
+    const colHist = `<div class="rs-col">
+      <div class="rs-col-title">História em Copas</div>
+      ${{histStats.length ? histStats.join('') : '<div class="rs-na">sem dados</div>'}}
+      ${{info.melhor_campanha ? `<div class="rs-highlight">🏆 ${{info.melhor_campanha}}</div>` : ''}}
+    </div>`;
+
+    // — COLUNA 2: Nesta Copa (Gols e Saldo em linhas separadas)
+    const temCampanha = d.n_jogos > 0;
+    const fmtSaldo = cp.saldo_gols != null ? (cp.saldo_gols > 0 ? '+' + cp.saldo_gols : '' + cp.saldo_gols) : '—';
+    const colCopa = `<div class="rs-col">
+      <div class="rs-col-title">Nesta Copa</div>
+      ${{temCampanha ? `
+        ${{kv('Jogos', d.n_jogos)}}
+        ${{kv('Pontos', cp.pontos != null ? cp.pontos : '—')}}
+        ${{kv('Gols marcados', cp.gols_pro != null ? cp.gols_pro : '—')}}
+        ${{kv('Saldo de gols', fmtSaldo)}}
+        ${{d.artilheiro ? `<div class="rs-highlight">⚽ ${{d.artilheiro.name}} (${{d.artilheiro.gols}})</div>` : ''}}
+      ` : '<div class="rs-na">Ainda não entrou em campo.</div>'}}
+    </div>`;
+
+    body.innerHTML = `${{hero}}<div class="rs-cols">${{colHist}}${{colCopa}}</div>`;
     return;
   }}
 
   if (modalTab === 'jogos') {{
-    if (!d.jogos || !d.jogos.length) {{ body.innerHTML = '<div class="md-empty">Nenhum jogo disputado ainda.</div>'; return; }}
-    body.innerHTML = d.jogos.map(g => {{
-      const local = g.home ? 'casa' : 'fora';
-      const placar = (g.gf != null && g.ga != null) ? `${{g.gf}} – ${{g.ga}}` : '—';
-      return `<div class="md-game">
-        <div class="md-game-top">
-          <span class="md-res ${{g.res}}">${{g.res}}</span>
-          <span class="md-game-score">${{placar}}</span>
-          <span class="md-game-opp">vs ${{g.opp_flag}} <b>${{g.opp}}</b> <span class="md-game-meta">(${{local}})</span></span>
-          <span class="md-game-meta">${{g.stage}} · ${{g.date}}</span>
+    if (!d.jogos || !d.jogos.length) {{ body.innerHTML = '<div class="md-empty">Nenhum jogo cadastrado ainda.</div>'; return; }}
+    const myFlag = d.flag || '🏳️';
+    // agrupa por fase preservando a ordem cronológica de aparição
+    const phases = [];
+    const phaseIdx = {{}};
+    d.jogos.forEach((g) => {{
+      if (!(g.stage in phaseIdx)) {{ phaseIdx[g.stage] = phases.length; phases.push({{ label: g.stage, games: [] }}); }}
+      phases[phaseIdx[g.stage]].games.push(g);
+    }});
+
+    // mandante sempre à esquerda, visitante à direita (ordem real do confronto).
+    // A seleção sendo vista (modalTeam) fica em negrito destacado.
+    const sideHtml = (team, flag, mine) =>
+      `<span class="mg-side${{mine ? ' me' : ''}}">${{flag}} <b>${{team}}</b></span>`;
+
+    const cardHtml = (g) => {{
+      const i = d.jogos.indexOf(g);
+      const homeIsMe = g.home_team === modalTeam;
+      const left = sideHtml(g.home_team, g.home_flag, homeIsMe);
+      const right = sideHtml(g.away_team, g.away_flag, !homeIsMe);
+      if (!g.finalizado) {{
+        // próximo jogo: não clicável, sem placar
+        return `<div class="mg scheduled">
+          <div class="mg-head">
+            ${{left}}
+            <span class="mg-score res-next">×</span>
+            ${{right}}
+            <span class="md-game-meta mg-meta">a jogar · ${{g.date}}</span>
+          </div>
+        </div>`;
+      }}
+      const placar = (g.home_score != null && g.away_score != null) ? `${{g.home_score}} – ${{g.away_score}}` : '—';
+      const open = (expandedGame === i);
+      return `<div class="mg ${{open ? 'open' : ''}}" data-gi="${{i}}">
+        <div class="mg-head" onclick="toggleGame(${{i}})">
+          ${{left}}
+          <span class="mg-score res-${{g.res}}">${{placar}}</span>
+          ${{right}}
+          <span class="md-game-meta mg-meta">${{g.stage}} · ${{g.date}}</span>
+          <span class="mg-chevron">${{open ? '▲' : '▼'}}</span>
         </div>
+        ${{open ? `<div class="mg-detail">${{renderGameDetail(g)}}</div>` : ''}}
       </div>`;
-    }}).join('');
+    }};
+
+    body.innerHTML = phases.map(ph =>
+      `<div class="mg-phase">${{ph.label}}</div>` + ph.games.map(cardHtml).join('')
+    ).join('');
     return;
   }}
 
@@ -2584,26 +3882,6 @@ function renderModalBody() {{
     return;
   }}
 
-  if (modalTab === 'escalacoes') {{
-    const withLineup = (d.jogos || []).filter(g => g.starters && g.starters.length);
-    if (!withLineup.length) {{ body.innerHTML = '<div class="md-empty">Sem escalações registradas.</div>'; return; }}
-    body.innerHTML = withLineup.map(g => {{
-      const xi = g.starters.map(p =>
-        `<span class="pl"><span class="pn">${{p.num ?? ''}}</span>${{p.name}}</span>`).join('');
-      const subs = (g.subs || []).map(p =>
-        `<span class="pl"><span class="pn">${{p.num ?? ''}}</span>${{p.name}}</span>`).join('');
-      return `<div class="md-game">
-        <div class="md-game-top">
-          <span class="md-game-opp">vs ${{g.opp_flag}} <b>${{g.opp}}</b></span>
-          <span class="md-game-meta">${{g.stage}} · ${{g.date}}</span>
-        </div>
-        <div class="md-formation">Formação: ${{g.formation || '—'}}</div>
-        <div class="md-xi">${{xi}}</div>
-        ${{subs ? `<div class="md-sub-label">Reservas</div><div class="md-xi subs">${{subs}}</div>` : ''}}
-      </div>`;
-    }}).join('');
-    return;
-  }}
 }}
 
 goToJogo(jogos[jogos.length - 1]);
