@@ -4,7 +4,10 @@
       "Bash(*)",
       "Bash(pkill -f \"watcher/watch-fifa.py\")",
       "Bash(pkill -f \"watcher/fifa_progress.py\")",
-      "Bash(touch /tmp/fifa-copa-stop)"
+      "Bash(pkill -9 -f \"watcher/fifa_progress.py\")",
+      "Bash(touch /tmp/fifa-copa-stop)",
+      "Bash(nohup bash watcher/run-window.sh)",
+      "WebFetch(domain:givevoicetofootball.github.io)"
     ],
     "deny": [
       "Bash(git push --force:*)",
