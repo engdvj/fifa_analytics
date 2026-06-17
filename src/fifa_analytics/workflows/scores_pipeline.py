@@ -85,6 +85,10 @@ TEAM_RANKINGS = [
     ("forca-relativa", "score_forca_relativa", "forca relativa"),
     ("disciplina", "score_disciplina", "disciplina"),
 ]
+# Estilo de jogo nao e um ranking ordenado (estilo nao e melhor/pior), entao
+# tem pagina propria com tabela comparativa — listado separado de TEAM_RANKINGS
+# mas presente na mesma navegacao.
+TEAM_STYLE_PAGE = ("estilo", "estilo de jogo")
 
 
 def run_scores_pipeline() -> dict[str, Any]:
@@ -420,13 +424,17 @@ def write_team_rankings(team_scores: pd.DataFrame, weights: dict[str, float] | N
         path = TEAM_RANKINGS_DIR / f"{slug}.md"
         path.write_text(_render_team_ranking(team_scores, slug, metric, title, effective_weights), encoding="utf-8")
         paths.append(path)
+    style_path = TEAM_RANKINGS_DIR / f"{TEAM_STYLE_PAGE[0]}.md"
+    style_path.write_text(_render_team_style_table(team_scores), encoding="utf-8")
+    paths.append(style_path)
     return paths
 
 
 def _render_team_rankings_index(team_scores: pd.DataFrame) -> str:
     """So navegacao — a tabela completa do ranking geral fica em
     reports/rankings/selecoes/geral.md, sem duplicar aqui."""
-    links = "\n".join(f"- [[reports/rankings/selecoes/{slug}\\|{title.title()}]]" for slug, _, title in TEAM_RANKINGS)
+    entries = [(slug, title) for slug, _, title in TEAM_RANKINGS] + [TEAM_STYLE_PAGE]
+    links = "\n".join(f"- [[reports/rankings/selecoes/{slug}\\|{title.title()}]]" for slug, title in entries)
     return f"# Rankings de selecoes\n\nAtualizado em `{utc_now_iso()}`.\n\n{links}\n"
 
 
@@ -469,6 +477,48 @@ def _render_team_ranking(
     avg_forca_relativa = ranked["peso_efetivo_forca_relativa"].mean() if "peso_efetivo_forca_relativa" in ranked.columns else None
     explanation = _team_score_explanation(effective_weights, avg_resultado, avg_forca_relativa)
     return f"# Ranking de selecoes - {title.title()}\n\nAtualizado em `{utc_now_iso()}`.\n\n{nav}\n\n{explanation}\n\n{display.to_markdown(index=False)}\n"
+
+
+def _render_team_style_table(team_scores: pd.DataFrame) -> str:
+    """Pagina de estilo de jogo: tabela COMPARATIVA, nao ranking ordenado.
+    Estilo nao e melhor/pior, entao a ordenacao default e por nome — o leitor
+    compara assinaturas, nao busca um 'campeao de estilo'."""
+    nav = _team_rankings_nav(TEAM_STYLE_PAGE[0])
+    if "estilo_jogo" not in team_scores.columns:
+        return f"# Estilo de jogo das selecoes\n\n{nav}\n\nDados de estilo ainda nao disponiveis.\n"
+    ranked = team_scores.sort_values("team").reset_index(drop=True)
+    rows = []
+    for _, row in ranked.iterrows():
+        rows.append([
+            _team_link(row["team"], row.get("team_slug")),
+            row.get("estilo_jogo", ""),
+            f"{float(row.get('estilo_posse', 50)):.0f}",
+            f"{float(row.get('estilo_pressao', 50)):.0f}",
+            f"{float(row.get('estilo_verticalidade', 50)):.0f}",
+            f"{float(row.get('estilo_largura', 50)):.0f}",
+            row.get("nivel_evidencia", ""),
+        ])
+    table = _markdown_table(
+        rows,
+        ["selecao", "estilo", "construcao", "recuperacao", "chegada", "largura", "evidencia"],
+    )
+    return f"""# Estilo de jogo das selecoes
+
+Atualizado em `{utc_now_iso()}`.
+
+{nav}
+
+Metrica DESCRITIVA (nao avaliativa): caracteriza COMO cada selecao joga, nao quao bem. Cada eixo e um z-score 0-100 relativo ao torneio (50 = na media):
+
+- **Construcao** (alto): joga na posse, muito passe e precisao — vs. jogo direto/vertical (baixo).
+- **Recuperacao** (alto): pressiona alto, recupera no campo do adversario — vs. bloco baixo/reativo (baixo).
+- **Chegada ao ataque** (alto): vertical, chuta e progride rapido — vs. ataque paciente (baixo).
+- **Largura** (alto): ataca pelas pontas (cruzamentos) — vs. jogo interior, por dribles e passes-chave (baixo).
+
+A flag `estilo` e escolhida de uma lista fixa de arquetipos (Toque e Posse, Ofensivo, Drible e Individual, Defensivo, Contra-ataque, Jogo pelas Pontas, Pressao Alta) — cada time recebe a do arquetipo que mais COMBINA com as estatisticas dele. Os 4 eixos abaixo sao ingredientes da classificacao. So vira `Equilibrado` quando nenhum arquetipo combina de fato. A flag e provisoria com poucos jogos (reflete o que o time FEZ, nao a fama) e se firma conforme o torneio avanca. Ordenado por nome — estilo nao e ranking.
+
+{table}
+"""
 
 
 def write_player_reports(player_match_features: pd.DataFrame) -> list[Path]:
@@ -561,6 +611,13 @@ _COMPONENT_DISCIPLINA_EXPLANATION = (
     "faltas, cartoes amarelos e vermelhos por jogo — nota alta = time disciplinado; vermelho pesa mais "
     "que amarelo por ter impacto imediato e irreversivel no jogo. Nao entra na nota geral — e informativo"
 )
+_COMPONENT_ESTILO_EXPLANATION = (
+    "flag DESCRITIVA de como o time joga (nao quao bem): de uma lista de arquetipos "
+    "(Toque e Posse, Ofensivo, Drible e Individual, Defensivo, Contra-ataque, Jogo pelas Pontas, "
+    "Pressao Alta), o time recebe a que mais combina com as estatisticas dele. Os 4 eixos abaixo "
+    "(posse, pressao, verticalidade, largura) sao os ingredientes. Reflete o que o time FEZ, nao a "
+    "fama — provisorio com poucos jogos. Nao entra na nota geral"
+)
 
 
 def _format_weight_pct(weights: dict[str, float], key: str) -> str:
@@ -589,6 +646,7 @@ def _component_explanations(
         "Controle": _COMPONENT_EXPLANATION_TEMPLATES["score_controle"].format(peso=_format_weight_pct(weights, "score_controle")),
         "Forca Relativa": _COMPONENT_EXPLANATION_TEMPLATES["score_forca_relativa"].format(peso=forca_pct),
         "Disciplina": _COMPONENT_DISCIPLINA_EXPLANATION,
+        "Estilo": _COMPONENT_ESTILO_EXPLANATION,
     }
 
 
@@ -629,6 +687,7 @@ def _render_team_report(
     )
 
     evolution_section = _team_score_evolution(history)
+    style_section = _team_style_section(team, explanations["Estilo"])
 
     gols_label = "gols marcados"
     gols_value: Any = _format_value(team.get("gols_pro", 0))
@@ -695,7 +754,7 @@ A nota geral combina os seis componentes abaixo por media ponderada (pesos entre
 Maturidade do Elo: no inicio do torneio todos os times comecam no mesmo rating (1500) — vencer ainda nao prova forca relativa de fato, e o mesmo sinal que Resultado ja capta. O peso de Forca Relativa cresce organicamente conforme os ratings se diferenciam de verdade (medido pela variancia real do Elo vs. o teto teorico para o numero de jogos disputados); a fracao "nao ganha" e transferida para Resultado.
 
 {components}
-{evolution_section}
+{style_section}{evolution_section}
 ## Resumo acumulado
 
 {summary}
@@ -771,6 +830,60 @@ def _team_score_evolution(history: pd.DataFrame | None) -> str:
 ## Evolucao da nota por jogo
 
 {table}
+"""
+
+
+# Eixos de estilo: (coluna, polo alto, polo baixo). Espelha _STYLE_AXIS_LABELS
+# em analytics/scores.py, mas com texto mais longo para a tabela do relatorio.
+_STYLE_AXES_DISPLAY = [
+    ("estilo_posse", "posse", "jogo direto"),
+    ("estilo_pressao", "pressao alta", "bloco baixo"),
+    ("estilo_verticalidade", "ataque vertical", "ataque paciente"),
+    ("estilo_largura", "jogo pelas pontas", "jogo interior"),
+]
+_STYLE_AXIS_NAMES = {
+    "estilo_posse": "Construcao",
+    "estilo_pressao": "Recuperacao",
+    "estilo_verticalidade": "Chegada ao ataque",
+    "estilo_largura": "Largura",
+}
+
+
+def _style_axis_tendency(value: float, high_label: str, low_label: str) -> str:
+    """Traduz o eixo (0-100, 50=neutro) em texto: polo + intensidade. Perto de
+    50 = sem tendencia clara naquele eixo."""
+    distance = abs(value - 50.0)
+    if distance < 6:
+        return "equilibrado"
+    intensity = "forte" if distance >= 18 else "moderado"
+    pole = high_label if value >= 50 else low_label
+    return f"{pole} ({intensity})"
+
+
+def _team_style_section(team: pd.Series, explanation: str) -> str:
+    """Secao 'Estilo de jogo': o rotulo em destaque + a tabela dos 4 eixos com
+    a tendencia de cada um. So aparece se os eixos foram calculados."""
+    if "estilo_jogo" not in team.index or pd.isna(team.get("estilo_jogo")):
+        return ""
+    rows = []
+    for col, high_label, low_label in _STYLE_AXES_DISPLAY:
+        value = float(team.get(col, 50.0) or 50.0)
+        rows.append([
+            _STYLE_AXIS_NAMES[col],
+            f"{high_label} ↔ {low_label}",
+            f"{value:.0f}/100",
+            _style_axis_tendency(value, high_label, low_label),
+        ])
+    table = _markdown_table(rows, ["eixo", "polos", "nota", "tendencia"])
+    return f"""
+## Estilo de jogo: {team.get('estilo_jogo')}
+
+{explanation}.
+
+{table}
+
+> Eixos relativos ao torneio (50 = na media das selecoes), usados como ingredientes da classificacao. Nao medem qualidade — um time pode jogar muito na posse e ainda assim ir mal. A flag de estilo vem do arquetipo mais proximo; e provisoria com poucos jogos e se firma conforme o torneio avanca.
+
 """
 
 
@@ -894,7 +1007,7 @@ def _markdown_table(rows: list[list[Any]], columns: list[str]) -> str:
 
 def _team_rankings_nav(active_slug: str) -> str:
     links = []
-    for slug, _, title in TEAM_RANKINGS:
+    for slug, title in [(s, t) for s, _, t in TEAM_RANKINGS] + [TEAM_STYLE_PAGE]:
         label = title.title()
         if slug == active_slug:
             label = f"{label} (atual)"
@@ -941,6 +1054,7 @@ def _team_score_explanation(
 - **Controle** (peso {p('score_controle')}): posse, passes, precisao e posse liquida (dribbles ganhos / posse perdida, via 365Scores). Peso baixo — estilo de jogo nao e determinante de qualidade.
 - **Forca relativa** (peso {forca_pct}): rating Elo. O placar real decide a faixa do ajuste — vitoria sempre acima de empate, empate sempre acima de derrota, a hierarquia nunca se inverte. Mas a posicao exata dentro de cada faixa vem do indice de desempenho (gols, chutes no alvo, posse): uma vitoria sofrida (ganhou jogando pior que o adversario) ganha menos rating que uma vitoria dominante com a mesma margem de gols, e o mesmo vale para empates (dominado vs. equilibrado) e derrotas. Contextualiza tambem pelo adversario enfrentado — vencer um time forte vale mais que vencer um fraco, efeito que so aparece a partir do 2o jogo de cada selecao, quando os ratings ja deixaram de ser todos iguais. **O peso exibido aqui ja reflete a maturidade atual do Elo** (cresce conforme os ratings se diferenciam de verdade); o peso de design pleno e {p('score_forca_relativa')}.
 - **Disciplina**: faltas, cartoes amarelos e vermelhos por jogo. Nota alta = time disciplinado. Nao entra na nota geral — e informativo.
+- **Estilo de jogo**: flag DESCRITIVA (nao avaliativa) de como o time joga, escolhida de uma lista de arquetipos (Toque e Posse, Ofensivo, Drible e Individual, Defensivo, Contra-ataque, Jogo pelas Pontas, Pressao Alta) pelo que mais combina com as estatisticas. Os 4 eixos sao ingredientes. Nao entra na nota geral — estilo nao e melhor/pior.
 - **Tendencia**: variacao de posicao no ranking geral em relacao ao jogo anterior (`↑3` subiu 3, `↓2` caiu 2, `→` estavel ou primeiro jogo).
 - **Evidencia**: estabilidade da nota (`baixa`, `media`, `alta`). Atinge confianca plena com 3 jogos — os 3 da fase de grupos.
 

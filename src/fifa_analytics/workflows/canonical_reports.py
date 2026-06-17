@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -815,7 +816,40 @@ def _format_match_team_stats(match: dict[str, Any], match_team_stats: pd.DataFra
     if not rows:
         return ""
     table = pd.DataFrame(rows, columns=[_team_link(home_team), "estatistica", _team_link(away_team)])
-    return table.to_markdown(index=False)
+
+    # Estilo de jogo (assinatura do time NO TORNEIO, nao desta partida especifica):
+    # vem do team_scores ja calculado. Pode estar um ciclo defasado em relacao a
+    # este jogo, mas estilo e um agregado que muda pouco a cada partida — e a
+    # leitura "como cada selecao costuma jogar" antes/depois de ver o placar.
+    style_line = _format_match_team_style(home_team, away_team)
+    return table.to_markdown(index=False) + style_line
+
+
+@lru_cache(maxsize=1)
+def _team_style_labels() -> dict[str, str]:
+    """Mapa team -> rotulo de estilo, lido do team_scores ja gerado pelo pipeline
+    de scores. Cacheado por execucao (o arquivo nao muda durante o build dos
+    relatorios). Vazio se o pipeline de scores ainda nao rodou."""
+    path = GOLD_DIR / "analytics" / "team_scores.parquet"
+    if not path.exists():
+        return {}
+    scores = read_dataframe(path)
+    if scores.empty or "estilo_jogo" not in scores.columns:
+        return {}
+    return dict(zip(scores["team"].astype(str), scores["estilo_jogo"].astype(str)))
+
+
+def _format_match_team_style(home_team: str, away_team: str) -> str:
+    labels = _team_style_labels()
+    home_style = labels.get(home_team)
+    away_style = labels.get(away_team)
+    if not home_style and not away_style:
+        return ""
+    return (
+        f"\n\n**Estilo de jogo no torneio** — "
+        f"{home_team}: _{home_style or 'sem dados'}_ · "
+        f"{away_team}: _{away_style or 'sem dados'}_"
+    )
 
 
 def _format_stat_value(value: Any, suffix: str, multiplier: float = 1) -> str:

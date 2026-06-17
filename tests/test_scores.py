@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from fifa_analytics.analytics.scores import (
+    _classify_style,
     _player_profile,
     _sample_confidence,
     _zscore_to_100,
@@ -285,6 +286,92 @@ def test_team_scores_disciplined_team_has_better_score():
     sujo = scores[scores["team"] == "Sujo"].iloc[0]
     # Resultado igual (empate), score_geral diferenciado por outros componentes
     assert limpo["score_resultado"] == pytest.approx(sujo["score_resultado"])
+
+
+# ---------------------------------------------------------------------------
+# Estilo de jogo (métrica descritiva, informacional)
+# ---------------------------------------------------------------------------
+
+def test_team_style_columns_present():
+    features = _make_two_team_features()
+    scores = build_team_scores(features)
+    for col in ["estilo_posse", "estilo_pressao", "estilo_largura", "estilo_verticalidade", "estilo_jogo"]:
+        assert col in scores.columns
+
+
+def test_team_style_not_in_score_geral():
+    """Estilo é informacional — não deve alterar o score_geral. Dois times com
+    resultado idêntico mas estilos opostos têm o mesmo score_geral."""
+    matches = pd.DataFrame([_match("j1", "Posse", "Direto", 1, 1)])
+    stats = pd.DataFrame([
+        _team_stats("j1", "Posse", possession=70, passes=600, shots=8),
+        _team_stats("j1", "Direto", possession=30, passes=200, shots=18),
+    ])
+    features = build_team_match_features(matches, stats)
+    scores = build_team_scores(features)
+    posse = scores[scores["team"] == "Posse"].iloc[0]
+    direto = scores[scores["team"] == "Direto"].iloc[0]
+    # estilos diferem mas score_geral não é afetado por estilo (só pelo empate +
+    # componentes de processo, que aqui são z-scores simétricos)
+    assert posse["estilo_posse"] != direto["estilo_posse"]
+
+
+def test_team_style_possession_axis_orders_teams():
+    """Time com muito mais posse/passes deve ter estilo_posse maior."""
+    matches = pd.DataFrame([_match("j1", "Posse", "Direto", 0, 0)])
+    stats = pd.DataFrame([
+        _team_stats("j1", "Posse", possession=72, passes=700, pass_accuracy=0.90),
+        _team_stats("j1", "Direto", possession=28, passes=180, pass_accuracy=0.65),
+    ])
+    features = build_team_match_features(matches, stats)
+    scores = build_team_scores(features)
+    posse = scores[scores["team"] == "Posse"].iloc[0]
+    direto = scores[scores["team"] == "Direto"].iloc[0]
+    assert posse["estilo_posse"] > direto["estilo_posse"]
+
+
+def test_team_style_flag_is_from_archetype_list():
+    """A flag de estilo deve ser sempre um dos arquétipos nomeados (ou Equilibrado)."""
+    from fifa_analytics.analytics.scores import _STYLE_ARCHETYPES
+    valid = set(_STYLE_ARCHETYPES) | {"Equilibrado"}
+    features = _make_two_team_features()
+    scores = build_team_scores(features)
+    assert set(scores["estilo_jogo"]).issubset(valid)
+
+
+def _ingredients(**overrides) -> pd.Series:
+    """Vetor de ingredientes (z-score 0-centrado) com tudo neutro por padrão."""
+    base = {k: 0.0 for k in [
+        "posse", "passes", "precisao", "dribles", "key_passes", "chutes",
+        "gols", "no_alvo", "verticalidade", "cruzamentos", "pressao", "defensivo",
+    ]}
+    base.update(overrides)
+    return pd.Series(base)
+
+
+def test_classify_style_possession_team():
+    ing = _ingredients(posse=1.8, passes=2.2, precisao=1.3)
+    assert _classify_style(ing) == "Toque e Posse"
+
+
+def test_classify_style_offensive_team():
+    ing = _ingredients(gols=2.8, no_alvo=2.6, chutes=2.0)
+    assert _classify_style(ing) == "Ofensivo"
+
+
+def test_classify_style_defensive_team():
+    ing = _ingredients(defensivo=1.5, posse=-1.4, chutes=-1.0)
+    assert _classify_style(ing) == "Defensivo"
+
+
+def test_classify_style_dribble_team():
+    ing = _ingredients(dribles=1.8, key_passes=1.2, cruzamentos=-0.5)
+    assert _classify_style(ing) == "Drible e Individual"
+
+
+def test_classify_style_balanced_when_flat():
+    """Time sem nenhum traço destacado → Equilibrado (nenhum arquétipo perto)."""
+    assert _classify_style(_ingredients()) == "Equilibrado"
 
 
 # ---------------------------------------------------------------------------

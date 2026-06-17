@@ -497,6 +497,15 @@ def build_team_scores(
         "dribbles_won": "sum",
         "touches": "sum",
         "possession_lost": "sum",
+        # Campos de estilo de jogo (informacional, não entra no score_geral) —
+        # caracterizam COMO o time joga, não quão bem. Ver build_team_style.
+        "crosses": "sum",
+        "accurate_crosses": "sum",
+        "passes_into_final_third": "sum",
+        "tackles": "sum",
+        "interceptions": "sum",
+        "clearances": "sum",
+        "final_third_possession_won": "sum",
     }
     available = {c: agg for c, agg in aggregations.items() if c in team_match_features.columns}
     scores = team_match_features.groupby("team", dropna=False).agg(available).reset_index()
@@ -739,6 +748,11 @@ def build_team_scores(
         _disc_amarelos * 0.3,
         _disc_vermelhos * 0.4,
     ]) / 0.3  # reescala para manter 0-100 após ponderação
+
+    # Estilo de jogo: métrica DESCRITIVA (não avaliativa) — caracteriza COMO o
+    # time joga em 4 eixos e deriva um rótulo legível. Não entra no score_geral:
+    # estilo não é melhor/pior, é uma assinatura. Ver build_team_style.
+    scores = _add_team_style(scores)
 
     # score_geral composto. O peso de score_forca_relativa é escalado pela
     # maturidade do Elo (elo_maturity, 0-1): na rodada 1, todos os times têm
@@ -1394,6 +1408,221 @@ def _score_acumulado(scores: pd.DataFrame) -> pd.Series:
     if not parts:
         return pd.Series(0.0, index=scores.index)
     return sum(parts).clip(0, 100)
+
+
+# ---------------------------------------------------------------------------
+# Estilo de jogo (métrica descritiva, informacional)
+# ---------------------------------------------------------------------------
+# Os 4 eixos são z-scores 0–100 RELATIVOS ao torneio (50 = na média): não medem
+# qualidade, medem posição numa dimensão de estilo. Um time pode ter eixo alto
+# de "jogo direto" e ainda ser ruim — estilo e qualidade são ortogonais.
+#
+#   estilo_posse:        construir tocando (posse + volume/precisão de passes)
+#                        ↔ jogo direto/vertical. Alto = posse; baixo = direto.
+#   estilo_pressao:      recuperar a bola alto e no campo do adversário
+#                        (posse ganha no terço final, desarmes + interceptações)
+#                        ↔ bloco baixo/reativo (mais cortes/clearances).
+#   estilo_largura:      atacar pelos lados (cruzamentos certos)
+#                        ↔ jogo interior (dribles, passes em profundidade).
+#   estilo_verticalidade: ataque de volume/rápido (chutes por posse, passes pro
+#                        terço final) ↔ ataque paciente.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Classificação por ARQUÉTIPO de estilo
+# ---------------------------------------------------------------------------
+# Cada time recebe UMA flag de estilo, da lista fixa abaixo. Não é "posição num
+# eixo" — é "de qual arquétipo o time mais se aproxima". Cada arquétipo é um
+# perfil-alvo de ingredientes em z-score (positivo = acima da média do torneio,
+# negativo = abaixo). Para cada time calculamos a distância ponderada entre o
+# vetor de ingredientes dele e o perfil de cada arquétipo; ele ganha a flag do
+# arquétipo MAIS PRÓXIMO. "Equilibrado" é o fallback quando nenhum arquétipo
+# está claramente próximo (todos os ingredientes perto da média).
+#
+# Ingredientes (chaves dos vetores) — cada um é um z-score 0-centrado calculado
+# em _style_ingredients:
+#   posse, passes, precisao   → ter a bola / construir tocando
+#   dribles, key_passes       → criação individual (driblar, achar o passe)
+#   chutes, gols, no_alvo     → volume e produto ofensivo
+#   verticalidade             → chegar rápido ao ataque (chutes/posse, terço final)
+#   cruzamentos               → atacar pelos lados (cruzamentos certos)
+#   pressao                   → recuperar alto (terço final, desarmes/interceptações)
+#   defensivo                 → bloco baixo (clearances alto + posse baixa)
+#
+# Os pesos (segundo valor de cada tupla) dizem quais ingredientes DEFINEM o
+# arquétipo — ingredientes fora do dict do arquétipo não entram na distância
+# dele (não penaliza um time de posse por não driblar, p.ex.).
+_STYLE_ARCHETYPES: dict[str, dict[str, tuple[float, float]]] = {
+    # nome da flag : { ingrediente: (z-alvo, peso) }
+    # Z-alvos calibrados para a escala real observada (sinais fortes chegam a
+    # 2-3 desvios). Cada arquétipo é DEFINIDO pelos seus ingredientes-chave;
+    # produto ofensivo (gols/no_alvo) é deixado FORA dos arquétipos de
+    # construção (Posse, Pontas, Drible) para não confundir "joga bonito" com
+    # "fez gol" — quem cria muito mas não no volume bruto ainda é do estilo.
+    "Toque e Posse": {
+        "passes": (2.0, 1.2), "posse": (1.6, 1.0), "precisao": (1.2, 0.8),
+        "gols": (0.0, 0.4),  # posse pela posse: não precisa marcar muito
+    },
+    "Ofensivo": {
+        # z-alvos altos: o z-score satura em +3, então um time de fato ofensivo
+        # (muitos gols + finalizações) encosta nesse teto — alvos baixos deixariam
+        # resíduo de distância e outro arquétipo "magro" venceria por acaso.
+        "gols": (2.8, 1.4), "no_alvo": (2.6, 1.2), "chutes": (2.0, 1.0),
+    },
+    "Drible e Individual": {
+        "dribles": (1.6, 1.4), "key_passes": (1.2, 0.9),
+        "cruzamentos": (-0.5, 0.5),  # cria por dentro, não por cruzamento
+    },
+    "Defensivo": {
+        "defensivo": (1.4, 1.2), "posse": (-1.4, 1.0), "chutes": (-1.0, 0.7),
+    },
+    "Contra-ataque": {
+        "verticalidade": (1.4, 1.2), "posse": (-0.8, 0.8), "passes": (-0.8, 0.7),
+        "no_alvo": (0.6, 0.5),  # pouca posse mas finaliza com perigo
+    },
+    "Jogo pelas Pontas": {
+        "cruzamentos": (1.6, 1.4), "dribles": (-0.4, 0.5),
+    },
+    "Pressão Alta": {
+        # gols-alvo moderado: pressiona e cria, mas se finaliza no teto (+3) é
+        # mais Ofensivo do que pressão pela pressão — evita roubar a Alemanha.
+        "pressao": (1.6, 1.4), "posse": (0.5, 0.4), "gols": (0.5, 0.5),
+    },
+}
+
+# Distância máxima (média ponderada por ingrediente) para o arquétipo mais
+# próximo ainda "contar": se nem o melhor arquétipo chega perto, o time é
+# "Equilibrado". Calibrado abaixo de ~0.99 (a distância de um time totalmente
+# na média ao arquétipo mais próximo) para que um time sem traço algum caia em
+# Equilibrado, mas times com assinatura real (distâncias ~0.5-0.8) sejam
+# classificados.
+_STYLE_MATCH_MAX_DISTANCE = 0.95
+
+# Mantido para compat com a tabela de eixos exibida (4 eixos numéricos seguem
+# existindo como ingredientes visíveis; a flag agora vem do arquétipo).
+_STYLE_AXIS_LABELS: list[tuple[str, str, str]] = [
+    ("estilo_posse", "posse", "jogo direto"),
+    ("estilo_pressao", "pressão alta", "bloco baixo"),
+    ("estilo_verticalidade", "ataque vertical", "ataque paciente"),
+    ("estilo_largura", "jogo pelas pontas", "jogo interior"),
+]
+
+
+def _add_team_style(scores: pd.DataFrame) -> pd.DataFrame:
+    """Calcula os 4 eixos de estilo (0–100, z-score entre os times) e o rótulo
+    textual. Cada coluna de origem é por jogo (divide pelos jogos) para não
+    favorecer quem disputou mais partidas. Campos ausentes viram 0 — o time
+    fica na média (50) naquele eixo, sem distorcer os outros.
+
+    Os eixos guardam a posição CHEIA (sem achatamento pela amostra): estilo é
+    descritivo, não avaliativo, então todo time recebe uma assinatura já no 1º
+    jogo (ver _style_label). A assinatura é provisória e se firma conforme os
+    jogos acumulam, mas nunca é escondida atrás do neutro.
+    """
+    jogos = scores["jogos"].clip(lower=1)
+
+    def _per_game(col: str) -> pd.Series:
+        if col not in scores.columns:
+            return pd.Series(0.0, index=scores.index)
+        return _safe_divide(scores[col], jogos)
+
+    posse_media = scores.get("posse_media", pd.Series(0.0, index=scores.index))
+    passes_pj = _per_game("passes")
+    precisao = scores.get("precisao_passes_media", pd.Series(0.0, index=scores.index))
+    # posse + volume de passes + precisão: as três faces de "ter o jogo nos pés".
+    estilo_posse = _mean_score([
+        _zscore_to_100(posse_media),
+        _zscore_to_100(passes_pj),
+        _zscore_to_100(precisao),
+    ])
+
+    # pressão: recuperações altas (posse ganha no terço final) e duelos
+    # defensivos no campo de frente (desarmes + interceptações). O polo baixo
+    # — muitos cortes/clearances — indica defender recuado, sem disputar alto.
+    recuperacao_alta = _per_game("final_third_possession_won")
+    duelos = _per_game("tackles") + _per_game("interceptions")
+    bloco_baixo = _per_game("clearances")
+    estilo_pressao = _mean_score([
+        _zscore_to_100(recuperacao_alta),
+        _zscore_to_100(duelos),
+        _zscore_to_100(bloco_baixo, lower_is_better=True),
+    ])
+
+    # largura: cruzamentos CERTOS por jogo (não tentados — chuveirinho perdido
+    # não é estilo de ataque pelos lados). Polo baixo = jogo interior, medido
+    # por dribles e passes-chave que furam por dentro.
+    cruzamentos = _per_game("accurate_crosses")
+    interior = _per_game("dribbles_won") + _per_game("key_passes")
+    estilo_largura = _mean_score([
+        _zscore_to_100(cruzamentos),
+        _zscore_to_100(interior, lower_is_better=True),
+    ])
+
+    # verticalidade: quão rápido/direto o time chega ao ataque — chutes por
+    # unidade de posse (converte posse em finalização em vez de só circular) e
+    # volume de passes no terço final. Alto = vertical; baixo = paciente.
+    chutes_por_posse = _safe_divide(_per_game("chutes"), posse_media.clip(lower=1))
+    final_third = _per_game("passes_into_final_third")
+    estilo_verticalidade = _mean_score([
+        _zscore_to_100(chutes_por_posse),
+        _zscore_to_100(final_third),
+    ])
+
+    # Os 4 eixos (0-100) seguem expostos como ingredientes visíveis no painel.
+    scores["estilo_posse"] = estilo_posse.round(1)
+    scores["estilo_pressao"] = estilo_pressao.round(1)
+    scores["estilo_largura"] = estilo_largura.round(1)
+    scores["estilo_verticalidade"] = estilo_verticalidade.round(1)
+
+    # --- Classificação por arquétipo ---
+    # Ingredientes em z-score 0-centrado (não 0-100): comparáveis diretamente
+    # aos z-alvos dos arquétipos em _STYLE_ARCHETYPES.
+    def _z(series: pd.Series, lower_is_better: bool = False) -> pd.Series:
+        return (_zscore_to_100(series, lower_is_better=lower_is_better) - 50.0) / 16.67
+
+    ingredients = pd.DataFrame({
+        "posse": _z(posse_media),
+        "passes": _z(passes_pj),
+        "precisao": _z(precisao),
+        "dribles": _z(_per_game("dribbles_won")),
+        "key_passes": _z(_per_game("key_passes")),
+        "chutes": _z(_per_game("chutes")),
+        "gols": _z(_per_game("gols_pro") if "gols_pro" in scores.columns else _per_game("goals_for")),
+        "no_alvo": _z(_per_game("chutes_no_alvo")),
+        "verticalidade": (estilo_verticalidade - 50.0) / 16.67,
+        "cruzamentos": _z(_per_game("accurate_crosses")),
+        "pressao": (estilo_pressao - 50.0) / 16.67,
+        # defensivo: bloco baixo = muitos clearances + pouca posse, num só índice
+        "defensivo": (_z(_per_game("clearances")) + _z(posse_media, lower_is_better=True)) / 2,
+    }, index=scores.index)
+
+    scores["estilo_jogo"] = ingredients.apply(_classify_style, axis=1)
+    return scores
+
+
+def _classify_style(ing: pd.Series) -> str:
+    """Classifica um time no arquétipo de estilo mais próximo. Para cada
+    arquétipo, mede a distância média ponderada entre os ingredientes do time
+    e o perfil-alvo; ganha a flag do de MENOR distância. Se nem o melhor
+    arquétipo chega perto (distância acima de _STYLE_MATCH_MAX_DISTANCE), o
+    time não tem assinatura clara → "Equilibrado"."""
+    best_name, best_dist = None, float("inf")
+    for name, profile in _STYLE_ARCHETYPES.items():
+        total_w = sum(w for _, w in profile.values())
+        if total_w <= 0:
+            continue
+        # distância = média ponderada de |z_time - z_alvo| nos ingredientes que
+        # definem o arquétipo (os demais não contam).
+        dist = sum(
+            abs(float(ing.get(key, 0.0)) - target) * w
+            for key, (target, w) in profile.items()
+        ) / total_w
+        if dist < best_dist:
+            best_name, best_dist = name, dist
+
+    if best_name is None or best_dist > _STYLE_MATCH_MAX_DISTANCE:
+        return "Equilibrado"
+    return best_name
 
 
 def _mode_or_first(values: pd.Series) -> Any:
