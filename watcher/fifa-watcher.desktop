@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Copa 2026 Watcher
+Comment=Acompanha jogos da Copa 2026 e atualiza o ranking
+Exec=/home/davicjr/Documentos/GitHub/fifa_analytics/watcher/run-window.sh
+Icon=/home/davicjr/Documentos/GitHub/fifa_analytics/watcher/icon.png
+Terminal=false
+Categories=Utility;Sports;
+StartupNotify=true
+StartupWMClass=fifa_progress.py

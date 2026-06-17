@@ -1,0 +1,17 @@
+[Unit]
+Description=Fifa Copa 2026 Watcher — coleta jogos novos e atualiza o ranking
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/davicjr/Documentos/GitHub/fifa_analytics/.venv/bin/python /home/davicjr/Documentos/GitHub/fifa_analytics/watcher/watch-fifa.py
+WorkingDirectory=/home/davicjr/Documentos/GitHub/fifa_analytics
+Environment=FIFA_POLL_SECS=600
+Environment=FIFA_IDLE_EXIT_SECS=0
+Restart=on-failure
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

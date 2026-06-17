@@ -35,3 +35,6 @@ reports/rankings/**
 manifests/*.parquet
 manifests/*.yaml
 !manifests/.gitkeep
+
+# Watcher: estado de runtime da janela (posição/tamanho)
+watcher/.window-geometry.json

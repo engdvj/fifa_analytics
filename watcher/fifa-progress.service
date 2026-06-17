@@ -1,0 +1,15 @@
+[Unit]
+Description=Fifa Copa 2026 Progress UI — janela flutuante do watcher
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/home/davicjr/Documentos/GitHub/fifa_analytics/.venv/bin/python /home/davicjr/Documentos/GitHub/fifa_analytics/watcher/fifa_progress.py --windows
+WorkingDirectory=/home/davicjr/Documentos/GitHub/fifa_analytics
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target
