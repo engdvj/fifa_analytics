@@ -147,6 +147,196 @@ all_teams_json = json.dumps(
 )
 team_flags_json = json.dumps(FLAGS, ensure_ascii=False)
 
+
+# ── Detalhes por seleção (aba "Seleções" + modal) ──────────────────────────────
+# Monta, para cada seleção que já entrou no ranking, um bloco com: jogos
+# disputados, escalações por jogo (formação + onze inicial + reservas), elenco
+# agregado (stats somadas) e o resumo de scores do snapshot mais recente.
+
+def _read_optional(path: Path) -> pd.DataFrame:
+    return pd.read_parquet(path) if path.exists() else pd.DataFrame()
+
+
+_lineups = _read_optional(Path("data/gold/lineups/canonical_lineups.parquet"))
+_pstats = _read_optional(Path("data/gold/fact_player_match_stats/canonical_player_stats.parquet"))
+
+# Confederação de cada seleção da Copa 2026 (não existe nos dados — mapa fixo).
+CONFEDERATION = {
+    # UEFA
+    "Alemanha": "UEFA", "Áustria": "UEFA", "Bélgica": "UEFA", "Bósnia e Herzegovina": "UEFA",
+    "Croácia": "UEFA", "Escócia": "UEFA", "Espanha": "UEFA", "França": "UEFA",
+    "Inglaterra": "UEFA", "Noruega": "UEFA", "Países Baixos": "UEFA", "Portugal": "UEFA",
+    "Suécia": "UEFA", "Suíça": "UEFA", "Tchéquia": "UEFA", "Turquia": "UEFA",
+    # CONMEBOL
+    "Argentina": "CONMEBOL", "Brasil": "CONMEBOL", "Colômbia": "CONMEBOL",
+    "Equador": "CONMEBOL", "Paraguai": "CONMEBOL", "Uruguai": "CONMEBOL",
+    # CAF
+    "Argélia": "CAF", "Cabo Verde": "CAF", "Costa do Marfim": "CAF", "Egito": "CAF",
+    "Gana": "CAF", "Marrocos": "CAF", "RD Congo": "CAF", "Senegal": "CAF",
+    "Tunísia": "CAF", "África do Sul": "CAF",
+    # AFC
+    "Arábia Saudita": "AFC", "Austrália": "AFC", "Catar": "AFC", "Coreia do Sul": "AFC",
+    "Irã": "AFC", "Iraque": "AFC", "Japão": "AFC", "Jordânia": "AFC", "Uzbequistão": "AFC",
+    # CONCACAF
+    "Canadá": "CONCACAF", "Curaçao": "CONCACAF", "Estados Unidos": "CONCACAF",
+    "Haiti": "CONCACAF", "México": "CONCACAF", "Panamá": "CONCACAF",
+    # OFC
+    "Nova Zelândia": "OFC",
+}
+
+# Grupo (A–L) de cada seleção, derivado dos jogos da fase de grupos.
+_grupos_fg = matches_df[matches_df["group"].isin(list("ABCDEFGHIJKL"))]
+TEAM_GROUP = {}
+for _, _r in _grupos_fg.iterrows():
+    for _t in (_r.get("home_team"), _r.get("away_team")):
+        if _t and not pd.isna(_t):
+            TEAM_GROUP[_t] = _r["group"]
+
+# Stage/round legíveis reaproveitando os rótulos definidos mais abaixo seria
+# circular (ainda não existem aqui); usamos um mapa local enxuto.
+_STAGE_LABEL = {
+    "fase_de_grupos": "Fase de Grupos", "r32": "Oitavas", "r16": "Quartas",
+    "qf": "Semifinais", "sf": "Semifinais", "third": "Disputa 3º Lugar", "final": "Final",
+}
+
+# Snapshot mais recente por time (último jogo processado) — para o resumo de scores
+_latest_n = max(jogos) if jogos else None
+_latest_snap = tl[tl["snapshot_jogo"] == _latest_n] if _latest_n else pd.DataFrame()
+_latest_by_team = _latest_snap.set_index("team") if not _latest_snap.empty else pd.DataFrame()
+
+_SCORE_KEYS = [
+    ("score_geral", "Geral"), ("score_resultado", "Resultado"), ("score_ataque", "Ataque"),
+    ("score_defesa", "Defesa"), ("score_eficiencia", "Eficiência"), ("score_controle", "Controle"),
+    ("score_forca_relativa", "Força Relativa"), ("score_disciplina", "Disciplina"),
+]
+
+
+def _num(v, nd=0):
+    try:
+        if v is None or pd.isna(v):
+            return None
+        return round(float(v), nd) if nd else int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+_finalizados = matches_df[matches_df["status"] == "finalizado"]
+# Todas as seleções da Copa (não só as que já jogaram) — para a grade da aba.
+_all_cup_teams = sorted(
+    {t for t in matches_df["home_team"].dropna()} | {t for t in matches_df["away_team"].dropna()},
+    key=_sort_key_ptbr,
+)
+teams_detail: dict[str, dict] = {}
+for _team in _all_cup_teams:
+    mine = _finalizados[
+        (_finalizados["home_team"] == _team) | (_finalizados["away_team"] == _team)
+    ].sort_values(["temporal_order", "date", "kickoff_time"])
+
+    # — jogos + escalações
+    jogos_list = []
+    for _, m in mine.iterrows():
+        mid = m["match_id"]
+        is_home = m["home_team"] == _team
+        opp = m["away_team"] if is_home else m["home_team"]
+        gf = m["home_score"] if is_home else m["away_score"]
+        ga = m["away_score"] if is_home else m["home_score"]
+        gf_i, ga_i = _num(gf), _num(ga)
+        if gf_i is None or ga_i is None:
+            res = "—"
+        elif gf_i > ga_i:
+            res = "V"
+        elif gf_i < ga_i:
+            res = "D"
+        else:
+            res = "E"
+
+        lu = _lineups[(_lineups["match_id"] == mid) & (_lineups["team"] == _team)]
+        formation = None
+        starters, subs = [], []
+        if not lu.empty:
+            fvals = lu["formation"].dropna().unique()
+            formation = str(fvals[0]) if len(fvals) else None
+            for _, p in lu.sort_values("shirt_number", na_position="last").iterrows():
+                item = {
+                    "name": p.get("player_name"),
+                    "num": _num(p.get("shirt_number")),
+                    "pos": p.get("position") if not pd.isna(p.get("position")) else None,
+                }
+                if bool(p.get("is_starter")):
+                    starters.append(item)
+                else:
+                    subs.append(item)
+
+        jogos_list.append({
+            "match_id": mid,
+            "opp": opp, "opp_flag": FLAGS.get(opp, "🏳️"),
+            "home": bool(is_home),
+            "gf": gf_i, "ga": ga_i, "res": res,
+            "date": str(m.get("date", ""))[:10],
+            "stage": _STAGE_LABEL.get(m.get("stage"), m.get("stage") or ""),
+            "formation": formation,
+            "starters": starters, "subs": subs,
+        })
+
+    # — elenco agregado (stats somadas em todos os jogos)
+    ps = _pstats[_pstats["team"] == _team]
+    players = []
+    if not ps.empty:
+        agg = ps.groupby("player_name", dropna=True).agg(
+            jogos=("appearances", "sum"), gols=("goals", "sum"), assist=("assists", "sum"),
+            chutes=("shots", "sum"), no_alvo=("shots_on_target", "sum"),
+            amarelos=("yellow_cards", "sum"), vermelhos=("red_cards", "sum"),
+            defesas=("saves", "sum"),
+        ).reset_index()
+        # ordena: gols, assistências, jogos
+        agg = agg.sort_values(["gols", "assist", "jogos"], ascending=False)
+        for _, p in agg.iterrows():
+            players.append({
+                "name": p["player_name"],
+                "jogos": _num(p["jogos"]), "gols": _num(p["gols"]), "assist": _num(p["assist"]),
+                "chutes": _num(p["chutes"]), "no_alvo": _num(p["no_alvo"]),
+                "amarelos": _num(p["amarelos"]), "vermelhos": _num(p["vermelhos"]),
+                "defesas": _num(p["defesas"]),
+            })
+
+    # — resumo de scores + campanha (snapshot mais recente)
+    scores = {}
+    rank = None
+    campanha = {}
+    if _team in _latest_by_team.index:
+        srow = _latest_by_team.loc[_team]
+        for key, _lbl in _SCORE_KEYS:
+            scores[key] = _num(srow.get(key), 1)
+        rank = _num(srow.get("ranking_snapshot"))
+        campanha = {
+            "gols_pro": _num(srow.get("gols_pro")),
+            "gols_contra": _num(srow.get("gols_contra")),
+            "saldo_gols": _num(srow.get("saldo_gols")),
+            "pontos": _num(srow.get("points")),
+            "aproveitamento": _num(srow.get("aproveitamento"), 2),
+            "elo_rating": _num(srow.get("elo_rating")),
+        }
+
+    # — fase atual (do último jogo) e flag de eliminada
+    stage_now = jogos_list[-1]["stage"] if jogos_list else None
+
+    teams_detail[_team] = {
+        "team": _team,
+        "flag": FLAGS.get(_team, "🏳️"),
+        "rank": rank,
+        "n_jogos": len(jogos_list),
+        "group": TEAM_GROUP.get(_team),
+        "confed": CONFEDERATION.get(_team),
+        "stage_now": stage_now,
+        "scores": scores,
+        "campanha": campanha,
+        "score_labels": {k: v for k, v in _SCORE_KEYS},
+        "jogos": jogos_list,
+        "players": players,
+    }
+
+teams_detail_json = json.dumps(teams_detail, ensure_ascii=False)
+
 # Metadados de fase por snapshot — para colorir e agrupar os dots
 matches = matches_df
 match_order = json.loads(Path("data/gold/analytics/snapshots/match_order.json").read_text())
@@ -1038,12 +1228,168 @@ input[type=range] {{
   color: #ef4444;
   font-size: 0.68rem;
 }}
+
+/* ── TABS no header ── */
+.header-left {{ display: flex; align-items: center; gap: 16px; min-width: 0; }}
+.tabs {{ display: flex; gap: 2px; }}
+.tab {{
+  background: transparent; border: none; cursor: pointer;
+  color: #8b949e; font-size: 0.8rem; font-weight: 600;
+  padding: 4px 12px; border-radius: 6px; white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}}
+.tab:hover {{ background: #161b22; color: #c9d1d9; }}
+.tab.active {{ background: #1f6feb22; color: #58a6ff; }}
+
+/* ── VIEW Seleções ── */
+#viewTeams {{ flex: 1; display: flex; flex-direction: column; overflow: hidden; }}
+.teams-toolbar {{
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 12px 20px; border-bottom: 1px solid #21262d; flex-shrink: 0;
+}}
+.teams-search {{
+  background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+  color: #e6edf3; padding: 6px 12px; font-size: 0.82rem; width: 220px;
+}}
+.teams-search:focus {{ outline: none; border-color: #1f6feb; }}
+.tb-field {{ display: flex; align-items: center; gap: 6px; font-size: 0.72rem; color: #6b7280; white-space: nowrap; }}
+.tb-field select {{
+  background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+  color: #e6edf3; padding: 5px 8px; font-size: 0.78rem;
+}}
+.tb-field select:focus {{ outline: none; border-color: #1f6feb; }}
+.tb-dir {{ padding: 5px 9px; font-size: 0.85rem; }}
+.tb-check {{ display: flex; align-items: center; gap: 5px; font-size: 0.74rem; color: #8b949e; cursor: pointer; }}
+.tb-check input {{ accent-color: #1f6feb; cursor: pointer; }}
+.teams-count {{ color: #6b7280; font-size: 0.74rem; }}
+.teams-grid {{
+  flex: 1; overflow-y: auto; padding: 18px 20px;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px; align-content: start;
+}}
+.team-card {{
+  background: #0d1117; border: 1px solid #21262d; border-radius: 14px;
+  padding: 18px 20px; cursor: pointer;
+  transition: border-color 0.15s, transform 0.1s, background 0.15s, box-shadow 0.15s;
+}}
+.team-card:hover {{
+  border-color: #1f6feb; background: #11161f; transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(31,111,235,0.12);
+}}
+.tc-head {{ display: flex; align-items: center; gap: 14px; }}
+.team-card .tc-flag {{ font-size: 2.9rem; line-height: 1; flex-shrink: 0; }}
+.team-card .tc-info {{ min-width: 0; flex: 1; }}
+.team-card .tc-name {{ font-weight: 800; font-size: 1.12rem; color: #e6edf3; line-height: 1.15; }}
+.team-card .tc-sub {{ font-size: 0.74rem; color: #8b949e; margin-top: 3px; }}
+.team-card .tc-rank {{
+  font-size: 1.15rem; font-weight: 900; color: #58a6ff;
+  background: #1f6feb18; border-radius: 8px; padding: 6px 11px; flex-shrink: 0;
+}}
+/* mini-stats no card */
+.tc-stats {{
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+  margin-top: 14px; padding-top: 14px; border-top: 1px solid #161b22;
+}}
+.tc-stat {{ text-align: center; }}
+.tc-stat .v {{ font-size: 1.05rem; font-weight: 800; color: #e6edf3; font-variant-numeric: tabular-nums; }}
+.tc-stat .v.geral {{ color: #58a6ff; }}
+.tc-stat .l {{ font-size: 0.62rem; color: #6b7280; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.3px; }}
+.tc-badges {{ display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }}
+.tc-badge {{
+  font-size: 0.64rem; font-weight: 600; color: #9ca3af;
+  background: #161b22; border: 1px solid #21262d; border-radius: 5px; padding: 2px 7px;
+}}
+.team-card.tc-empty {{ opacity: 0.45; cursor: default; }}
+.team-card.tc-empty:hover {{ border-color: #21262d; transform: none; background: #0d1117; box-shadow: none; }}
+
+/* ── MODAL ── */
+.modal-overlay {{
+  position: fixed; inset: 0; background: rgba(1,4,9,0.78);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000; padding: 24px; backdrop-filter: blur(2px);
+}}
+.modal {{
+  background: #0d1117; border: 1px solid #30363d; border-radius: 14px;
+  width: min(860px, 100%); max-height: 88vh; display: flex; flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+}}
+.modal-head {{
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px; border-bottom: 1px solid #21262d; flex-shrink: 0;
+}}
+.modal-title {{ display: flex; align-items: center; gap: 12px; font-size: 1.15rem; font-weight: 800; }}
+.modal-flag {{ font-size: 1.9rem; line-height: 1; }}
+.modal-rank {{
+  font-size: 0.78rem; font-weight: 700; color: #58a6ff;
+  background: #1f6feb18; border-radius: 6px; padding: 3px 9px;
+}}
+.modal-close {{
+  background: transparent; border: none; color: #8b949e; cursor: pointer;
+  font-size: 1.1rem; padding: 4px 8px; border-radius: 6px;
+}}
+.modal-close:hover {{ background: #21262d; color: #e6edf3; }}
+.modal-tabs {{
+  display: flex; gap: 2px; padding: 8px 20px 0; border-bottom: 1px solid #21262d; flex-shrink: 0;
+}}
+.modal-tab {{
+  background: transparent; border: none; border-bottom: 2px solid transparent; cursor: pointer;
+  color: #8b949e; font-size: 0.8rem; font-weight: 600; padding: 8px 12px; transition: color 0.15s;
+}}
+.modal-tab:hover {{ color: #c9d1d9; }}
+.modal-tab.active {{ color: #58a6ff; border-bottom-color: #58a6ff; }}
+.modal-body {{ overflow-y: auto; padding: 18px 20px; }}
+
+/* blocos do modal */
+.md-scores {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(130px,1fr)); gap: 10px; }}
+.md-score {{ background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 10px 12px; }}
+.md-score .ms-val {{ font-size: 1.35rem; font-weight: 800; color: #e6edf3; }}
+.md-score .ms-lbl {{ font-size: 0.7rem; color: #8b949e; margin-top: 2px; }}
+.md-score.ms-geral {{ border-color: #1f6feb55; background: #1f6feb12; }}
+
+table.md-table {{ width: 100%; border-collapse: collapse; font-size: 0.8rem; }}
+table.md-table th {{
+  text-align: left; color: #8b949e; font-weight: 600; font-size: 0.7rem;
+  text-transform: uppercase; letter-spacing: 0.4px; padding: 6px 8px; border-bottom: 1px solid #21262d;
+}}
+table.md-table td {{ padding: 7px 8px; border-bottom: 1px solid #161b22; }}
+table.md-table tr:hover td {{ background: #11161f; }}
+table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums; }}
+.md-pname {{ font-weight: 600; color: #e6edf3; }}
+
+.md-game {{
+  background: #161b22; border: 1px solid #21262d; border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 8px;
+}}
+.md-game-top {{ display: flex; align-items: center; gap: 10px; }}
+.md-res {{
+  font-weight: 800; width: 22px; height: 22px; border-radius: 5px;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 0.74rem; flex-shrink: 0;
+}}
+.md-res.V {{ background: #22c55e22; color: #22c55e; }}
+.md-res.E {{ background: #6b728022; color: #9ca3af; }}
+.md-res.D {{ background: #ef444422; color: #ef4444; }}
+.md-game-score {{ font-weight: 800; font-size: 0.95rem; }}
+.md-game-opp {{ flex: 1; }}
+.md-game-meta {{ color: #6b7280; font-size: 0.72rem; }}
+.md-formation {{ font-size: 0.72rem; color: #58a6ff; margin: 8px 0 4px; font-weight: 600; }}
+.md-xi {{ display: flex; flex-wrap: wrap; gap: 5px; }}
+.md-xi .pl {{ background: #0d1117; border: 1px solid #21262d; border-radius: 5px; padding: 2px 7px; font-size: 0.72rem; }}
+.md-xi .pl .pn {{ color: #6b7280; margin-right: 4px; }}
+.md-xi.subs .pl {{ opacity: 0.7; }}
+.md-sub-label {{ font-size: 0.68rem; color: #6b7280; margin: 8px 0 4px; text-transform: uppercase; letter-spacing: 0.4px; }}
+.md-empty {{ color: #6b7280; font-size: 0.82rem; padding: 12px 0; }}
 </style>
 </head>
 <body>
 
 <header>
-  <div class="header-title">Copa 2026 · Ranking Race</div>
+  <div class="header-left">
+    <div class="header-title">Copa 2026</div>
+    <nav class="tabs">
+      <button class="tab active" data-tab="race" onclick="switchTab('race')">Ranking Race</button>
+      <button class="tab" data-tab="teams" onclick="switchTab('teams')">Seleções</button>
+    </nav>
+  </div>
   <div class="weights-row" id="weightsPills"></div>
   <div class="header-player">
     <button class="btn" id="btnPlay" onclick="togglePlay()">▶ Play</button>
@@ -1056,6 +1402,9 @@ input[type=range] {{
     </select>
   </div>
 </header>
+
+<!-- ══ VIEW: Ranking Race (original) ══ -->
+<div id="viewRace">
 
 <div class="controls">
   <span style="font-size:0.72rem;color:#6b7280;white-space:nowrap">Métrica:</span>
@@ -1099,12 +1448,60 @@ input[type=range] {{
   </div>
 </div>
 
+</div><!-- /viewRace -->
+
+<!-- ══ VIEW: Seleções (grade de países) ══ -->
+<div id="viewTeams" style="display:none">
+  <div class="teams-toolbar">
+    <input type="text" id="teamSearch" class="teams-search" placeholder="Buscar seleção…" oninput="renderTeamsGrid()">
+
+    <label class="tb-field">Ordenar
+      <select id="teamSort" onchange="renderTeamsGrid()"></select>
+    </label>
+    <button class="btn tb-dir" id="teamSortDir" onclick="toggleTeamSortDir()" title="Inverter ordem">↓</button>
+
+    <label class="tb-field">Grupo
+      <select id="filterGroup" onchange="renderTeamsGrid()"><option value="">Todos</option></select>
+    </label>
+    <label class="tb-field">Confederação
+      <select id="filterConfed" onchange="renderTeamsGrid()"><option value="">Todas</option></select>
+    </label>
+    <label class="tb-field">Fase
+      <select id="filterStage" onchange="renderTeamsGrid()"><option value="">Todas</option></select>
+    </label>
+    <label class="tb-check"><input type="checkbox" id="filterPlayed" onchange="renderTeamsGrid()"> Só com jogos</label>
+
+    <div style="flex:1"></div>
+    <button class="btn" onclick="resetTeamFilters()" title="Limpar filtros">✕ Limpar</button>
+    <span class="teams-count" id="teamsCount"></span>
+  </div>
+  <div class="teams-grid" id="teamsGrid"></div>
+</div>
+
+<!-- ══ MODAL: detalhe da seleção ══ -->
+<div id="teamModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeTeamModal()">
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <div class="modal-title">
+        <span class="modal-flag" id="modalFlag"></span>
+        <span id="modalTeam">—</span>
+        <span class="modal-rank" id="modalRank"></span>
+      </div>
+      <button class="modal-close" onclick="closeTeamModal()" title="Fechar (Esc)">✕</button>
+    </div>
+    <nav class="modal-tabs" id="modalTabs"></nav>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
 <!-- Cards flutuantes gerados dinamicamente pelo JS -->
 
 <script>
 const DATA = {data_json};
 const ALL_TEAMS = {all_teams_json};
 const TEAM_FLAGS = {team_flags_json};
+const TEAMS_DETAIL = {teams_detail_json};
+const TEAMS_GRID = Object.keys(TEAMS_DETAIL);
 const METRIC_GROUPS = {metric_groups_json};
 const LOWER_IS_BETTER = new Set({lower_is_better_json});
 
@@ -1896,10 +2293,318 @@ document.getElementById('barsContainer').addEventListener('click', e => {{
 }});
 
 document.addEventListener('keydown', e => {{
+  // Esc fecha o modal de seleção, em qualquer aba
+  if (e.key === 'Escape' && document.getElementById('teamModal').style.display !== 'none') {{
+    closeTeamModal(); return;
+  }}
+  // controles da race só valem na aba race, com modal fechado e fora de inputs
+  if (activeTab !== 'race') return;
+  if (document.getElementById('teamModal').style.display !== 'none') return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (e.key === ' ') {{ e.preventDefault(); togglePlay(); }}
   if (e.key === 'ArrowRight' && currentJogo < N) goToJogo(currentJogo + 1);
   if (e.key === 'ArrowLeft' && currentJogo > 1) goToJogo(currentJogo - 1);
 }});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Abas (Ranking Race / Seleções) + grade de países + modal de detalhe
+// ══════════════════════════════════════════════════════════════════════════
+let activeTab = 'race';
+
+function switchTab(tab) {{
+  activeTab = tab;
+  document.querySelectorAll('.tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.tab === tab));
+  document.getElementById('viewRace').style.display = tab === 'race' ? '' : 'none';
+  document.getElementById('viewTeams').style.display = tab === 'teams' ? 'flex' : 'none';
+  // o player só faz sentido na race
+  document.querySelector('.header-player').style.visibility = tab === 'race' ? 'visible' : 'hidden';
+  if (tab === 'teams') {{
+    if (playing) togglePlay();
+    if (!_teamsInit) {{ initTeamsControls(); _teamsInit = true; }}
+    renderTeamsGrid();
+  }}
+}}
+let _teamsInit = false;
+
+function _norm(s) {{
+  return (s || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
+}}
+
+const STAGE_LABELS_TEAMS = {{
+  'Fase de Grupos': 'Fase de Grupos', 'Oitavas': 'Oitavas', 'Quartas': 'Quartas',
+  'Semifinais': 'Semifinais', 'Disputa 3º Lugar': 'Disputa 3º Lugar', 'Final': 'Final',
+}};
+
+// opções de ordenação: chave especial + acessor do valor por seleção
+const TEAM_SORTS = [
+  {{ k: 'rank',       label: 'Ranking (#)',     get: d => d.rank, asc: true }},
+  {{ k: 'alpha',      label: 'Alfabética (A–Z)', get: d => null,  asc: true }},
+  {{ k: 'score_geral',        label: 'Score Geral',    get: d => (d.scores||{{}}).score_geral }},
+  {{ k: 'score_resultado',    label: 'Score Resultado',get: d => (d.scores||{{}}).score_resultado }},
+  {{ k: 'score_ataque',       label: 'Score Ataque',   get: d => (d.scores||{{}}).score_ataque }},
+  {{ k: 'score_defesa',       label: 'Score Defesa',   get: d => (d.scores||{{}}).score_defesa }},
+  {{ k: 'score_eficiencia',   label: 'Score Eficiência',get: d => (d.scores||{{}}).score_eficiencia }},
+  {{ k: 'score_controle',     label: 'Score Controle', get: d => (d.scores||{{}}).score_controle }},
+  {{ k: 'score_forca_relativa',label:'Score Força Rel.',get: d => (d.scores||{{}}).score_forca_relativa }},
+  {{ k: 'score_disciplina',   label: 'Score Disciplina',get: d => (d.scores||{{}}).score_disciplina }},
+  {{ k: 'pontos',     label: 'Pontos',          get: d => (d.campanha||{{}}).pontos }},
+  {{ k: 'gols_pro',   label: 'Gols Marcados',   get: d => (d.campanha||{{}}).gols_pro }},
+  {{ k: 'saldo_gols', label: 'Saldo de Gols',   get: d => (d.campanha||{{}}).saldo_gols }},
+  {{ k: 'elo_rating', label: 'Rating Elo',      get: d => (d.campanha||{{}}).elo_rating }},
+  {{ k: 'n_jogos',    label: 'Jogos disputados',get: d => d.n_jogos }},
+];
+
+let teamSortDir = null;  // null = usa o default da opção; senão 'asc'/'desc'
+
+function initTeamsControls() {{
+  // ordenação
+  const sortSel = document.getElementById('teamSort');
+  sortSel.innerHTML = TEAM_SORTS.map(s => `<option value="${{s.k}}">${{s.label}}</option>`).join('');
+  // grupos
+  const groups = [...new Set(Object.values(TEAMS_DETAIL).map(d => d.group).filter(Boolean))].sort();
+  document.getElementById('filterGroup').innerHTML =
+    '<option value="">Todos</option>' + groups.map(g => `<option value="${{g}}">Grupo ${{g}}</option>`).join('');
+  // confederações
+  const confeds = [...new Set(Object.values(TEAMS_DETAIL).map(d => d.confed).filter(Boolean))].sort();
+  document.getElementById('filterConfed').innerHTML =
+    '<option value="">Todas</option>' + confeds.map(c => `<option value="${{c}}">${{c}}</option>`).join('');
+  // fases
+  const stages = [...new Set(Object.values(TEAMS_DETAIL).map(d => d.stage_now).filter(Boolean))];
+  document.getElementById('filterStage').innerHTML =
+    '<option value="">Todas</option>' + stages.map(s => `<option value="${{s}}">${{s}}</option>`).join('');
+}}
+
+function toggleTeamSortDir() {{
+  const cur = _effectiveSortDir();
+  teamSortDir = cur === 'asc' ? 'desc' : 'asc';
+  renderTeamsGrid();
+}}
+
+function _effectiveSortDir() {{
+  if (teamSortDir) return teamSortDir;
+  const s = TEAM_SORTS.find(x => x.k === document.getElementById('teamSort').value) || TEAM_SORTS[0];
+  return s.asc ? 'asc' : 'desc';  // default: ranking/alpha ascendente, scores descendente
+}}
+
+function resetTeamFilters() {{
+  document.getElementById('teamSearch').value = '';
+  document.getElementById('teamSort').value = 'rank';
+  document.getElementById('filterGroup').value = '';
+  document.getElementById('filterConfed').value = '';
+  document.getElementById('filterStage').value = '';
+  document.getElementById('filterPlayed').checked = false;
+  teamSortDir = null;
+  renderTeamsGrid();
+}}
+
+function renderTeamsGrid() {{
+  const grid = document.getElementById('teamsGrid');
+  const q = _norm(document.getElementById('teamSearch').value.trim());
+  const sortKey = document.getElementById('teamSort').value || 'rank';
+  const fGroup = document.getElementById('filterGroup').value;
+  const fConfed = document.getElementById('filterConfed').value;
+  const fStage = document.getElementById('filterStage').value;
+  const fPlayed = document.getElementById('filterPlayed').checked;
+  const sortDef = TEAM_SORTS.find(s => s.k === sortKey) || TEAM_SORTS[0];
+  const dir = _effectiveSortDir();
+  document.getElementById('teamSortDir').textContent = dir === 'asc' ? '↑' : '↓';
+
+  // filtra — usa TODAS as seleções da Copa (inclui as que ainda não jogaram)
+  let teams = TEAMS_GRID.filter(t => {{
+    const d = TEAMS_DETAIL[t] || {{}};
+    if (q && !_norm(t).includes(q)) return false;
+    if (fGroup && d.group !== fGroup) return false;
+    if (fConfed && d.confed !== fConfed) return false;
+    if (fStage && d.stage_now !== fStage) return false;
+    if (fPlayed && (d.n_jogos || 0) === 0) return false;
+    return true;
+  }});
+
+  // ordena
+  teams.sort((a, b) => {{
+    const da = TEAMS_DETAIL[a] || {{}}, db = TEAMS_DETAIL[b] || {{}};
+    if (sortKey === 'alpha') {{
+      const c = a.localeCompare(b, 'pt-BR');
+      return dir === 'asc' ? c : -c;
+    }}
+    let va = sortDef.get(da), vb = sortDef.get(db);
+    // valores ausentes sempre no fim, independentemente da direção
+    const na = (va == null), nb = (vb == null);
+    if (na && nb) return a.localeCompare(b, 'pt-BR');
+    if (na) return 1;
+    if (nb) return -1;
+    if (va === vb) return a.localeCompare(b, 'pt-BR');
+    return dir === 'asc' ? va - vb : vb - va;
+  }});
+
+  document.getElementById('teamsCount').textContent =
+    teams.length + ' de ' + TEAMS_GRID.length + ' seleções';
+
+  grid.innerHTML = teams.map(t => {{
+    const d = TEAMS_DETAIL[t] || {{}};
+    const flag = d.flag || TEAM_FLAGS[t] || '🏳️';
+    const nj = d.n_jogos || 0;
+    const empty = nj === 0;
+    const rankBadge = d.rank != null ? `<span class="tc-rank">#${{d.rank}}</span>` : '';
+    const sub = empty ? 'sem jogos ainda · ' + (d.group ? 'Grupo ' + d.group : '')
+      : nj + (nj === 1 ? ' jogo' : ' jogos') + ' · ' + (d.players ? d.players.length : 0) + ' jogadores';
+
+    const sc = d.scores || {{}}, cp = d.campanha || {{}};
+    const fmt = v => v == null ? '—' : v;
+    const stats = empty ? '' : `<div class="tc-stats">
+      <div class="tc-stat"><div class="v geral">${{sc.score_geral != null ? sc.score_geral.toFixed(1) : '—'}}</div><div class="l">Score</div></div>
+      <div class="tc-stat"><div class="v">${{fmt(cp.pontos)}}</div><div class="l">Pts</div></div>
+      <div class="tc-stat"><div class="v">${{fmt(cp.gols_pro)}}</div><div class="l">Gols</div></div>
+      <div class="tc-stat"><div class="v">${{cp.saldo_gols != null ? (cp.saldo_gols > 0 ? '+' + cp.saldo_gols : cp.saldo_gols) : '—'}}</div><div class="l">Saldo</div></div>
+    </div>`;
+
+    const badges = [
+      d.group ? `<span class="tc-badge">Grupo ${{d.group}}</span>` : '',
+      d.confed ? `<span class="tc-badge">${{d.confed}}</span>` : '',
+      d.stage_now ? `<span class="tc-badge">${{d.stage_now}}</span>` : '',
+    ].join('');
+
+    return `<div class="team-card${{empty ? ' tc-empty' : ''}}" ${{empty ? '' : `onclick="openTeamModal('${{t.replace(/'/g, "\\\\'")}}')"`}}>
+      <div class="tc-head">
+        <span class="tc-flag">${{flag}}</span>
+        <div class="tc-info">
+          <div class="tc-name">${{t}}</div>
+          <div class="tc-sub">${{sub}}</div>
+        </div>
+        ${{rankBadge}}
+      </div>
+      ${{badges ? `<div class="tc-badges">${{badges}}</div>` : ''}}
+      ${{stats}}
+    </div>`;
+  }}).join('');
+}}
+
+let modalTeam = null;
+let modalTab = 'scores';
+
+function openTeamModal(team) {{
+  const d = TEAMS_DETAIL[team];
+  if (!d) return;
+  modalTeam = team;
+  modalTab = 'scores';
+  document.getElementById('modalFlag').textContent = d.flag || '🏳️';
+  document.getElementById('modalTeam').textContent = team;
+  document.getElementById('modalRank').textContent = d.rank != null ? ('#' + d.rank + ' no ranking') : '';
+  const tabs = [
+    ['scores', 'Resumo'],
+    ['jogos', 'Jogos (' + (d.jogos ? d.jogos.length : 0) + ')'],
+    ['elenco', 'Elenco (' + (d.players ? d.players.length : 0) + ')'],
+    ['escalacoes', 'Escalações'],
+  ];
+  document.getElementById('modalTabs').innerHTML = tabs.map(([k, l]) =>
+    `<button class="modal-tab${{k === 'scores' ? ' active' : ''}}" data-mt="${{k}}" onclick="switchModalTab('${{k}}')">${{l}}</button>`
+  ).join('');
+  renderModalBody();
+  document.getElementById('teamModal').style.display = 'flex';
+}}
+
+function closeTeamModal() {{
+  document.getElementById('teamModal').style.display = 'none';
+  modalTeam = null;
+}}
+
+function switchModalTab(t) {{
+  modalTab = t;
+  document.querySelectorAll('.modal-tab').forEach(b =>
+    b.classList.toggle('active', b.dataset.mt === t));
+  renderModalBody();
+}}
+
+function _scoreColor(v) {{
+  if (v == null) return '#8b949e';
+  const t = Math.max(0, Math.min(1, v / 100));
+  const r = Math.round(0xea + (0x22 - 0xea) * t);
+  const g = Math.round(0x55 + (0xc5 - 0x55) * t);
+  const b = Math.round(0x44 + (0x5e - 0x44) * t);
+  return `rgb(${{r}},${{g}},${{b}})`;
+}}
+
+function renderModalBody() {{
+  const d = TEAMS_DETAIL[modalTeam];
+  const body = document.getElementById('modalBody');
+  if (!d) {{ body.innerHTML = ''; return; }}
+
+  if (modalTab === 'scores') {{
+    const labels = d.score_labels || {{}};
+    const sc = d.scores || {{}};
+    const keys = Object.keys(labels);
+    if (!keys.length) {{ body.innerHTML = '<div class="md-empty">Sem scores calculados ainda.</div>'; return; }}
+    body.innerHTML = '<div class="md-scores">' + keys.map(k => {{
+      const v = sc[k];
+      const cls = k === 'score_geral' ? ' ms-geral' : '';
+      return `<div class="md-score${{cls}}">
+        <div class="ms-val" style="color:${{_scoreColor(v)}}">${{v != null ? v.toFixed(1) : '—'}}</div>
+        <div class="ms-lbl">${{labels[k]}}</div>
+      </div>`;
+    }}).join('') + '</div>';
+    return;
+  }}
+
+  if (modalTab === 'jogos') {{
+    if (!d.jogos || !d.jogos.length) {{ body.innerHTML = '<div class="md-empty">Nenhum jogo disputado ainda.</div>'; return; }}
+    body.innerHTML = d.jogos.map(g => {{
+      const local = g.home ? 'casa' : 'fora';
+      const placar = (g.gf != null && g.ga != null) ? `${{g.gf}} – ${{g.ga}}` : '—';
+      return `<div class="md-game">
+        <div class="md-game-top">
+          <span class="md-res ${{g.res}}">${{g.res}}</span>
+          <span class="md-game-score">${{placar}}</span>
+          <span class="md-game-opp">vs ${{g.opp_flag}} <b>${{g.opp}}</b> <span class="md-game-meta">(${{local}})</span></span>
+          <span class="md-game-meta">${{g.stage}} · ${{g.date}}</span>
+        </div>
+      </div>`;
+    }}).join('');
+    return;
+  }}
+
+  if (modalTab === 'elenco') {{
+    if (!d.players || !d.players.length) {{ body.innerHTML = '<div class="md-empty">Sem dados de jogadores.</div>'; return; }}
+    body.innerHTML = `<table class="md-table">
+      <thead><tr>
+        <th>Jogador</th><th class="num">J</th><th class="num">G</th><th class="num">A</th>
+        <th class="num">Chutes</th><th class="num">No alvo</th>
+        <th class="num">🟨</th><th class="num">🟥</th><th class="num">Defesas</th>
+      </tr></thead><tbody>` + d.players.map(p => `<tr>
+        <td class="md-pname">${{p.name}}</td>
+        <td class="num">${{p.jogos ?? '—'}}</td>
+        <td class="num">${{p.gols || 0}}</td>
+        <td class="num">${{p.assist || 0}}</td>
+        <td class="num">${{p.chutes ?? '—'}}</td>
+        <td class="num">${{p.no_alvo ?? '—'}}</td>
+        <td class="num">${{p.amarelos || 0}}</td>
+        <td class="num">${{p.vermelhos || 0}}</td>
+        <td class="num">${{p.defesas || 0}}</td>
+      </tr>`).join('') + '</tbody></table>';
+    return;
+  }}
+
+  if (modalTab === 'escalacoes') {{
+    const withLineup = (d.jogos || []).filter(g => g.starters && g.starters.length);
+    if (!withLineup.length) {{ body.innerHTML = '<div class="md-empty">Sem escalações registradas.</div>'; return; }}
+    body.innerHTML = withLineup.map(g => {{
+      const xi = g.starters.map(p =>
+        `<span class="pl"><span class="pn">${{p.num ?? ''}}</span>${{p.name}}</span>`).join('');
+      const subs = (g.subs || []).map(p =>
+        `<span class="pl"><span class="pn">${{p.num ?? ''}}</span>${{p.name}}</span>`).join('');
+      return `<div class="md-game">
+        <div class="md-game-top">
+          <span class="md-game-opp">vs ${{g.opp_flag}} <b>${{g.opp}}</b></span>
+          <span class="md-game-meta">${{g.stage}} · ${{g.date}}</span>
+        </div>
+        <div class="md-formation">Formação: ${{g.formation || '—'}}</div>
+        <div class="md-xi">${{xi}}</div>
+        ${{subs ? `<div class="md-sub-label">Reservas</div><div class="md-xi subs">${{subs}}</div>` : ''}}
+      </div>`;
+    }}).join('');
+    return;
+  }}
+}}
 
 goToJogo(jogos[jogos.length - 1]);
 </script>
