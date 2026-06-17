@@ -1,6 +1,6 @@
 ---
 name: atualizar-jogo
-description: Roda o pipeline de dados da Copa 2026 para um ou mais jogos e reescreve a narrativa ("A historia do jogo") com texto variado e bem escrito, gerado diretamente por Claude a partir dos dados reais — substitui o texto template fixo do pipeline Python.
+description: Roda o pipeline de dados da Copa 2026 para um ou mais jogos e reescreve a narrativa ("A historia do jogo") como prosa fluida e bem escrita, gerada diretamente por Claude a partir dos dados reais — conta a história do jogo sem narrar gol a gol (a linha do tempo cuida disso) e substitui o texto template fixo do pipeline Python.
 ---
 
 # Atualizar jogo
@@ -70,14 +70,15 @@ Ajuste as colunas conforme o que existir (alguns jogos podem não ter `team_stat
 
 ## Passo 4 — Escrever a narrativa
 
-Escreva a seção "A historia do jogo" em prosa real, seguindo estas regras:
+Escreva a seção "A historia do jogo" em prosa real, fluida e bem escrita, seguindo estas regras:
 
-- **Cada jogo precisa ler diferente dos outros.** Não reuse a mesma fórmula de abertura/fechamento em jogos consecutivos. Varie o ângulo: as vezes comece pelo contexto (mando de campo, fase do grupo), as vezes pelo primeiro lance decisivo, as vezes por uma estatística que conta a história (posse, eficiência, um time que sofreu mas venceu).
-- **Use os bullets cronológicos só quando agregarem.** Para jogos com 3+ gols ou viradas, bullets com placar parcial ajudam a acompanhar. Para jogos de 1-2 gols, pode ser só prosa corrida sem precisar de lista.
-- **Cite com precisão.** Minuto exato, nome completo do jogador como aparece nos dados, placar real. Use os wikilinks no formato `[[reports/players/{slug_time}/{slug_jogador}\|Nome]]` e `[[reports/teams/{slug_time}\|Nome do Time]]` (mesmo padrão usado pelo restante dos relatórios — confira em outro arquivo de `reports/final/` já gerado se tiver dúvida do slug exato).
-- **Não repita números já visíveis no nome do arquivo.** O arquivo já se chama `NNN_time1_x_time2.md` e o título com placar foi removido do corpo — não comece a narrativa restatando "Time A 2 x 0 Time B" como primeira frase se isso for óbvio; prefira revelar o resultado como parte do enredo (quem decidiu, quando, como).
-- **Cartões vermelhos e pênaltis entram quando mudam o jogo**, não como nota de rodapé burocrática.
-- **Tamanho:** 1 a 3 parágrafos curtos, ou prosa + bullets cronológicos quando o jogo tiver muitos lances. Não infle com adjetivos vazios ("emocionante", "espetacular") sem um fato que sustente o adjetivo.
+- **Prosa corrida, não cronologia de gols.** Existe uma seção separada de **linha do tempo dos jogos** que já lista cada gol com minuto e placar parcial. A narrativa NÃO deve duplicar isso. Não escreva listas de bullets no estilo "38' — Fulano faz 2 x 1 / 45' — Beltrano faz 3 x 1": isso é exatamente a linha do tempo e fica repetitivo. Escreva texto corrido que conta a *história* do jogo — o enredo, a virada de momentum, quem mandou, o que decidiu — sem narrar gol a gol em ordem.
+- **Conte a história, não o placar minuto a minuto.** Em vez de "abriu aos 6', empatou aos 21', desempatou aos 38'...", capture o arco: como o jogo começou equilibrado e a diferença técnica se impôs; como um time resistiu e ruiu; como uma virada aconteceu. Pode mencionar um momento-chave com o minuto (o gol que decidiu, a expulsão que mudou tudo), mas com parcimônia — um ou dois lances decisivos, não a sequência inteira.
+- **Cada jogo precisa ler diferente dos outros.** Não reuse a mesma fórmula de abertura/fechamento em jogos consecutivos. Varie o ângulo: as vezes comece pelo contexto (mando de campo, fase do grupo), as vezes por uma estatística que conta a história (posse, eficiência, um time que sofreu mas venceu), as vezes pelo personagem central da partida.
+- **Cite com precisão, sem inventar.** Quando citar um jogador, time ou minuto, use o dado real. Nomes completos como aparecem nos dados. Use os wikilinks no formato `[[reports/players/{slug_time}/{slug_jogador}\|Nome]]` e `[[reports/teams/{slug_time}\|Nome do Time]]` (mesmo padrão usado pelo restante dos relatórios — confira em outro arquivo de `reports/final/` já gerado se tiver dúvida do slug exato).
+- **Não repita números já visíveis no nome do arquivo.** O arquivo já se chama `NNN_time1_x_time2.md` e o título com placar foi removido do corpo — não comece a narrativa restatando "Time A 2 x 0 Time B" como primeira frase; prefira revelar o resultado como parte do enredo (quem decidiu, como, o que aquilo significou).
+- **Cartões vermelhos e pênaltis entram quando mudam o jogo**, como parte da história, não como nota de rodapé burocrática nem como item de lista.
+- **Tamanho:** 1 a 3 parágrafos curtos de prosa. Sem listas de bullets de gols. Não infle com adjetivos vazios ("emocionante", "espetacular") sem um fato que sustente o adjetivo.
 
 ## Passo 5 — Escrever o fragmento e remontar o relatório
 
