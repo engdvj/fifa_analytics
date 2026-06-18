@@ -14,7 +14,6 @@ por nome e o jogador aparece duplicado no dashboard. Aqui ficam duas coisas:
 
 from __future__ import annotations
 
-import unicodedata
 from datetime import datetime, timezone
 from functools import lru_cache
 
@@ -23,6 +22,7 @@ import pandas as pd
 from fifa_analytics.paths import CONFIG_DIR, GOLD_DIR
 from fifa_analytics.utils.io import read_yaml, write_dataframe
 from fifa_analytics.utils.logging import get_logger
+from fifa_analytics.utils.text import person_name_words_key
 
 logger = get_logger("name_reconciliation")
 
@@ -35,8 +35,7 @@ MISMATCH_REPORT_PATH = GOLD_DIR / "quality" / "player_name_mismatches.parquet"
 
 def _name_key(value: object) -> str:
     """Chave de comparação: minúsculas, sem acento, hífen→espaço, espaços colapsados."""
-    text = unicodedata.normalize("NFKD", str(value or "")).encode("ASCII", "ignore").decode()
-    return " ".join(text.lower().replace("-", " ").split())
+    return person_name_words_key(value)
 
 
 @lru_cache(maxsize=1)

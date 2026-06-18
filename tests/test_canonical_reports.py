@@ -2,6 +2,8 @@ import pandas as pd
 import pytest
 
 from fifa_analytics.workflows.canonical_reports import (
+    _attach_player_rating,
+    _linked_event_description,
     build_canonical_dataset,
     build_canonical_events,
     build_canonical_index,
@@ -50,6 +52,62 @@ def test_build_canonical_index_merges_same_match_from_multiple_sources():
     assert canonical.iloc[0]["worldcup2026_source_match_id"] == "6"
     assert canonical.iloc[0]["wikipedia_source_match_id"] == "Match 20"
     assert set(source_map["source"]) == {"worldcup2026", "wikipedia"}
+
+
+def test_attach_player_rating_rejects_ambiguous_single_token_matches(tmp_path, monkeypatch):
+    import fifa_analytics.workflows.canonical_reports as cr_module
+
+    rating_dir = tmp_path / "fact_player_match_stats"
+    rating_dir.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {"match_id": "j1", "team": "Mexico", "player_name": "Cesar Montes", "rating": 7.4, "expected_goals": 0.1, "tackles_won": 3},
+            {"match_id": "j1", "team": "Mexico", "player_name": "Luis Chavez", "rating": 6.8, "expected_goals": 0.2, "tackles_won": 1},
+            {"match_id": "j1", "team": "Brasil", "player_name": "Danilo", "rating": 6.8, "expected_goals": 0.0, "tackles_won": 4},
+            {"match_id": "j1", "team": "Inglaterra", "player_name": "Kane", "rating": 8.1, "expected_goals": 1.4, "tackles_won": 0},
+        ]
+    ).to_parquet(rating_dir / "365scores_rating.parquet")
+    monkeypatch.setattr(cr_module, "GOLD_DIR", tmp_path)
+
+    players = pd.DataFrame(
+        [
+            {"match_id": "j1", "team": "Mexico", "player_name": "César Huerta"},
+            {"match_id": "j1", "team": "Mexico", "player_name": "Cesar Montes"},
+            {"match_id": "j1", "team": "Mexico", "player_name": "Luis Romo"},
+            {"match_id": "j1", "team": "Brasil", "player_name": "Danilo"},
+            {"match_id": "j1", "team": "Brasil", "player_name": "Danilo Santos"},
+            {"match_id": "j1", "team": "Inglaterra", "player_name": "Harry Kane"},
+        ]
+    )
+
+    out = _attach_player_rating(players)
+    ratings = dict(zip(out["player_name"], out["rating"]))
+
+    assert pd.isna(ratings["César Huerta"])
+    assert ratings["Cesar Montes"] == 7.4
+    assert pd.isna(ratings["Luis Romo"])
+    assert ratings["Danilo"] == 6.8
+    assert pd.isna(ratings["Danilo Santos"])
+    assert ratings["Harry Kane"] == 8.1
+    kane = out[out["player_name"] == "Harry Kane"].iloc[0]
+    assert kane["expected_goals"] == 1.4
+    assert kane["tackles_won"] == 0
+
+
+def test_own_goal_links_player_to_opponent_team():
+    event = pd.Series(
+        {
+            "event_type": "gol_contra",
+            "team": "Catar",
+            "opponent": "Suíça",
+            "player": "Miro Muheim",
+        }
+    )
+
+    description = _linked_event_description(event)
+
+    assert "reports/players/suica/miro_muheim" in description
+    assert "reports/teams/catar" in description
 
 
 def test_build_canonical_index_keeps_source_number_and_adds_temporal_order():
@@ -405,6 +463,36 @@ def test_build_canonical_dataset_remaps_match_id(tmp_path, monkeypatch):
     assert result.iloc[0]["match_id"] == "copa_2026_jogo_005"
     assert result.iloc[0]["team"] == "Brasil"
     assert result.iloc[0]["dataset_source"] == "espn"
+
+
+def test_build_canonical_dataset_deduplicates_player_entities_by_source_priority(tmp_path, monkeypatch):
+    import fifa_analytics.workflows.canonical_reports as cr_module
+
+    gold_dir = tmp_path / "gold"
+    subdir = gold_dir / "fact_player_match_stats"
+    subdir.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {"match_id": "espn_1", "team": "Brasil", "player_name": "Vinícius Júnior", "goals": 1},
+        ]
+    ).to_parquet(subdir / "espn_player_stats.parquet", index=False)
+    pd.DataFrame(
+        [
+            {"match_id": "wiki_1", "team": "Brasil", "player_name": "Vinicius Junior", "goals": 0},
+        ]
+    ).to_parquet(subdir / "wikipedia_player_stats.parquet", index=False)
+
+    monkeypatch.setattr(cr_module, "GOLD_DIR", gold_dir)
+
+    source_map = _make_source_map(
+        ("copa_2026_jogo_005", "espn", "espn_1"),
+        ("copa_2026_jogo_005", "wikipedia", "wiki_1"),
+    )
+    result = build_canonical_dataset(source_map, "fact_player_match_stats", "player_stats")
+
+    assert len(result) == 1
+    assert result.iloc[0]["dataset_source"] == "espn"
+    assert result.iloc[0]["goals"] == 1
 
 
 def test_build_canonical_dataset_empty_when_no_files(tmp_path, monkeypatch):

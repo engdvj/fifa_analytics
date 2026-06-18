@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from collections import Counter
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ from typing import Any
 import pandas as pd
 import yaml
 
-from fifa_analytics.utils.text import position_label, position_order, slugify
+from fifa_analytics.utils.text import clean_person_name, person_name_key, position_label, position_order, slugify
 from fifa_analytics.paths import FINAL_REPORTS_DIR, GOLD_DIR, MANIFESTS_DIR, SILVER_DIR
 from fifa_analytics.reporting.build_report import build_match_report
 from fifa_analytics.reporting.fragments import render_template, write_fragment
@@ -21,6 +22,12 @@ from fifa_analytics.utils.time import utc_now_iso
 
 SOURCE_PRIORITY = ["worldcup2026", "espn", "wikipedia"]
 EVENT_SOURCE_PRIORITY = ["espn", "worldcup2026", "wikipedia"]
+_CANONICAL_DATASET_DEDUPE_KEYS: dict[tuple[str, str], list[str]] = {
+    ("fact_team_match_stats", "team_stats"): ["match_id", "team"],
+    ("lineups", "lineups"): ["match_id", "team", "player_name"],
+    ("fact_player_match_stats", "player_stats"): ["match_id", "team", "player_name"],
+    ("match_info", "match_info"): ["match_id"],
+}
 
 # Família de evento para fins de deduplicação entre fontes: fontes diferentes
 # classificam o mesmo gol como "gol", "gol_penalti" ou "gol_contra" (ex: ESPN marca
@@ -40,24 +47,109 @@ def _rating_name_tokens(name: str) -> set[str]:
     """Tokens normalizados (>=2 chars) de um nome — casa 365Scores ao canônico
     independente de ordem ('Hwang In-Beom' = 'In-beom Hwang') ou abreviação
     ('Kane' ⊂ 'Harry Kane')."""
-    raw = unicodedata.normalize("NFKD", str(name or "")).encode("ASCII", "ignore").decode()
-    raw = raw.lower().replace("-", " ")
-    return {t for t in raw.split() if len(t) >= 2}
+    return {t for t in _rating_name_key(name).split("_") if len(t) >= 2}
+
+
+def _rating_name_key(name: Any) -> str:
+    return person_name_key(name)
+
+
+_AMBIGUOUS_RATING_TOKENS = {
+    "al",
+    "ali",
+    "cesar",
+    "gabriel",
+    "hwang",
+    "jose",
+    "kim",
+    "lee",
+    "luis",
+    "mohamed",
+    "muhammad",
+    "park",
+}
+
+_PLAYER_365_ENRICHMENT_COLUMNS = [
+    "rating",
+    "minutes",
+    "expected_goals",
+    "expected_assists",
+    "expected_goals_on_target",
+    "big_chances_created",
+    "big_chances_missed",
+    "big_chances_scored",
+    "shots_woodwork",
+    "key_passes",
+    "dribbles_won",
+    "was_dribbled_past",
+    "possession_lost",
+    "fouls",
+    "was_fouled",
+    "tackles_won",
+    "interceptions",
+    "clearances",
+    "ball_recovery",
+    "ground_duels_won",
+    "aerial_duels_won",
+    "shots_blocked",
+    "crosses_completed",
+    "long_passes_completed",
+    "expected_goals_prevented",
+    "expected_goals_on_target_conceded",
+    "punches",
+    "penalties_saved",
+    "high_claims",
+    "played_sweeper",
+    "penalty_won",
+    "penalty_committed",
+    "penalties_missed",
+    "error_led_to_goal",
+    "goals_conceded_365",
+]
+
+
+def _rating_match_score(
+    player_tokens: set[str],
+    rating_tokens: set[str],
+    canonical_token_counts: Counter[str],
+    rating_token_counts: Counter[str],
+) -> int:
+    if not player_tokens or not rating_tokens:
+        return 0
+    common = player_tokens & rating_tokens
+    if not common:
+        return 0
+    if len(common) >= 2:
+        if common == player_tokens or common == rating_tokens:
+            return 70 + len(common)
+        union = player_tokens | rating_tokens
+        if len(common) / len(union) >= 0.67:
+            return 60 + len(common)
+        return 0
+    token = next(iter(common))
+    if (
+        len(token) >= 4
+        and token not in _AMBIGUOUS_RATING_TOKENS
+        and canonical_token_counts[token] == 1
+        and rating_token_counts[token] == 1
+        and (len(player_tokens) == 1 or len(rating_tokens) == 1)
+    ):
+        return 25
+    return 0
 
 
 def _attach_player_rating(player_stats: pd.DataFrame) -> pd.DataFrame:
-    """Anexa a coluna `rating` (nota de atuação 365Scores) ao canonical_player_stats.
+    """Anexa rating e métricas avançadas 365Scores ao canonical_player_stats.
 
-    O rating já vem casado ao match_id canônico (ver
+    A tabela 365 já vem casada ao match_id canônico (ver
     _map_player_rating_to_canonical no scores365_pipeline). Aqui só falta casar o
-    NOME do jogador ao canônico — feito por sobreposição de tokens DENTRO do mesmo
-    (match_id, team), o que tolera abreviação e ordem invertida. É o ÚNICO ponto
-    onde esse casamento acontece: todos os consumidores leem `rating` do canonical.
+    NOME do jogador ao canônico — feito de forma um-para-um DENTRO do mesmo
+    (match_id, team), rejeitando matches fracos/ambíguos. É o ÚNICO ponto onde
+    esse casamento acontece: todos os consumidores leem as métricas do canonical.
     """
     if player_stats is None or player_stats.empty:
         return player_stats
     out = player_stats.copy()
-    out["rating"] = pd.NA
 
     rating_path = GOLD_DIR / "fact_player_match_stats" / "365scores_rating.parquet"
     if not rating_path.exists():
@@ -65,33 +157,113 @@ def _attach_player_rating(player_stats: pd.DataFrame) -> pd.DataFrame:
     rt = read_dataframe(rating_path)
     if rt.empty or "rating" not in rt.columns:
         return out
+    if "goals_conceded" in rt.columns:
+        rt = rt.rename(columns={"goals_conceded": "goals_conceded_365"})
 
-    # index 365 por (match_id, team) → lista de (tokens, rating)
-    by_match_team: dict[tuple[str, str], list[tuple[set[str], float]]] = {}
-    for _, r in rt.iterrows():
+    enrichment_cols = [c for c in _PLAYER_365_ENRICHMENT_COLUMNS if c in rt.columns]
+    for col in enrichment_cols:
+        if col not in out.columns:
+            out[col] = pd.NA
+
+    # index 365 por (match_id, team); o pareamento abaixo é um-para-um e rejeita
+    # matches fracos/ambíguos para não propagar nota de outro jogador.
+    by_match_team: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for rating_idx, r in rt.iterrows():
         key = (str(r["match_id"]), str(r["team"]))
         by_match_team.setdefault(key, []).append(
-            (_rating_name_tokens(r["player_name"]), float(r["rating"]))
+            {
+                "rating_idx": rating_idx,
+                "key": _rating_name_key(r["player_name"]),
+                "tokens": _rating_name_tokens(r["player_name"]),
+                "values": r[enrichment_cols].to_dict(),
+            }
         )
 
-    def _match(row: pd.Series) -> Any:
-        cands = by_match_team.get((str(row.get("match_id")), str(row.get("team"))))
-        if not cands:
-            return pd.NA
-        ptoks = _rating_name_tokens(row.get("player_name"))
-        if not ptoks:
-            return pd.NA
-        best, best_score = pd.NA, 0
-        for toks, rating in cands:
-            common = ptoks & toks
-            if not common:
-                continue
-            score = len(common) + (10 if (toks <= ptoks or ptoks <= toks) else 0)
-            if score > best_score:
-                best_score, best = score, round(rating, 2)
-        return best
+    def _assign(player_idx: Any, rating: dict[str, Any]) -> None:
+        for col, value in rating["values"].items():
+            if pd.notna(value):
+                numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+                out.loc[player_idx, col] = round(float(numeric), 4) if pd.notna(numeric) else value
 
-    out["rating"] = out.apply(_match, axis=1)
+    for key, group in out.groupby(["match_id", "team"], dropna=False):
+        ratings = by_match_team.get((str(key[0]), str(key[1])))
+        if not ratings:
+            continue
+
+        players = [
+            {
+                "player_idx": idx,
+                "key": _rating_name_key(row.get("player_name")),
+                "tokens": _rating_name_tokens(row.get("player_name")),
+            }
+            for idx, row in group.iterrows()
+        ]
+        player_key_counts = Counter(p["key"] for p in players if p["key"])
+        rating_key_counts = Counter(r["key"] for r in ratings if r["key"])
+        used_players: set[Any] = set()
+        used_ratings: set[Any] = set()
+
+        for player in players:
+            if not player["key"] or player_key_counts[player["key"]] != 1:
+                continue
+            exact = [
+                rating
+                for rating in ratings
+                if rating["key"] == player["key"] and rating_key_counts[rating["key"]] == 1
+            ]
+            if len(exact) == 1:
+                _assign(player["player_idx"], exact[0])
+                used_players.add(player["player_idx"])
+                used_ratings.add(exact[0]["rating_idx"])
+
+        remaining_players = [p for p in players if p["player_idx"] not in used_players]
+        remaining_ratings = [r for r in ratings if r["rating_idx"] not in used_ratings]
+        canonical_token_counts = Counter(
+            token for player in remaining_players for token in player["tokens"]
+        )
+        rating_token_counts = Counter(
+            token for rating in remaining_ratings for token in rating["tokens"]
+        )
+
+        candidates: list[tuple[int, Any, Any, dict[str, Any]]] = []
+        for player in remaining_players:
+            for rating in remaining_ratings:
+                score = _rating_match_score(
+                    player["tokens"],
+                    rating["tokens"],
+                    canonical_token_counts,
+                    rating_token_counts,
+                )
+                if score > 0:
+                    candidates.append((score, player["player_idx"], rating["rating_idx"], rating))
+        if not candidates:
+            continue
+
+        best_by_player: dict[Any, tuple[int, int]] = {}
+        best_by_rating: dict[Any, tuple[int, int]] = {}
+        for score, player_idx, rating_idx, _rating in candidates:
+            current_score, current_count = best_by_player.get(player_idx, (0, 0))
+            if score > current_score:
+                best_by_player[player_idx] = (score, 1)
+            elif score == current_score:
+                best_by_player[player_idx] = (current_score, current_count + 1)
+
+            current_score, current_count = best_by_rating.get(rating_idx, (0, 0))
+            if score > current_score:
+                best_by_rating[rating_idx] = (score, 1)
+            elif score == current_score:
+                best_by_rating[rating_idx] = (current_score, current_count + 1)
+
+        for score, player_idx, rating_idx, rating in sorted(candidates, key=lambda item: item[0], reverse=True):
+            if player_idx in used_players or rating_idx in used_ratings:
+                continue
+            if best_by_player[player_idx] != (score, 1):
+                continue
+            if best_by_rating[rating_idx] != (score, 1):
+                continue
+            _assign(player_idx, rating)
+            used_players.add(player_idx)
+            used_ratings.add(rating_idx)
     return out
 
 
@@ -292,12 +464,17 @@ def build_canonical_events(source_map: pd.DataFrame) -> pd.DataFrame:
         events = read_dataframe(path)
         if events.empty:
             continue
-        mappings = source_map[source_map["source"] == source][["canonical_match_id", "source_match_id"]].rename(
+        source_rows = source_map[source_map["source"] == source].copy()
+        for optional_column in ["home_team", "away_team"]:
+            if optional_column not in source_rows.columns:
+                source_rows[optional_column] = pd.NA
+        mappings = source_rows[["canonical_match_id", "source_match_id", "home_team", "away_team"]].rename(
             columns={"source_match_id": "source_event_match_id"}
         )
         events = events.merge(mappings, left_on="match_id", right_on="source_event_match_id", how="inner")
         if events.empty:
             continue
+        events["opponent"] = events.apply(_event_opponent, axis=1)
         events = events.drop(columns=["match_id", "source_event_match_id"]).rename(columns={"canonical_match_id": "match_id"})
         events["event_source"] = source
         event_frames.append(events)
@@ -334,6 +511,19 @@ def build_canonical_events(source_map: pd.DataFrame) -> pd.DataFrame:
     return events
 
 
+def _event_opponent(event: pd.Series) -> Any:
+    team = event.get("team")
+    home = event.get("home_team")
+    away = event.get("away_team")
+    if pd.isna(team) or not team:
+        return pd.NA
+    if pd.notna(home) and team == home:
+        return away
+    if pd.notna(away) and team == away:
+        return home
+    return pd.NA
+
+
 def build_canonical_dataset(source_map: pd.DataFrame, gold_subdir: str, filename_suffix: str) -> pd.DataFrame:
     frames = []
     for source in SOURCE_PRIORITY:
@@ -350,12 +540,50 @@ def build_canonical_dataset(source_map: pd.DataFrame, gold_subdir: str, filename
         if dataset.empty:
             continue
         dataset = dataset.drop(columns=["match_id", "source_dataset_match_id"]).rename(columns={"canonical_match_id": "match_id"})
+        dataset = _clean_canonical_player_names(dataset)
         dataset["dataset_source"] = source
         frames.append(dataset)
 
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    canonical = pd.concat(frames, ignore_index=True)
+    return _dedupe_canonical_dataset(canonical, gold_subdir, filename_suffix)
+
+
+def _clean_canonical_player_names(dataset: pd.DataFrame) -> pd.DataFrame:
+    if dataset.empty:
+        return dataset
+    out = dataset.copy()
+    for column in ("player_name", "player", "related_player"):
+        if column in out.columns:
+            out[column] = out[column].map(clean_person_name)
+    return out
+
+
+def _dedupe_canonical_dataset(dataset: pd.DataFrame, gold_subdir: str, filename_suffix: str) -> pd.DataFrame:
+    dedupe_cols = _CANONICAL_DATASET_DEDUPE_KEYS.get((gold_subdir, filename_suffix))
+    if not dedupe_cols or not set(dedupe_cols).issubset(dataset.columns):
+        return dataset.reset_index(drop=True)
+    if "dataset_source" not in dataset.columns:
+        return dataset.drop_duplicates(dedupe_cols, keep="first").reset_index(drop=True)
+
+    out = dataset.copy()
+    effective_cols = list(dedupe_cols)
+    if "player_name" in effective_cols:
+        out["_dedupe_player_name"] = out["player_name"].map(_rating_name_key)
+        effective_cols = ["_dedupe_player_name" if col == "player_name" else col for col in effective_cols]
+
+    source_rank = {source: rank for rank, source in enumerate(SOURCE_PRIORITY)}
+    out["_source_priority"] = out["dataset_source"].map(source_rank).fillna(len(source_rank))
+    out["_original_order"] = range(len(out))
+    out = (
+        out.sort_values(["_source_priority", "_original_order"])
+        .drop_duplicates(effective_cols, keep="first")
+        .sort_values("_original_order")
+        .drop(columns=["_source_priority", "_original_order", "_dedupe_player_name"], errors="ignore")
+        .reset_index(drop=True)
+    )
+    return out
 
 
 def write_canonical_fragments(
@@ -417,6 +645,11 @@ def write_canonical_fragments(
     match_events = _events_for_match(events, match_id)
     match_lineups = _lineups_for_match(lineups, match_id)
     match_player_stats = _player_stats_for_match(player_stats, match_id)
+    write_fragment(
+        match_id,
+        "04_timeline",
+        render_template("fragments/04_timeline.md.j2", {"events": match_events}),
+    )
     write_fragment(
         match_id,
         "01b_story",
@@ -766,7 +999,23 @@ def _events_for_match(events: pd.DataFrame, match_id: str) -> list[dict[str, Any
     if match_events.empty:
         return []
     match_events["description"] = match_events.apply(_linked_event_description, axis=1)
+    match_events["minute_label"] = match_events.apply(_event_minute_label, axis=1)
     return match_events.sort_values(["minute_sort", "team"]).to_dict("records")
+
+
+def _event_minute_label(event: pd.Series) -> str:
+    minute = event.get("minute")
+    minute_text = "" if pd.isna(minute) else str(minute).strip()
+    if "+" in minute_text:
+        return f"{minute_text}'"
+    stoppage = event.get("stoppage_minute")
+    if pd.notna(stoppage) and str(stoppage).strip() not in {"", "0", "0.0", "nan"}:
+        try:
+            stoppage_text = str(int(float(stoppage)))
+        except (TypeError, ValueError):
+            stoppage_text = str(stoppage).strip()
+        return f"{minute_text}+{stoppage_text}'"
+    return f"{minute_text}'"
 
 
 def _linked_event_description(event: pd.Series) -> str:
@@ -774,6 +1023,9 @@ def _linked_event_description(event: pd.Series) -> str:
     event_type = event.get("event_type")
     player = event.get("player")
     team = event.get("team")
+    player_team = event.get("opponent") if event_type == "gol_contra" else team
+    if pd.isna(player_team) or not player_team:
+        player_team = team
     related_player = event.get("related_player")
 
     if player and pd.notna(player):
@@ -782,7 +1034,7 @@ def _linked_event_description(event: pd.Series) -> str:
         elif event_type == "gol_penalti":
             description = f"Gol de penalti: {_player_link(player, team)} ({_team_link(team)})"
         elif event_type == "gol_contra":
-            description = f"Gol contra: {_player_link(player, team)} ({_team_link(team)})"
+            description = f"Gol contra: {_player_link(player, player_team)} ({_team_link(team)})"
         elif event_type == "cartao_amarelo":
             description = f"Cartao amarelo: {_player_link(player, team)} ({_team_link(team)})"
         elif event_type == "cartao_vermelho":

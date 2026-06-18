@@ -7,12 +7,120 @@ from typing import Any
 import pandas as pd
 
 
+_DASH_TRANSLATION = str.maketrans({
+    "\u2010": "-",  # hyphen
+    "\u2011": "-",  # non-breaking hyphen
+    "\u2012": "-",  # figure dash
+    "\u2013": "-",  # en dash
+    "\u2014": "-",  # em dash
+    "\u2015": "-",  # horizontal bar
+    "\u2212": "-",  # minus sign
+})
+_SPACE_TRANSLATION = str.maketrans({
+    "\u00a0": " ",
+    "\u1680": " ",
+    "\u2000": " ",
+    "\u2001": " ",
+    "\u2002": " ",
+    "\u2003": " ",
+    "\u2004": " ",
+    "\u2005": " ",
+    "\u2006": " ",
+    "\u2007": " ",
+    "\u2008": " ",
+    "\u2009": " ",
+    "\u200a": " ",
+    "\u202f": " ",
+    "\u205f": " ",
+    "\u3000": " ",
+})
+_ZERO_WIDTH_TRANSLATION = str.maketrans({
+    "\u200b": "",
+    "\u200c": "",
+    "\u200d": "",
+    "\ufeff": "",
+})
+_APOSTROPHE_TRANSLATION = str.maketrans({
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201a": "'",
+    "\u201b": "'",
+    "\u2032": "'",
+})
+
+
+def _is_missing(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def slugify(value: Any) -> str:
-    text = "" if value is None or (isinstance(value, float) and pd.isna(value)) else str(value)
+    text = "" if _is_missing(value) else str(value)
+    text = text.translate(
+        str.maketrans(
+            {
+                "ø": "o",
+                "Ø": "O",
+                "ð": "d",
+                "Ð": "D",
+                "þ": "th",
+                "Þ": "Th",
+                "ł": "l",
+                "Ł": "L",
+                "æ": "ae",
+                "Æ": "Ae",
+                "œ": "oe",
+                "Œ": "Oe",
+            }
+        )
+    )
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     text = text.lower()
     text = re.sub(r"[^a-z0-9]+", "_", text)
     return re.sub(r"_+", "_", text).strip("_") or "sem_nome"
+
+
+def clean_person_name(value: Any) -> str:
+    """Nome de pessoa limpo para exibição e joins internos.
+
+    Mantém acentos e hífen canônico, mas remove sujeiras comuns de scraping:
+    espaços invisíveis, NBSP, hífens Unicode, espaços ao redor do hífen e
+    sufixo literal "null".
+    """
+    if _is_missing(value):
+        return ""
+    text = unicodedata.normalize("NFKC", str(value))
+    text = text.translate(_ZERO_WIDTH_TRANSLATION)
+    text = text.translate(_SPACE_TRANSLATION)
+    text = text.translate(_DASH_TRANSLATION)
+    text = text.translate(_APOSTROPHE_TRANSLATION)
+    text = re.sub(r"\s*-\s*", "-", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if text.casefold().endswith(" null"):
+        text = text[:-5].strip()
+    return text
+
+
+def person_name_key(value: Any) -> str:
+    """Chave ampla de casamento: acento/caixa ignorados e hífen = espaço."""
+    text = clean_person_name(value)
+    if not text:
+        return ""
+    return slugify(text.replace("-", " "))
+
+
+def person_name_words_key(value: Any) -> str:
+    """Mesma chave ampla, em formato de palavras separado por espaço."""
+    return person_name_key(value).replace("_", " ")
+
+
+def person_name_exact_key(value: Any) -> str:
+    """Chave exata: preserva acentos e diferença hífen/espaço, mas limpa ruído."""
+    return clean_person_name(value).casefold()
 
 
 def goals_per_shot(goals: int | float | None, shots: int | float | None) -> float | None:
