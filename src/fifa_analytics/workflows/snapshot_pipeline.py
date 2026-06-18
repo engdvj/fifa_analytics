@@ -13,6 +13,8 @@ from fifa_analytics.analytics.calibration import (
 )
 from fifa_analytics.analytics.scores import (
     TEAM_SCORE_WEIGHTS,
+    build_player_match_features,
+    build_player_scores,
     build_team_match_features,
     build_team_scores,
 )
@@ -33,12 +35,126 @@ ANALYTICS_DIR = GOLD_DIR / "analytics"
 SNAPSHOTS_DIR = ANALYTICS_DIR / "snapshots"
 SCORE_HISTORY_PATH = SNAPSHOTS_DIR / "score_history_acum.parquet"
 MATCH_ORDER_PATH = SNAPSHOTS_DIR / "match_order.json"
+# Timeline de jogadores empilhada por snapshot (espelho do snapshot_timeline de
+# seleções) — alimenta a aba Jogadores do dashboard com scores acumulados até
+# cada jogo. Colunas-chave de jogador são fixadas para um payload enxuto.
+PLAYER_TIMELINE_PATH = SNAPSHOTS_DIR / "player_snapshot_timeline.parquet"
+_PLAYER_SNAP_COLS = [
+    "player_slug", "player_name", "team", "perfil", "shirt_number", "jogos",
+    "score_geral", "ranking_score_geral", "nivel_evidencia",
+    "rating_365",  # nota de atuação média (365scores), escala ~2.9-9.8
+    "goals", "assists", "participacoes_gol", "saves", "goals_conceded",
+    "shots_on_target", "yellow_cards", "red_cards",
+    "gols_por_jogo", "assistencias_por_jogo", "participacoes_por_jogo",
+    "chutes_no_alvo_por_jogo", "defesas_por_jogo",
+    "faltas_cometidas_por_jogo", "faltas_sofridas_por_jogo",
+]
 
 
 def _read_optional(path: Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     return read_dataframe(path)
+
+
+def _shirt_numbers_for(scores: pd.DataFrame, lineups: pd.DataFrame, rosters: pd.DataFrame) -> list:
+    """Número da camisa por (nome exato, time): moda do shirt_number nos lineups,
+    com fallback no roster. Nome casado SEM dobrar acento (Ederson ≠ Éderson)."""
+    def _exact(s):
+        return " ".join(s.split()) if isinstance(s, str) else ""
+
+    num_by: dict[tuple[str, str], int] = {}
+    for src in (lineups, rosters):
+        if src is None or src.empty or "shirt_number" not in src.columns:
+            continue
+        tmp = src.dropna(subset=["player_name"]).copy()
+        tmp["_k"] = tmp["player_name"].map(_exact)
+        tmp["_n"] = pd.to_numeric(tmp["shirt_number"], errors="coerce")
+        tmp = tmp.dropna(subset=["_n"])
+        for (nm, tm), grp in tmp.groupby(["_k", "team"]):
+            key = (nm, tm)
+            if key not in num_by:  # lineups têm prioridade (vêm primeiro)
+                num_by[key] = int(grp["_n"].mode().iloc[0])
+    return [
+        num_by.get((_exact(nm), tm)) for nm, tm in zip(scores["player_name"], scores["team"])
+    ]
+
+
+def _build_player_snapshot(
+    player_stats: pd.DataFrame,
+    lineups: pd.DataFrame,
+    rosters: pd.DataFrame,
+    ids_ate_agora: list[str],
+    n: int,
+    match_id: str,
+) -> None:
+    """Calcula o score de jogadores acumulado até o jogo N e empilha na
+    player_snapshot_timeline. Cada linha = jogador no snapshot daquele jogo,
+    com score/ranking dentro do perfil considerando só os jogos disputados até N.
+    A nota de atuação média (`rating_365`) vem da coluna `rating` já casada no
+    canonical_player_stats (fonte única) — aqui só fazemos a média por jogador.
+
+    Não usa lookahead: filtra player_stats pelos match_ids até o jogo N. Se não
+    há dados de jogador (fonte ausente), não escreve nada e segue."""
+    if player_stats is None or player_stats.empty:
+        return
+
+    ps_ate = player_stats[player_stats["match_id"].isin(ids_ate_agora)].copy()
+    if ps_ate.empty:
+        return
+
+    feats = build_player_match_features(
+        ps_ate,
+        lineups if lineups is not None and not lineups.empty else None,
+        rosters if rosters is not None and not rosters.empty else None,
+    )
+    scores = build_player_scores(feats)
+    if scores.empty:
+        return
+
+    scores = scores.copy()
+    # nota de atuação média até N — lê a coluna `rating` JÁ CASADA no canonical
+    # (fonte única; ver _attach_player_rating). Só considera jogos REALMENTE
+    # disputados (appearances>0): a fonte às vezes traz nota de quem não entrou
+    # (ex.: Martinelli, appearances=0 mas rating 6.5) — não pode contar.
+    if "rating" in ps_ate.columns:
+        tmp = ps_ate.assign(rating=pd.to_numeric(ps_ate["rating"], errors="coerce"))
+        if "appearances" in tmp.columns:
+            apps = pd.to_numeric(tmp["appearances"], errors="coerce").fillna(0)
+            tmp = tmp[apps > 0]
+        tmp = tmp.dropna(subset=["rating"])
+        rating_avg = tmp.groupby(["player_name", "team"])["rating"].mean().round(2)
+        scores["rating_365"] = [
+            rating_avg.get((nm, tm)) for nm, tm in zip(scores["player_name"], scores["team"])
+        ]
+    else:
+        scores["rating_365"] = pd.NA
+    # quem não disputou nenhum jogo não tem nota (mesma regra do score)
+    if "jogos" in scores.columns:
+        scores.loc[pd.to_numeric(scores["jogos"], errors="coerce").fillna(0) <= 0, "rating_365"] = pd.NA
+    # normaliza o nome (tira espaços nas pontas) — a fonte às vezes traz "Ederson "
+    # com espaço, que aparece como jogador "diferente" e quebra joins por nome.
+    scores["player_name"] = scores["player_name"].map(
+        lambda v: " ".join(v.split()) if isinstance(v, str) else v
+    )
+
+    # número da camisa por (jogador, time): moda do shirt_number nos lineups; cai
+    # pro roster se faltar. Casado por nome EXATO (preserva acento) p/ não colidir
+    # homônimos como Ederson/Éderson.
+    scores["shirt_number"] = _shirt_numbers_for(scores, lineups, rosters)
+
+    scores["snapshot_jogo"] = n
+    scores["match_id_referencia"] = match_id
+    keep = [c for c in _PLAYER_SNAP_COLS if c in scores.columns] + ["snapshot_jogo", "match_id_referencia"]
+    snap = scores[keep]
+
+    existing = _read_optional(PLAYER_TIMELINE_PATH)
+    if not existing.empty:
+        existing = existing[existing["snapshot_jogo"] != n]
+        timeline = pd.concat([existing, snap], ignore_index=True)
+    else:
+        timeline = snap
+    write_dataframe(PLAYER_TIMELINE_PATH, timeline)
 
 
 def _load_match_order() -> list[str]:
@@ -61,17 +177,17 @@ def _load_match_order() -> list[str]:
     stats_365 = _read_optional(GOLD_DIR / "fact_team_match_stats" / "365scores_enrichment.parquet")
     all_features = build_team_match_features(matches, team_stats, events, lineups, stats_365)
 
-    sort_cols = [c for c in ("date", "kickoff_time") if c in all_features.columns] or ["date"]
-    chronological = (
-        all_features[["match_id"] + [c for c in sort_cols if c in all_features.columns]]
-        .drop_duplicates("match_id")
-        .sort_values(sort_cols)["match_id"].tolist()
-    )
+    match_ids_with_features = set(all_features["match_id"].dropna())
+    order_cols = [c for c in ("match_id", "temporal_order", "date", "kickoff_time") if c in matches.columns]
+    order_frame = matches[matches["match_id"].isin(match_ids_with_features)][order_cols].drop_duplicates("match_id")
+    sort_cols = [c for c in ("temporal_order", "date", "kickoff_time", "match_id") if c in order_frame.columns]
+    chronological = order_frame.sort_values(sort_cols, na_position="last")["match_id"].tolist()
 
-    # preserva a ordem já persistida; anexa jogos novos ao fim (na ordem cronológica)
+    # Regrava a ordem pela cronologia canônica. Jogos antigos preservados que não
+    # aparecem mais nas features ficam no fim, para não sumirem silenciosamente.
     existing = json.loads(MATCH_ORDER_PATH.read_text()) if MATCH_ORDER_PATH.exists() else []
-    seen = set(existing)
-    order = existing + [mid for mid in chronological if mid not in seen]
+    seen = set(chronological)
+    order = chronological + [mid for mid in existing if mid not in seen]
 
     ensure_dir(SNAPSHOTS_DIR)
     MATCH_ORDER_PATH.write_text(json.dumps(order), encoding="utf-8")
@@ -154,6 +270,8 @@ def run_snapshot_jogo(n: int | None = None) -> dict[str, Any]:
     events = _read_optional(GOLD_DIR / "fact_events" / "canonical_events.parquet")
     lineups = _read_optional(GOLD_DIR / "lineups" / "canonical_lineups.parquet")
     stats_365 = _read_optional(GOLD_DIR / "fact_team_match_stats" / "365scores_enrichment.parquet")
+    player_stats = _read_optional(GOLD_DIR / "fact_player_match_stats" / "canonical_player_stats.parquet")
+    rosters = _read_optional(GOLD_DIR / "rosters" / "espn_rosters.parquet")
     all_features = build_team_match_features(matches, team_stats, events, lineups, stats_365)
 
     match_id = match_order[n - 1]
@@ -217,6 +335,11 @@ def run_snapshot_jogo(n: int | None = None) -> dict[str, Any]:
     else:
         timeline = scores_n
     write_dataframe(timeline_path, timeline)
+
+    # --- Snapshot de JOGADORES acumulado até o jogo N (espelha o de seleções) ---
+    # Mesma janela de jogos (ids_ate_agora): scores recalculados só com o que
+    # aconteceu até aqui, sem lookahead. Alimenta a aba Jogadores do dashboard.
+    _build_player_snapshot(player_stats, lineups, rosters, ids_ate_agora, n, match_id)
 
     # Atualiza os parquets que o scores_pipeline usa (para rankings funcionarem)
     write_dataframe(ANALYTICS_DIR / "team_match_features.parquet", features_n)
