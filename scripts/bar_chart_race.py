@@ -70,6 +70,7 @@ match_info = matches_df.set_index("match_id")[["home_team", "away_team", "home_s
 
 tl = pd.read_parquet(SNAPSHOTS_DIR / "snapshot_timeline.parquet")
 snapshot_match_by_n = tl.groupby("snapshot_jogo")["match_id_referencia"].first().to_dict()
+match_snapshot_n = {mid: int(n) for n, mid in snapshot_match_by_n.items()}
 match_temporal_order = matches_df.set_index("match_id")["temporal_order"].to_dict() if "temporal_order" in matches_df.columns else {}
 
 
@@ -86,6 +87,7 @@ def _snapshot_order_key(n: int) -> tuple[float, int]:
 
 
 jogos = sorted(tl["snapshot_jogo"].unique(), key=_snapshot_order_key)
+valid_snapshots = set(int(n) for n in jogos)
 prev_jogo_by_n = {n: (jogos[i - 1] if i else None) for i, n in enumerate(jogos)}
 
 # Nota: o placar AO VIVO não fica no HTML (estático demais para tempo real) —
@@ -173,14 +175,32 @@ player_data: dict = {}
 player_meta: dict = {}
 if _PLAYER_TL_PATH.exists():
     ptl = pd.read_parquet(_PLAYER_TL_PATH)
+    if not ptl.empty and "snapshot_jogo" in ptl.columns:
+        ptl = ptl[ptl["snapshot_jogo"].map(lambda n: int(n) in valid_snapshots)].copy()
     # campos numéricos/textuais expostos por jogador no snapshot
     _PNUM = [
         "jogos", "score_geral", "ranking_score_geral", "rating_365",
         "goals", "assists", "participacoes_gol", "saves", "goals_conceded",
-        "shots_on_target", "yellow_cards", "red_cards",
+        "shots", "shots_on_target", "fouls_committed", "fouls_drawn",
+        "yellow_cards", "red_cards",
+        "expected_goals", "expected_assists", "expected_goals_on_target",
+        "key_passes", "big_chances_created", "big_chances_missed",
+        "big_chances_scored", "dribbles_won", "tackles_won",
+        "interceptions", "clearances", "ball_recovery", "duels_won",
+        "shots_blocked", "expected_goals_prevented", "penalties_saved",
+        "high_claims", "punches",
         "gols_por_jogo", "assistencias_por_jogo", "participacoes_por_jogo",
         "chutes_no_alvo_por_jogo", "defesas_por_jogo",
         "faltas_cometidas_por_jogo", "faltas_sofridas_por_jogo",
+        "expected_goals_por_jogo", "expected_assists_por_jogo",
+        "expected_goals_on_target_por_jogo", "key_passes_por_jogo",
+        "big_chances_created_por_jogo", "big_chances_missed_por_jogo",
+        "big_chances_scored_por_jogo", "dribbles_won_por_jogo",
+        "tackles_won_por_jogo", "interceptions_por_jogo",
+        "clearances_por_jogo", "ball_recovery_por_jogo",
+        "duels_won_por_jogo", "shots_blocked_por_jogo",
+        "expected_goals_prevented_por_jogo", "penalties_saved_por_jogo",
+        "high_claims_por_jogo", "punches_por_jogo",
     ]
     for n in sorted(ptl["snapshot_jogo"].unique()):
         snap = ptl[ptl["snapshot_jogo"] == n]
@@ -198,13 +218,14 @@ if _PLAYER_TL_PATH.exists():
             rows.append(entry)
         player_data[str(int(n))] = rows
     # metadados estáticos (do estado final): perfil/time/slug/camisa por jogador
-    last = ptl[ptl["snapshot_jogo"] == ptl["snapshot_jogo"].max()]
-    for _, r in last.iterrows():
-        _sn = r.get("shirt_number")
-        player_meta[r["player_slug"]] = {
-            "name": r["player_name"], "team": r["team"], "perfil": r.get("perfil"),
-            "shirt": int(_sn) if _sn is not None and not pd.isna(_sn) else None,
-        }
+    if not ptl.empty:
+        last = ptl[ptl["snapshot_jogo"] == ptl["snapshot_jogo"].max()]
+        for _, r in last.iterrows():
+            _sn = r.get("shirt_number")
+            player_meta[r["player_slug"]] = {
+                "name": r["player_name"], "team": r["team"], "perfil": r.get("perfil"),
+                "shirt": int(_sn) if _sn is not None and not pd.isna(_sn) else None,
+            }
 
 player_data_json = json.dumps(player_data, ensure_ascii=False)
 player_meta_json = json.dumps(player_meta, ensure_ascii=False)
@@ -241,17 +262,37 @@ _commentary = _read_optional(Path("data/gold/fact_commentary/canonical_commentar
 _rosters = _read_optional(Path("data/gold/rosters/espn_rosters.parquet"))
 
 
+try:
+    from fifa_analytics.utils.text import (
+        clean_person_name as _clean_person_name,
+        person_name_exact_key as _person_name_exact_key,
+        person_name_words_key as _person_name_words_key,
+    )
+except Exception:  # standalone sem pacote instalado
+    def _clean_person_name(v):
+        return " ".join(v.replace("\u00a0", " ").split()) if isinstance(v, str) else v
+
+    def _person_name_exact_key(v):
+        return _clean_person_name(v).casefold() if isinstance(v, str) else ""
+
+    def _person_name_words_key(v):
+        if not isinstance(v, str):
+            return ""
+        import unicodedata as _unicodedata
+        text = _clean_person_name(v).replace("-", " ")
+        text = _unicodedata.normalize("NFKD", text).encode("ASCII", "ignore").decode().lower()
+        return " ".join(text.split())
+
+
 def _strip_name_cols(df: pd.DataFrame, cols: tuple[str, ...]) -> pd.DataFrame:
-    """Normaliza nomes de jogador (tira espaços nas pontas). Fontes às vezes trazem
-    'Gavi ', 'Raphinha ' etc., o que quebra o match por nome entre lineup, eventos,
-    substituições e cartões — destaque/troca não casava. Limpa na raiz."""
+    """Normaliza nomes de jogador sem perder acento/identidade."""
     if df.empty:
         return df
     for c in cols:
         if c in df.columns:
             # não checar dtype==object: colunas pyarrow são dtype 'str', não object,
             # e seriam puladas. map() lida com qualquer backend de string.
-            df[c] = df[c].map(lambda v: v.strip() if isinstance(v, str) else v)
+            df[c] = df[c].map(_clean_person_name)
     return df
 
 
@@ -277,14 +318,11 @@ except Exception:  # standalone sem o pacote instalado: segue sem aliases
     pass
 
 import re as _re
-import unicodedata as _ud
 
 
 def _name_key(s) -> str:
     """Chave de nome sem acento/caixa, p/ casar 365scores (sem match_id) com canonical."""
-    if not isinstance(s, str):
-        return ""
-    return _ud.normalize("NFKD", s).encode("ASCII", "ignore").decode().lower().strip()
+    return _person_name_words_key(s)
 
 
 def _name_key_exact(s) -> str:
@@ -293,9 +331,7 @@ def _name_key_exact(s) -> str:
     'Éderson' volante, ambos do Brasil). Usada nos joins DENTRO do mesmo time
     (camisa, posição, rating), onde o nome exato é confiável; o _name_key folded
     fica só p/ casamento fuzzy entre fontes (365scores)."""
-    if not isinstance(s, str):
-        return ""
-    return " ".join(s.split())
+    return _person_name_exact_key(s)
 
 
 def _surname_key(s) -> str:
@@ -700,7 +736,7 @@ def _build_team_lineup(mid: str, team: str, date: str = "", opponent: str = "") 
         for _, p in lu.sort_values("shirt_number", na_position="last").iterrows():
             _pname = p.get("player_name")
             item = {
-                "name": _pname.strip() if isinstance(_pname, str) else _pname,
+                "name": _clean_person_name(_pname),
                 "num": _num(p.get("shirt_number")),
                 "pos": p.get("position") if not pd.isna(p.get("position")) else None,
             }
@@ -710,8 +746,7 @@ def _build_team_lineup(mid: str, team: str, date: str = "", opponent: str = "") 
     # colapsados. Necessária porque lineup e commentary divergem (ex.: lineup
     # "Al-Harbi" vs commentary "Al Harbi"; "Mohammed Abu Al-Shamat" vs "...Al Shamat").
     def _mk(s):
-        s = _ud.normalize("NFKD", s or "").encode("ASCII", "ignore").decode().lower()
-        return " ".join(s.replace("-", " ").split())
+        return _name_key(s)
 
     game_subs = _subs_for(mid, team)
     # mapa chave-normalizada → nome de exibição do lineup (p/ o par da troca)
@@ -723,13 +758,13 @@ def _build_team_lineup(mid: str, team: str, date: str = "", opponent: str = "") 
         if s.get("in") and s.get("out"):
             ki, ko = _mk(s["in"]), _mk(s["out"])
             # guarda o nome de exibição do parceiro (do lineup se existir; senão o do commentary)
-            partner_of[ki] = name_by_mk.get(ko, s["out"].strip())
-            partner_of[ko] = name_by_mk.get(ki, s["in"].strip())
+            partner_of[ki] = name_by_mk.get(ko, _clean_person_name(s["out"]))
+            partner_of[ko] = name_by_mk.get(ki, _clean_person_name(s["in"]))
 
     roster_names = [it["name"] for it in starters + subs if it.get("name")]
 
     def resolve_name(ply):
-        ply = (ply or "").strip()
+        ply = _clean_person_name(ply)
         mt = _re.match(r"^([A-Z])\.\s+(.+)$", ply)
         if mt:
             ini, surname = mt.group(1), mt.group(2)
@@ -900,6 +935,7 @@ for _team in _all_cup_teams:
         away_score = _num(m.get("away_score"))
         jogos_list.append({
             "match_id": mid,
+            "match_n": match_snapshot_n.get(mid),
             "finalizado": bool(is_finalizado),
             "opp": opp, "opp_flag": FLAGS.get(opp, "🏳️"),
             "home": bool(is_home),
@@ -975,20 +1011,46 @@ for _team in _all_cup_teams:
         else:
             p365_team = pd.DataFrame()
 
-        stat_cols = ["jogos", "gols", "assist", "chutes", "no_alvo", "amarelos", "vermelhos", "defesas", "faltas", "faltas_sofridas", "impedimentos", "gols_contra"]
+        stat_cols = [
+            "jogos", "gols", "assist", "chutes", "no_alvo", "amarelos", "vermelhos", "defesas", "faltas", "faltas_sofridas", "impedimentos", "gols_contra",
+            "xg", "xa", "xgot", "passes_chave", "gr_chances_criadas", "gr_chances_perdidas", "gr_chances_convertidas", "dribles",
+            "desarmes", "interceptacoes", "cortes", "recuperacoes", "duelos", "bloqueios",
+            "xgp", "penaltis_defendidos", "bolas_altas", "socos",
+        ]
         if not ps.empty:
             _og_agg = ("own_goals", "sum") if "own_goals" in ps.columns else ("goals", lambda s: 0)
-            agg = ps.groupby("player_name", dropna=True).agg(
-                jogos=("appearances", "sum"), gols=("goals", "sum"), assist=("assists", "sum"),
-                chutes=("shots", "sum"), no_alvo=("shots_on_target", "sum"),
-                amarelos=("yellow_cards", "sum"), vermelhos=("red_cards", "sum"),
-                defesas=("saves", "sum"),
-                faltas=("fouls_committed", "sum"), faltas_sofridas=("fouls_drawn", "sum"),
-                impedimentos=("offsides", "sum"),
-                gols_contra=_og_agg,
-            ).reset_index()
+            agg_spec = {
+                "jogos": ("appearances", "sum"), "gols": ("goals", "sum"), "assist": ("assists", "sum"),
+                "chutes": ("shots", "sum"), "no_alvo": ("shots_on_target", "sum"),
+                "amarelos": ("yellow_cards", "sum"), "vermelhos": ("red_cards", "sum"),
+                "defesas": ("saves", "sum"),
+                "faltas": ("fouls_committed", "sum"), "faltas_sofridas": ("fouls_drawn", "sum"),
+                "impedimentos": ("offsides", "sum"),
+                "gols_contra": _og_agg,
+                "xg": ("expected_goals", "sum"), "xa": ("expected_assists", "sum"), "xgot": ("expected_goals_on_target", "sum"),
+                "passes_chave": ("key_passes", "sum"), "gr_chances_criadas": ("big_chances_created", "sum"),
+                "gr_chances_perdidas": ("big_chances_missed", "sum"), "gr_chances_convertidas": ("big_chances_scored", "sum"),
+                "dribles": ("dribbles_won", "sum"), "desarmes": ("tackles_won", "sum"),
+                "interceptacoes": ("interceptions", "sum"), "cortes": ("clearances", "sum"),
+                "recuperacoes": ("ball_recovery", "sum"), "bloqueios": ("shots_blocked", "sum"),
+                "xgp": ("expected_goals_prevented", "sum"), "penaltis_defendidos": ("penalties_saved", "sum"),
+                "bolas_altas": ("high_claims", "sum"), "socos": ("punches", "sum"),
+            }
+            available_agg = {out_col: spec for out_col, spec in agg_spec.items() if spec[0] in ps.columns}
+            agg = ps.groupby("player_name", dropna=True).agg(**available_agg).reset_index()
+            if {"ground_duels_won", "aerial_duels_won"}.issubset(ps.columns):
+                duels = (
+                    ps.assign(_duels=pd.to_numeric(ps["ground_duels_won"], errors="coerce").fillna(0) + pd.to_numeric(ps["aerial_duels_won"], errors="coerce").fillna(0))
+                    .groupby("player_name", dropna=True)["_duels"].sum()
+                    .rename("duelos")
+                    .reset_index()
+                )
+                agg = agg.merge(duels, on="player_name", how="left")
         else:
             agg = pd.DataFrame(columns=["player_name", *stat_cols])
+        for col in stat_cols:
+            if col not in agg.columns:
+                agg[col] = 0
         if not roster_team.empty and "player_name" in roster_team.columns:
             present = set(agg["player_name"].map(_name_key_exact)) if not agg.empty else set()
             roster_missing = roster_team[
@@ -1032,6 +1094,15 @@ for _team in _all_cup_teams:
                 "faltas": _num(p["faltas"]), "faltas_sofridas": _num(p["faltas_sofridas"]),
                 "impedimentos": _num(p["impedimentos"]),
                 "gols_contra": _num(p.get("gols_contra", 0)),
+                "xg": _num(p.get("xg"), 2), "xa": _num(p.get("xa"), 2), "xgot": _num(p.get("xgot"), 2),
+                "passes_chave": _num(p.get("passes_chave")), "gr_chances_criadas": _num(p.get("gr_chances_criadas")),
+                "gr_chances_perdidas": _num(p.get("gr_chances_perdidas")), "gr_chances_convertidas": _num(p.get("gr_chances_convertidas")),
+                "dribles": _num(p.get("dribles")), "desarmes": _num(p.get("desarmes")),
+                "interceptacoes": _num(p.get("interceptacoes")), "cortes": _num(p.get("cortes")),
+                "recuperacoes": _num(p.get("recuperacoes")), "duelos": _num(p.get("duelos")),
+                "bloqueios": _num(p.get("bloqueios")), "xgp": _num(p.get("xgp"), 2),
+                "penaltis_defendidos": _num(p.get("penaltis_defendidos")), "bolas_altas": _num(p.get("bolas_altas")),
+                "socos": _num(p.get("socos")),
             })
 
     # — resumo de scores + campanha (snapshot mais recente)
@@ -3758,17 +3829,102 @@ function passesGlobalFilters(team) {{
   return true;
 }}
 
+function _posGroupFromPerfil(perfil) {{
+  return {{
+    goleiro: 'Goleiros',
+    defensor: 'Defensores',
+    meio: 'Meias',
+    atacante: 'Atacantes',
+  }}[perfil] || 'Sem posição';
+}}
+
+function _posOrderFromGroup(group) {{
+  return {{
+    'Goleiros': 0,
+    'Defensores': 1,
+    'Meias': 2,
+    'Atacantes': 3,
+    'Sem posição': 4,
+  }}[group || 'Sem posição'] ?? 99;
+}}
+
+function _playersAtTeamSnapshot(team, n) {{
+  const basePlayers = ((TEAMS_DETAIL[team] || {{}}).players || []);
+  const baseByName = {{}};
+  basePlayers.forEach(p => {{ if (p && p.name) baseByName[p.name] = p; }});
+  return (PLAYER_DATA[n] || [])
+    .filter(r => r.team === team)
+    .map(r => {{
+      const meta = PLAYER_META[r.slug] || {{}};
+      const hasBase = Object.prototype.hasOwnProperty.call(baseByName, r.name);
+      const base = hasBase ? baseByName[r.name] : {{}};
+      const posGroup = base.pos_group || _posGroupFromPerfil(r.perfil);
+      const rating = r.rating_365 == null ? null : r.rating_365;
+      return Object.assign({{}}, base, {{
+        name: r.name,
+        num: base.num ?? meta.shirt,
+        pos: base.pos || PERFIL_LABEL[r.perfil] || '—',
+        pos_group: posGroup,
+        pos_order: base.pos_order ?? _posOrderFromGroup(posGroup),
+        in_roster: hasBase ? base.in_roster !== false : !basePlayers.length,
+        rating_media: rating,
+        rating_jogos: rating == null ? 0 : Math.round(r.jogos || 0),
+        jogos: r.jogos || 0,
+        gols: r.goals || 0,
+        assist: r.assists || 0,
+        chutes: r.shots || 0,
+        no_alvo: r.shots_on_target || 0,
+        amarelos: r.yellow_cards || 0,
+        vermelhos: r.red_cards || 0,
+        defesas: r.saves || 0,
+        faltas: r.fouls_committed || 0,
+        faltas_sofridas: r.fouls_drawn || 0,
+        gols_contra: base.gols_contra || 0,
+        xg: r.expected_goals || 0,
+        xa: r.expected_assists || 0,
+        xgot: r.expected_goals_on_target || 0,
+        passes_chave: r.key_passes || 0,
+        gr_chances_criadas: r.big_chances_created || 0,
+        gr_chances_perdidas: r.big_chances_missed || 0,
+        gr_chances_convertidas: r.big_chances_scored || 0,
+        dribles: r.dribbles_won || 0,
+        desarmes: r.tackles_won || 0,
+        interceptacoes: r.interceptions || 0,
+        cortes: r.clearances || 0,
+        recuperacoes: r.ball_recovery || 0,
+        duelos: r.duels_won || 0,
+        bloqueios: r.shots_blocked || 0,
+        xgp: r.expected_goals_prevented || 0,
+        penaltis_defendidos: r.penalties_saved || 0,
+        bolas_altas: r.high_claims || 0,
+        socos: r.punches || 0,
+      }});
+    }});
+}}
+
+function _artilheiroFromPlayers(players) {{
+  const top = (players || [])
+    .filter(p => (p.gols || 0) > 0)
+    .sort((a, b) => (b.gols || 0) - (a.gols || 0) || (b.assist || 0) - (a.assist || 0))[0];
+  return top ? {{ name: top.name, gols: top.gols }} : null;
+}}
+
 // "Detalhe" do time NO MOMENTO selecionado (jogo n): mescla metadados estáticos
 // (TEAMS_DETAIL) com os números daquele snapshot (DATA[n]) — assim a grade
 // Seleções reflete o jogo selecionado, não só o estado final.
 function teamDetailAt(team, n = currentJogo) {{
   const base = TEAMS_DETAIL[team] || {{}};
   const snap = (SNAP_BY_TEAM[n] || {{}})[team];
+  const jogosAteAgora = (base.jogos || []).filter(g => g.match_n == null || g.match_n <= n);
+  const playersAteAgora = _playersAtTeamSnapshot(team, n);
+  const rosterCount = playersAteAgora.filter(p => p.in_roster !== false).length || base.roster_count || 0;
   if (!snap) {{
     // time ainda não entrou no ranking nesse momento: zera números, mantém metadados
     return Object.assign({{}}, base, {{
       n_jogos: 0, rank: null,
       scores: {{}}, campanha: {{}}, estilo: base.estilo,
+      jogos: jogosAteAgora, players: playersAteAgora, roster_count: rosterCount,
+      artilheiro: null,
     }});
   }}
   // posição no ranking geral daquele snapshot (pré-calculada em SNAP_RANK)
@@ -3786,6 +3942,10 @@ function teamDetailAt(team, n = currentJogo) {{
       saldo_gols: snap.saldo_gols, elo_rating: snap.elo_rating, aproveitamento: snap.aproveitamento,
     }},
     estilo: Object.assign({{}}, base.estilo || {{}}, {{ flag: snap.estilo_jogo }}),
+    jogos: jogosAteAgora,
+    players: playersAteAgora,
+    roster_count: rosterCount,
+    artilheiro: _artilheiroFromPlayers(playersAteAgora),
   }});
 }}
 
@@ -5456,6 +5616,9 @@ function goToJogo(n) {{
   // grades refletem o momento selecionado — re-renderiza a que estiver ativa
   if (activeTab === 'teams') renderTeamsGrid();
   if (activeTab === 'players') renderPlayersGrid();
+  if (modalTeam && document.getElementById('teamModal').style.display !== 'none') {{
+    renderModalBody();
+  }}
 }}
 
 function updateSpeed() {{
@@ -5577,10 +5740,29 @@ const PLAYER_METRICS = [
   ['gols_por_jogo', 'Gols / jogo'],
   ['assistencias_por_jogo', 'Assistências / jogo'],
   ['participacoes_por_jogo', 'G+A / jogo'],
+  ['expected_goals_por_jogo', 'xG / jogo'],
+  ['expected_assists_por_jogo', 'xA / jogo'],
+  ['expected_goals_on_target_por_jogo', 'xGOT / jogo'],
+  ['key_passes_por_jogo', 'Passes-chave / jogo'],
+  ['tackles_won_por_jogo', 'Desarmes / jogo'],
+  ['interceptions_por_jogo', 'Interceptações / jogo'],
+  ['clearances_por_jogo', 'Cortes / jogo'],
+  ['ball_recovery_por_jogo', 'Recuperações / jogo'],
+  ['duels_won_por_jogo', 'Duelos ganhos / jogo'],
+  ['expected_goals_prevented_por_jogo', 'xGP / jogo'],
   ['chutes_no_alvo_por_jogo', 'Chutes no alvo / jogo'],
   ['defesas_por_jogo', 'Defesas / jogo'],
   ['goals', 'Gols (total)'],
   ['assists', 'Assistências (total)'],
+  ['expected_goals', 'xG (total)'],
+  ['expected_assists', 'xA (total)'],
+  ['key_passes', 'Passes-chave (total)'],
+  ['tackles_won', 'Desarmes (total)'],
+  ['interceptions', 'Interceptações (total)'],
+  ['clearances', 'Cortes (total)'],
+  ['ball_recovery', 'Recuperações (total)'],
+  ['duels_won', 'Duelos ganhos (total)'],
+  ['expected_goals_prevented', 'xGP (total)'],
   ['saves', 'Defesas (total)'],
   ['jogos', 'Jogos disputados'],
 ];
@@ -5930,12 +6112,12 @@ function renderPlayersGrid() {{
   // colunas POR POSIÇÃO: 'Todas' = só básicas; posição filtrada = stats dela.
   // Cada coluna: [chave no snapshot, rótulo curto, formatação].
   const intF = v => v == null ? '—' : String(Math.round(v));
-  const f1F = v => v == null ? '—' : v.toFixed(1);
+  const f2F = v => v == null ? '—' : v.toFixed(2);
   const colsByPos = {{
-    goleiro:  [['saves','Defesas',intF], ['goals_conceded','Sofridos',intF]],
-    defensor: [['goals','Gols',intF], ['assists','Assist',intF], ['shots_on_target','No alvo',intF]],
-    meio:     [['goals','Gols',intF], ['assists','Assist',intF], ['shots_on_target','No alvo',intF]],
-    atacante: [['goals','Gols',intF], ['assists','Assist',intF], ['shots_on_target','No alvo',intF]],
+    goleiro:  [['saves','Defesas',intF], ['goals_conceded','Sofridos',intF], ['expected_goals_prevented','xGP',f2F], ['high_claims','Bolas altas',intF]],
+    defensor: [['tackles_won','Desarmes',intF], ['interceptions','Intercept.',intF], ['clearances','Cortes',intF], ['ball_recovery','Recup.',intF]],
+    meio:     [['goals','Gols',intF], ['assists','Assist',intF], ['expected_assists','xA',f2F], ['key_passes','P-chave',intF]],
+    atacante: [['goals','Gols',intF], ['expected_goals','xG',f2F], ['expected_goals_on_target','xGOT',f2F], ['shots_on_target','No alvo',intF]],
   }};
   const pos = playerFilters.pos;
   // 'Todas' = Gols e Assist separados (não G+A); posição filtrada = stats dela.
@@ -6139,7 +6321,7 @@ let modalTab = 'scores';
 let expandedGame = null;  // índice do jogo expandido na aba Jogos (accordion)
 
 function openTeamModal(team) {{
-  const d = TEAMS_DETAIL[team];
+  const d = teamDetailAt(team, currentJogo);
   if (!d) return;
   modalTeam = team;
   modalTab = 'scores';
@@ -6427,6 +6609,14 @@ function _playerCardHtml(p, vside, hside) {{
 
 function _rosterPlayerCardHtml(p) {{
   const n = (k) => p[k] == null ? 0 : Number(p[k] || 0);
+  const fmt = (v, digits = 0) => {{
+    if (v == null || !Number.isFinite(Number(v))) return null;
+    return digits ? Number(v).toFixed(digits) : String(Math.round(Number(v)));
+  }};
+  const metric = (key, digits = 0) => {{
+    const v = n(key);
+    return Math.abs(v) > 0 ? fmt(v, digits) : null;
+  }};
   const ctx = [];
   if (n('gols')) ctx.push(`<span class="pc-tag goal">⚽ ${{n('gols')}} gol${{n('gols') > 1 ? 's' : ''}}</span>`);
   if (n('gols_contra')) ctx.push(`<span class="pc-tag vermelho">🥅 ${{n('gols_contra')}} gol${{n('gols_contra') > 1 ? 's' : ''}} contra</span>`);
@@ -6459,6 +6649,33 @@ function _rosterPlayerCardHtml(p) {{
     ? `<span class="pc-chip">${{ratingCount}} nota${{ratingCount === 1 ? '' : 's'}}</span>`
     : '';
   const gamesCtx = `<span class="pc-tag neutral">${{gameCount}} jogo${{gameCount === 1 ? '' : 's'}}</span>`;
+  const role = p.pos_group || 'Sem posição';
+  const advancedRows = (() => {{
+    if (role === 'Goleiros') return [
+      ['xGP', metric('xgp', 2)], ['Pênaltis def.', metric('penaltis_defendidos')],
+      ['Bolas altas', metric('bolas_altas')], ['Socos', metric('socos')],
+    ];
+    if (role === 'Defensores') return [
+      ['Desarmes', metric('desarmes')], ['Interceptações', metric('interceptacoes')],
+      ['Cortes', metric('cortes')], ['Recuperações', metric('recuperacoes')],
+      ['Duelos ganhos', metric('duelos')], ['Bloqueios', metric('bloqueios')],
+    ];
+    if (role === 'Meias') return [
+      ['xG', metric('xg', 2)], ['xA', metric('xa', 2)],
+      ['Passes-chave', metric('passes_chave')], ['Chances criadas', metric('gr_chances_criadas')],
+      ['Recuperações', metric('recuperacoes')], ['Dribles', metric('dribles')],
+    ];
+    if (role === 'Atacantes') return [
+      ['xG', metric('xg', 2)], ['xGOT', metric('xgot', 2)], ['xA', metric('xa', 2)],
+      ['Chances convert.', metric('gr_chances_convertidas')], ['Chances perdidas', metric('gr_chances_perdidas')],
+      ['Dribles', metric('dribles')],
+    ];
+    return [
+      ['xG', metric('xg', 2)], ['xA', metric('xa', 2)],
+      ['Passes-chave', metric('passes_chave')], ['Recuperações', metric('recuperacoes')],
+      ['Desarmes', metric('desarmes')], ['Defesas', metric('defesas')],
+    ];
+  }})();
   return `<div class="pcard el-pop" style="--el-pop-left:${{anchor.left}}px;--el-pop-top:${{anchor.top}}px;--pc-x:${{off.x || 0}}px;--pc-y:${{off.y || 0}}px" onclick="event.stopPropagation()">
     <div class="pc-head" onpointerdown="startPlayerCardDrag(event, '${{keyEsc}}')">
       <span class="pc-num">${{p.num ?? ''}}</span>
@@ -6475,6 +6692,7 @@ function _rosterPlayerCardHtml(p) {{
       ['Vermelhos', n('vermelhos')], ['Faltas', n('faltas')],
       ['Faltas sofridas', n('faltas_sofridas')], ['Impedimentos', n('impedimentos')],
     ])}}
+    ${{group('Avançadas', advancedRows)}}
   </div>`;
 }}
 
@@ -6487,10 +6705,10 @@ function _esc(t) {{
 function _renderStory(raw) {{
   if (!raw) return '';
   // wikilinks [[a|b]]/[[a]] → texto puro (antes de escapar, pois usam [])
-  let t = raw.replace(/\[\[[^|\]]*\|([^\]]+)\]\]/g, '$1').replace(/\[\[([^\]]+)\]\]/g, '$1');
+  let t = raw.replace(/\\[\\[[^|\\]]*\\|([^\\]]+)\\]\\]/g, '$1').replace(/\\[\\[([^\\]]+)\\]\\]/g, '$1');
   t = _esc(t);
   // **negrito** e *itálico*
-  t = t.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/\*([^*]+)\*/g, '<i>$1</i>');
+  t = t.replace(/\\*\\*([^*]+)\\*\\*/g, '<b>$1</b>').replace(/\\*([^*]+)\\*/g, '<i>$1</i>');
 
   // agrupa linhas em parágrafos e listas
   const lines = t.split('\\n');
@@ -6499,7 +6717,7 @@ function _renderStory(raw) {{
   for (let ln of lines) {{
     ln = ln.trim();
     if (!ln) {{ flushList(); continue; }}
-    const m = ln.match(/^[-•]\s+(.*)/);
+    const m = ln.match(/^[-•]\\s+(.*)/);
     if (m) {{ list.push(m[1]); }}
     else {{ flushList(); html += `<p>${{ln}}</p>`; }}
   }}
@@ -6831,7 +7049,7 @@ function renderArchetypeDetail(e) {{
 function selectArquetipo(arq) {{
   estiloArqSel = arq;
   const host = document.getElementById('esArqDetail');
-  const d = TEAMS_DETAIL[modalTeam];
+  const d = teamDetailAt(modalTeam, currentJogo);
   if (host && d) host.innerHTML = renderArchetypeDetail(d.estilo);
   document.querySelectorAll('.es-perfil-row').forEach(r =>
     r.classList.toggle('sel', r.dataset.arq === arq));
@@ -6889,7 +7107,7 @@ function selectArquetipoDropdown(arq) {{
 }}
 
 function renderModalBody() {{
-  const d = TEAMS_DETAIL[modalTeam];
+  const d = teamDetailAt(modalTeam, currentJogo);
   const body = document.getElementById('modalBody');
   if (!d) {{ body.innerHTML = ''; return; }}
 
@@ -7017,7 +7235,16 @@ function renderModalBody() {{
     const rosterPlayers = players.filter(p => p.in_roster !== false);
     const extraPlayers = players.filter(p => p.in_roster === false);
     const val = (p, k) => p[k] == null ? 0 : Number(p[k] || 0);
-    const impact = (p) => val(p, 'gols') * 6 + val(p, 'assist') * 5 + val(p, 'no_alvo') * 3 + val(p, 'chutes') + val(p, 'defesas') * 4;
+    const fmt = (v, digits = 0) => {{
+      if (v == null || !Number.isFinite(Number(v))) return '—';
+      return digits ? Number(v).toFixed(digits) : String(Math.round(Number(v)));
+    }};
+    const impact = (p) => (
+      val(p, 'gols') * 7 + val(p, 'assist') * 5 + val(p, 'xg') * 2.5 + val(p, 'xa') * 2.5 +
+      val(p, 'no_alvo') * 3 + val(p, 'passes_chave') * 1.2 + val(p, 'defesas') * 4 +
+      val(p, 'xgp') * 3 + val(p, 'desarmes') * 1.2 + val(p, 'interceptacoes') +
+      val(p, 'recuperacoes') * 0.7 + val(p, 'rating_media') * 0.8
+    );
     const sortPlayer = (a, b) => (a.pos_order ?? 99) - (b.pos_order ?? 99) || impact(b) - impact(a) || val(b, 'jogos') - val(a, 'jogos') || _esc(a.name).localeCompare(_esc(b.name));
     const active = rosterPlayers.filter(p => val(p, 'jogos') > 0).sort(sortPlayer);
     const unused = rosterPlayers.filter(p => val(p, 'jogos') <= 0).sort(sortPlayer);
@@ -7027,12 +7254,12 @@ function renderModalBody() {{
       const ranked = rosterPlayers.filter(p => val(p, key) > 0).sort((a, b) => val(b, key) - val(a, key) || impact(b) - impact(a));
       return ranked[0] || null;
     }};
-    const leader = (label, key) => {{
+    const leader = (label, key, digits = 0) => {{
       const p = topBy(key);
       return `<div class="el-leader">
         <div class="el-leader-label">${{label}}</div>
         <div class="el-leader-main">
-          <span class="el-leader-val">${{p ? val(p, key) : '—'}}</span>
+          <span class="el-leader-val">${{p ? fmt(val(p, key), digits) : '—'}}</span>
           <span class="el-leader-name">${{p ? _esc(p.name) : 'sem registro'}}</span>
         </div>
       </div>`;
@@ -7095,8 +7322,12 @@ function renderModalBody() {{
     </div>` : '';
     const leaders = [
       leader('Gols', 'gols'),
-      leader('Assistências', 'assist'),
-      leader('Chutes', 'chutes'),
+      leader('xG', 'xg', 2),
+      leader('xA', 'xa', 2),
+      leader('Passes-chave', 'passes_chave'),
+      leader('Desarmes', 'desarmes'),
+      leader('Nota média', 'rating_media', 1),
+      leader('xGP', 'xgp', 2),
       leader('Defesas', 'defesas'),
     ].join('');
     body.innerHTML = `<div class="el-board">
