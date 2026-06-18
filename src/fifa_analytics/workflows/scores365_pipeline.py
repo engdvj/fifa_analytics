@@ -94,6 +94,12 @@ def run_scores365_pipeline(
         GOLD_DIR / "fact_team_match_stats" / "365scores_enrichment.parquet", enriched
     )
 
+    # --- Nota de atuação por jogador, casada ao match_id canônico ---
+    player_rating = _map_player_rating_to_canonical(player_stats)
+    write_dataframe(
+        GOLD_DIR / "fact_player_match_stats" / "365scores_rating.parquet", player_rating
+    )
+
     games_played = team_stats["source_game_id"].nunique() if not team_stats.empty else 0
     teams = team_stats["team"].nunique() if not team_stats.empty else 0
     players = player_stats["player_name"].nunique() if not player_stats.empty else 0
@@ -168,3 +174,28 @@ def _map_to_canonical_match_id(team_stats: pd.DataFrame) -> pd.DataFrame:
 
     merged = merged.rename(columns={"canonical_match_id": "match_id"})
     return merged[["match_id", "team", "opponent"] + available]
+
+
+def _map_player_rating_to_canonical(player_stats: pd.DataFrame) -> pd.DataFrame:
+    """Liga a nota de atuação (365Scores rating) ao match_id canônico, via o
+    mesmo casamento por CONFRONTO (team, opponent) usado para o team stats —
+    robusto à data divergente da fonte. Retorna [match_id, team, player_name,
+    rating]; o nome fica como vem da 365Scores e é reconciliado ao canônico no
+    merge final (ver _attach_player_rating em canonical_reports)."""
+    matches_path = GOLD_DIR / "dim_match" / "canonical_matches.parquet"
+    if not matches_path.exists() or player_stats.empty or "rating" not in player_stats.columns:
+        return pd.DataFrame(columns=["match_id", "team", "player_name", "rating"])
+
+    matches = read_dataframe(matches_path)[["canonical_match_id", "home_team", "away_team"]]
+    home_side = matches.rename(columns={"home_team": "team", "away_team": "opponent"})
+    away_side = matches.rename(columns={"away_team": "team", "home_team": "opponent"})
+    match_lookup = pd.concat([home_side, away_side], ignore_index=True)[
+        ["canonical_match_id", "team", "opponent"]
+    ]
+
+    sub = player_stats[["team", "opponent", "player_name", "rating"]].copy()
+    sub["rating"] = pd.to_numeric(sub["rating"], errors="coerce")
+    sub = sub.dropna(subset=["rating"])
+    merged = sub.merge(match_lookup, on=["team", "opponent"], how="inner")
+    merged = merged.rename(columns={"canonical_match_id": "match_id"})
+    return merged[["match_id", "team", "player_name", "rating"]]

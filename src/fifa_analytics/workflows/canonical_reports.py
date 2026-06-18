@@ -36,6 +36,65 @@ _EVENT_DEDUP_FAMILY = {
 }
 
 
+def _rating_name_tokens(name: str) -> set[str]:
+    """Tokens normalizados (>=2 chars) de um nome — casa 365Scores ao canônico
+    independente de ordem ('Hwang In-Beom' = 'In-beom Hwang') ou abreviação
+    ('Kane' ⊂ 'Harry Kane')."""
+    raw = unicodedata.normalize("NFKD", str(name or "")).encode("ASCII", "ignore").decode()
+    raw = raw.lower().replace("-", " ")
+    return {t for t in raw.split() if len(t) >= 2}
+
+
+def _attach_player_rating(player_stats: pd.DataFrame) -> pd.DataFrame:
+    """Anexa a coluna `rating` (nota de atuação 365Scores) ao canonical_player_stats.
+
+    O rating já vem casado ao match_id canônico (ver
+    _map_player_rating_to_canonical no scores365_pipeline). Aqui só falta casar o
+    NOME do jogador ao canônico — feito por sobreposição de tokens DENTRO do mesmo
+    (match_id, team), o que tolera abreviação e ordem invertida. É o ÚNICO ponto
+    onde esse casamento acontece: todos os consumidores leem `rating` do canonical.
+    """
+    if player_stats is None or player_stats.empty:
+        return player_stats
+    out = player_stats.copy()
+    out["rating"] = pd.NA
+
+    rating_path = GOLD_DIR / "fact_player_match_stats" / "365scores_rating.parquet"
+    if not rating_path.exists():
+        return out
+    rt = read_dataframe(rating_path)
+    if rt.empty or "rating" not in rt.columns:
+        return out
+
+    # index 365 por (match_id, team) → lista de (tokens, rating)
+    by_match_team: dict[tuple[str, str], list[tuple[set[str], float]]] = {}
+    for _, r in rt.iterrows():
+        key = (str(r["match_id"]), str(r["team"]))
+        by_match_team.setdefault(key, []).append(
+            (_rating_name_tokens(r["player_name"]), float(r["rating"]))
+        )
+
+    def _match(row: pd.Series) -> Any:
+        cands = by_match_team.get((str(row.get("match_id")), str(row.get("team"))))
+        if not cands:
+            return pd.NA
+        ptoks = _rating_name_tokens(row.get("player_name"))
+        if not ptoks:
+            return pd.NA
+        best, best_score = pd.NA, 0
+        for toks, rating in cands:
+            common = ptoks & toks
+            if not common:
+                continue
+            score = len(common) + (10 if (toks <= ptoks or ptoks <= toks) else 0)
+            if score > best_score:
+                best_score, best = score, round(rating, 2)
+        return best
+
+    out["rating"] = out.apply(_match, axis=1)
+    return out
+
+
 def run_canonical_index() -> dict[str, Path | int]:
     source_matches = _load_source_matches()
     if not source_matches:
@@ -46,6 +105,9 @@ def run_canonical_index() -> dict[str, Path | int]:
     canonical_team_stats = build_canonical_dataset(source_map, "fact_team_match_stats", "team_stats")
     canonical_lineups = build_canonical_dataset(source_map, "lineups", "lineups")
     canonical_player_stats = build_canonical_dataset(source_map, "fact_player_match_stats", "player_stats")
+    # Enriquece com a nota de atuação (365Scores) casada ao match_id canônico —
+    # fonte única: todos os consumidores leem `rating` daqui, sem re-casar.
+    canonical_player_stats = _attach_player_rating(canonical_player_stats)
     canonical_match_info = build_canonical_dataset(source_map, "match_info", "match_info")
     canonical_commentary = build_canonical_dataset(source_map, "fact_commentary", "commentary")
     canonical_shots = build_canonical_dataset(source_map, "fact_shots", "shots")
