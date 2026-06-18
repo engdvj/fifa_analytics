@@ -484,6 +484,27 @@ def test_build_player_match_features_assigns_profile_from_position():
     assert features[features["player_name"] == "Vinicius"]["perfil"].iloc[0] == "atacante"
 
 
+def test_build_player_match_features_includes_roster_players_without_stats():
+    players = pd.DataFrame([
+        _player("j1", "Brasil", "Vinicius ", position="AM-L", goals=1),
+    ])
+    rosters = pd.DataFrame([
+        {"team": "Brasil", "player_name": "Vinicius", "squad_position": "F"},
+        {"team": "Brasil", "player_name": "Neymar", "squad_position": "F"},
+    ])
+
+    features = build_player_match_features(players, rosters=rosters)
+
+    assert set(features["player_name"]) == {"Vinicius ", "Neymar"}
+    vinicius = features[features["player_name"] == "Vinicius "].iloc[0]
+    neymar = features[features["player_name"] == "Neymar"].iloc[0]
+    assert vinicius["roster_position"] == "F"
+    assert vinicius["perfil"] == "atacante"
+    assert neymar["appearances"] == 0
+    assert neymar["roster_position"] == "F"
+    assert neymar["perfil"] == "atacante"
+
+
 # ---------------------------------------------------------------------------
 # Métricas exclusivas de goleiro
 # ---------------------------------------------------------------------------
