@@ -1,0 +1,17 @@
+# Correções manuais de nome de jogador entre fontes.
+#
+# A ESPN às vezes escreve o nome de um jeito no elenco (roster) e de outro nas
+# estatísticas da partida — ex.: roster "Agustín Canobbio", stats "Agustín Cano"
+# (sobrenome truncado). Isso quebra o casamento roster↔stats e o jogador aparece
+# duplicado (um lado "não jogou", outro "fora do roster").
+#
+# Cada entrada mapeia: nome COMO APARECE NAS STATS -> nome CANÔNICO (do roster).
+# A chave é o nome de origem (qualquer fonte); o valor é o nome final desejado.
+# O casamento ignora acento, caixa e hífen, então não precisa repetir variações
+# triviais — só os casos onde o sobrenome/nome muda de fato.
+#
+# Organizado por seleção. Quando o detector de inconsistências (ver
+# analytics/name_reconciliation.py) avisar de um novo caso, adicione aqui.
+
+Uruguai:
+  "Agustín Cano": "Agustín Canobbio"

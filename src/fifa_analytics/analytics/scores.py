@@ -6,6 +6,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from fifa_analytics.analytics.name_reconciliation import (
+    apply_player_aliases,
+    detect_name_mismatches,
+)
 from fifa_analytics.utils.text import slugify
 
 # ---------------------------------------------------------------------------
@@ -896,6 +900,16 @@ def build_player_match_features(
 ) -> pd.DataFrame:
     if player_stats.empty and (rosters is None or rosters.empty):
         return pd.DataFrame()
+
+    # Reconcilia nomes ANTES de qualquer casamento por nome: aplica os apelidos
+    # curados (config/player_aliases.yaml) e detecta inconsistências novas entre
+    # stats e roster (provável truncamento), avisando no log + relatório de
+    # qualidade — assim casos como "Cano(bbio)" não passam despercebidos.
+    player_stats = apply_player_aliases(player_stats)
+    if lineups is not None and not lineups.empty:
+        lineups = apply_player_aliases(lineups)
+    if rosters is not None and not rosters.empty:
+        detect_name_mismatches(player_stats, rosters)
 
     metric_columns = [
         "appearances", "goals", "assists", "shots", "shots_on_target",

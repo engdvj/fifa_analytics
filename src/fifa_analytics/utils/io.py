@@ -33,6 +33,14 @@ def write_yaml(path: str | Path, data: Any) -> Path:
     return path
 
 
+def read_yaml(path: str | Path) -> Any:
+    path = Path(path)
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8") as file:
+        return yaml.safe_load(file)
+
+
 def write_dataframe(path: str | Path, dataframe: pd.DataFrame) -> Path:
     path = Path(path)
     ensure_dir(path.parent)
