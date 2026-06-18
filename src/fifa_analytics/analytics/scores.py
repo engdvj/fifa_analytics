@@ -21,6 +21,25 @@ from fifa_analytics.utils.text import slugify
 # (vencer a Alemanha valoriza mais que vencer Curaçao) — sem isso, uma goleada
 # contra um time fraco e contra um time forte pesam exatamente igual.
 # ---------------------------------------------------------------------------
+# Peso da nota de atuação (rating 365Scores) no score_geral do JOGADOR. É o maior
+# componente isolado: a opinião de atuação é o melhor sinal de qualidade que temos
+# por jogo. Os números do jogo (gols/assists/chutes, ponderados por perfil) dividem
+# o restante (1 - este peso). Sem rating na linha, o peso é redistribuído.
+PLAYER_RATING_WEIGHT = 0.50
+
+# Referências de produção/jogo (escala absoluta 0–100) para os componentes
+# OFENSIVOS de atacante e meia — a taxa/jogo que mapeia a nota 100. Calibradas
+# para padrão de elite sustentável num torneio curto. Só produção ofensiva usa
+# escala absoluta (preserva proporção: 3 gols > 1 gol); defensor e goleiro seguem
+# z-score relativo, pois suas métricas não são "produção acumulável".
+PLAYER_PRODUCTION_REFS = {
+    "goals_per_game": 3.0,            # 3 gols/jogo = teto (hat-trick); 1 gol ≈ 33
+    "assists_per_game": 2.5,          # teto alto p/ assist não bater 100 fácil
+    "participations_per_game": 3.0,   # gols+assist/jogo (meia)
+    "shots_on_target_per_game": 5.0,  # 5 chutes no alvo/jogo = teto
+    "total_shots_per_game": 8.0,      # 8 finalizações/jogo = teto
+}
+
 TEAM_SCORE_WEIGHTS = {
     "score_resultado": 0.35,
     "score_ataque": 0.15,
@@ -1015,6 +1034,20 @@ def build_player_scores(player_match_features: pd.DataFrame) -> pd.DataFrame:
     }
     available = {c: agg for c, agg in aggregations.items() if c in player_match_features.columns}
     scores = player_match_features.groupby(group_columns, dropna=False).agg(available).reset_index()
+
+    # Nota de atuação média (rating 365Scores) — só de jogos REALMENTE disputados
+    # (appearances>0): a fonte às vezes traz nota de quem não entrou. Vira a coluna
+    # `rating_medio`, consumida como componente do score_geral em _score_by_profile.
+    if "rating" in player_match_features.columns:
+        _r = player_match_features.assign(rating=pd.to_numeric(player_match_features["rating"], errors="coerce"))
+        if "appearances" in _r.columns:
+            _r = _r[pd.to_numeric(_r["appearances"], errors="coerce").fillna(0) > 0]
+        _r = _r.dropna(subset=["rating"])
+        if not _r.empty:
+            rating_avg = _r.groupby(group_columns, dropna=False)["rating"].mean().reset_index(name="rating_medio")
+            scores = scores.merge(rating_avg, on=group_columns, how="left")
+    if "rating_medio" not in scores.columns:
+        scores["rating_medio"] = pd.NA
     # jogos = partidas REALMENTE disputadas (soma de appearances). Cair pro nº de
     # partidas listadas só se appearances não existir/for tudo nulo — senão reserva
     # que nunca entrou contaria como 1 jogo (e recebia score sem ter jogado).
@@ -1284,6 +1317,21 @@ def _zscore_to_100(values: pd.Series, lower_is_better: bool = False) -> pd.Serie
     return ((z.clip(-3, 3) + 3) / 6 * 100).clip(0, 100)
 
 
+def _absolute_to_100(values: pd.Series, reference: float) -> pd.Series:
+    """Escala ABSOLUTA 0–100: ``valor/referência × 100``, saturando em 100.
+
+    Diferente do z-score (relativo à distribuição), preserva a PROPORÇÃO entre
+    valores: 3 gols/jogo vale ~3× o de 1 gol/jogo. Usado nos componentes de
+    PRODUÇÃO do jogador (gols/assists/chutes), onde o z-score achatava tudo —
+    com a maioria zerada, qualquer um que marcava estourava o teto e 1 gol
+    empatava com 3. A `referência` é a taxa/jogo de elite que mapeia a 100
+    (ex.: 1 gol/jogo = produção excelente sustentada num torneio curto)."""
+    numeric = pd.to_numeric(values, errors="coerce").fillna(0).astype(float)
+    if reference <= 0:
+        return pd.Series(0.0, index=numeric.index)
+    return (numeric / reference * 100).clip(0, 100)
+
+
 def _normalize(values: pd.Series, lower_is_better: bool = False) -> pd.Series:
     """Min-max 0–100. Mantido para compatibilidade interna."""
     numeric = pd.to_numeric(values, errors="coerce").fillna(0).astype(float)
@@ -1437,14 +1485,42 @@ def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
     """
     result = pd.Series(50.0, index=scores.index)
 
+    # Peso da nota de atuação (rating 365) no score_geral do jogador. É o maior
+    # componente isolado: os números do jogo (gols/assists/chutes) ocupam o
+    # restante (PERF_WEIGHT). Sem isso, um craque com nota 9.8 podia pontuar menos
+    # que um jogador de nota 8.6 — a opinião de atuação ficava de fora.
+    RATING_WEIGHT = PLAYER_RATING_WEIGHT
+    PERF_WEIGHT = 1.0 - RATING_WEIGHT  # reescala os pesos de performance (somam 1.0)
+
     def _per_game(col: str, pool: pd.DataFrame) -> pd.Series:
         if col not in pool.columns:
             return pd.Series(0.0, index=pool.index)
         return _safe_divide(pool[col].fillna(0), pool["jogos"])
 
     def _wavg(components_weights: list[tuple[pd.Series, float]]) -> pd.Series:
-        total_w = sum(w for _, w in components_weights)
-        return sum(s * w for s, w in components_weights) / total_w
+        """Média ponderada NaN-aware POR LINHA: componente ausente (NaN) numa linha
+        tem o peso redistribuído entre os presentes daquela linha — quem não tem
+        nota 365 não é puxado pra 50, só ignora aquele componente."""
+        idx = components_weights[0][0].index
+        num = pd.Series(0.0, index=idx)
+        den = pd.Series(0.0, index=idx)
+        for series, weight in components_weights:
+            s = pd.to_numeric(series, errors="coerce")
+            present = s.notna()
+            num = num.add((s.fillna(0) * weight).where(present, 0.0), fill_value=0.0)
+            den = den.add(pd.Series(weight, index=idx).where(present, 0.0), fill_value=0.0)
+        return (num / den.replace(0.0, np.nan)).fillna(50.0)
+
+    # z-score da nota de atuação DENTRO do pool do perfil (NaN onde não há nota,
+    # p/ o _wavg redistribuir o peso). Calculado por perfil dentro do loop.
+    def _rating_component(pool: pd.DataFrame) -> pd.Series:
+        if "rating_medio" not in pool.columns:
+            return pd.Series(np.nan, index=pool.index)
+        r = pd.to_numeric(pool["rating_medio"], errors="coerce")
+        if r.notna().sum() == 0:
+            return pd.Series(np.nan, index=pool.index)
+        z = _zscore_to_100(r.fillna(r.mean()))
+        return z.where(r.notna(), np.nan)
 
     for profile in ["goleiro", "defensor", "meio", "atacante"]:
         mask = scores["perfil"] == profile
@@ -1452,22 +1528,26 @@ def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
             continue
         pool = scores[mask].copy()
 
+        rating_z = _rating_component(pool)
+
         if profile == "goleiro":
             saves_col = pool["saves"].fillna(0) if "saves" in pool.columns else pd.Series(0.0, index=pool.index)
             conceded_col = pool["goals_conceded"].fillna(0) if "goals_conceded" in pool.columns else pd.Series(0.0, index=pool.index)
             save_rate = _safe_divide(saves_col, saves_col + conceded_col)
             raw = _wavg([
-                (_zscore_to_100(_per_game("saves", pool)),                          0.4),
-                (_zscore_to_100(save_rate),                                         0.4),
-                (_zscore_to_100(_per_game("goals_conceded", pool), lower_is_better=True), 0.2),
+                (_zscore_to_100(_per_game("saves", pool)),                          0.4 * PERF_WEIGHT),
+                (_zscore_to_100(save_rate),                                         0.4 * PERF_WEIGHT),
+                (_zscore_to_100(_per_game("goals_conceded", pool), lower_is_better=True), 0.2 * PERF_WEIGHT),
+                (rating_z,                                                          RATING_WEIGHT),
             ])
 
         elif profile == "defensor":
             raw = _wavg([
-                (_zscore_to_100(_per_game("fouls_drawn", pool)),                                    0.4),
-                (_zscore_to_100(_per_game("shots_on_target", pool)),                                0.2),
-                (_zscore_to_100(_per_game("goals_conceded", pool), lower_is_better=True),           0.3),
-                (_zscore_to_100(_per_game("fouls_committed", pool), lower_is_better=True),          0.1),
+                (_zscore_to_100(_per_game("fouls_drawn", pool)),                                    0.4 * PERF_WEIGHT),
+                (_zscore_to_100(_per_game("shots_on_target", pool)),                                0.2 * PERF_WEIGHT),
+                (_zscore_to_100(_per_game("goals_conceded", pool), lower_is_better=True),           0.3 * PERF_WEIGHT),
+                (_zscore_to_100(_per_game("fouls_committed", pool), lower_is_better=True),          0.1 * PERF_WEIGHT),
+                (rating_z,                                                                          RATING_WEIGHT),
             ])
 
         elif profile == "meio":
@@ -1484,10 +1564,11 @@ def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
             if isinstance(total_shots, int):
                 total_shots = pd.Series(0.0, index=pool.index)
             raw = _wavg([
-                (_zscore_to_100(_safe_divide(participacoes, pool["jogos"])),      0.5),
-                (_zscore_to_100(_per_game("shots_on_target", pool)),              0.2),
-                (_zscore_to_100(_safe_divide(total_shots, pool["jogos"])),        0.1),
-                (_zscore_to_100(_per_game("fouls_drawn", pool)),                  0.2),
+                (_absolute_to_100(_safe_divide(participacoes, pool["jogos"]), PLAYER_PRODUCTION_REFS["participations_per_game"]),  0.5 * PERF_WEIGHT),
+                (_absolute_to_100(_per_game("shots_on_target", pool), PLAYER_PRODUCTION_REFS["shots_on_target_per_game"]),         0.2 * PERF_WEIGHT),
+                (_absolute_to_100(_safe_divide(total_shots, pool["jogos"]), PLAYER_PRODUCTION_REFS["total_shots_per_game"]),       0.1 * PERF_WEIGHT),
+                (_zscore_to_100(_per_game("fouls_drawn", pool)),                  0.2 * PERF_WEIGHT),
+                (rating_z,                                                        RATING_WEIGHT),
             ])
 
         else:  # atacante — sem fouls_drawn; usa todos os chutes tentados
@@ -1498,10 +1579,11 @@ def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
             if isinstance(total_shots, int):
                 total_shots = pd.Series(0.0, index=pool.index)
             raw = _wavg([
-                (_zscore_to_100(_per_game("goals", pool)),                        0.5),
-                (_zscore_to_100(_per_game("assists", pool)),                      0.2),
-                (_zscore_to_100(_per_game("shots_on_target", pool)),              0.2),
-                (_zscore_to_100(_safe_divide(total_shots, pool["jogos"])),        0.1),
+                (_absolute_to_100(_per_game("goals", pool), PLAYER_PRODUCTION_REFS["goals_per_game"]),                   0.5 * PERF_WEIGHT),
+                (_absolute_to_100(_per_game("assists", pool), PLAYER_PRODUCTION_REFS["assists_per_game"]),               0.2 * PERF_WEIGHT),
+                (_absolute_to_100(_per_game("shots_on_target", pool), PLAYER_PRODUCTION_REFS["shots_on_target_per_game"]), 0.2 * PERF_WEIGHT),
+                (_absolute_to_100(_safe_divide(total_shots, pool["jogos"]), PLAYER_PRODUCTION_REFS["total_shots_per_game"]), 0.1 * PERF_WEIGHT),
+                (rating_z,                                                        RATING_WEIGHT),
             ])
 
         conf = _sample_confidence(pool["jogos"])
