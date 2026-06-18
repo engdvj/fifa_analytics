@@ -264,6 +264,18 @@ _commentary = _strip_name_cols(_commentary, ("player", "participants"))
 _p365 = _strip_name_cols(_p365, ("player_name",))
 _rosters = _strip_name_cols(_rosters, ("player_name",))
 
+# Aplica os apelidos curados (config/player_aliases.yaml) ao nome do jogador,
+# pela MESMA fonte única usada no pipeline — assim o detalhe do jogo no dashboard
+# mostra o nome canônico (ex.: "Agustín Cano" das stats vira "Agustín Canobbio")
+# e não duplica o jogador entre lineup/stats e o elenco oficial.
+try:
+    from fifa_analytics.analytics.name_reconciliation import apply_player_aliases as _apply_aliases
+    _lineups = _apply_aliases(_lineups)
+    _pstats = _apply_aliases(_pstats)
+    _rosters = _apply_aliases(_rosters)
+except Exception:  # standalone sem o pacote instalado: segue sem aliases
+    pass
+
 import re as _re
 import unicodedata as _ud
 
