@@ -65,11 +65,28 @@ METRIC_COLS = {
     "estilo_largura": "estilo_largura",
 }
 
-tl = pd.read_parquet(SNAPSHOTS_DIR / "snapshot_timeline.parquet")
-jogos = sorted(tl["snapshot_jogo"].unique())
-
 matches_df = pd.read_parquet(Path("data/gold/dim_match/canonical_matches.parquet"))
 match_info = matches_df.set_index("match_id")[["home_team", "away_team", "home_score", "away_score"]].to_dict("index")
+
+tl = pd.read_parquet(SNAPSHOTS_DIR / "snapshot_timeline.parquet")
+snapshot_match_by_n = tl.groupby("snapshot_jogo")["match_id_referencia"].first().to_dict()
+match_temporal_order = matches_df.set_index("match_id")["temporal_order"].to_dict() if "temporal_order" in matches_df.columns else {}
+
+
+def _snapshot_order_key(n: int) -> tuple[float, int]:
+    mid = snapshot_match_by_n.get(n)
+    order = match_temporal_order.get(mid)
+    try:
+        order_num = float(order)
+    except (TypeError, ValueError):
+        order_num = float("inf")
+    if pd.isna(order_num):
+        order_num = float("inf")
+    return order_num, int(n)
+
+
+jogos = sorted(tl["snapshot_jogo"].unique(), key=_snapshot_order_key)
+prev_jogo_by_n = {n: (jogos[i - 1] if i else None) for i, n in enumerate(jogos)}
 
 # Nota: o placar AO VIVO não fica no HTML (estático demais para tempo real) —
 # vive na janela do watcher (watcher/fifa_progress.py), que é leve e atualiza
@@ -81,6 +98,7 @@ for n in jogos:
     wp = SNAPSHOTS_DIR / f"weights_jogo_{n:03d}.json"
     pesos = json.loads(wp.read_text())["pesos"] if wp.exists() else {}
     match_id = snap["match_id_referencia"].iloc[0]
+    match_source_n = str(match_id).rsplit("_", 1)[-1] if "_" in str(match_id) else str(n).zfill(3)
 
     mi = match_info.get(match_id, {})
     home = mi.get("home_team", "?")
@@ -88,12 +106,13 @@ for n in jogos:
     hs = mi.get("home_score")
     as_ = mi.get("away_score")
     score_str = f"{int(hs)}–{int(as_)}" if hs is not None and not pd.isna(hs) else "?"
-    match_label = f"Jogo {n} · {home} {score_str} {away}"
+    match_label = f"Jogo {match_source_n} · {home} {score_str} {away}"
     home_flag = FLAGS.get(home, "🏳️")
     away_flag = FLAGS.get(away, "🏳️")
 
-    if n > 1:
-        prev = tl[tl["snapshot_jogo"] == n - 1].set_index("team")["jogos"]
+    prev_n = prev_jogo_by_n.get(n)
+    if prev_n is not None:
+        prev = tl[tl["snapshot_jogo"] == prev_n].set_index("team")["jogos"]
         curr = snap.set_index("team")["jogos"]
         playing = curr[curr > prev.reindex(curr.index).fillna(0)].index.tolist()
     else:
@@ -134,6 +153,7 @@ for n in jogos:
         "match_id": match_id,
         "match_label": match_label,
         "match_n": int(n),
+        "source_match_n": match_source_n,
         "home": home, "away": away, "score": score_str,
         "home_flag": home_flag, "away_flag": away_flag,
         "pesos": {k: round(v * 100) for k, v in pesos.items()},
@@ -141,6 +161,53 @@ for n in jogos:
     }
 
 data_json = json.dumps(data, ensure_ascii=False)
+
+
+# ── Dados de JOGADORES por snapshot (aba Jogadores) ────────────────────────────
+# Espelha a estrutura de seleções: PLAYER_DATA[n] = lista de jogadores no
+# snapshot do jogo n (scores acumulados até ali). PLAYER_META = metadados
+# estáticos (time/perfil/slug) usados para filtro e link. Gerado pelo
+# snapshot_pipeline em player_snapshot_timeline.parquet.
+_PLAYER_TL_PATH = SNAPSHOTS_DIR / "player_snapshot_timeline.parquet"
+player_data: dict = {}
+player_meta: dict = {}
+if _PLAYER_TL_PATH.exists():
+    ptl = pd.read_parquet(_PLAYER_TL_PATH)
+    # campos numéricos/textuais expostos por jogador no snapshot
+    _PNUM = [
+        "jogos", "score_geral", "ranking_score_geral", "rating_365",
+        "goals", "assists", "participacoes_gol", "saves", "goals_conceded",
+        "shots_on_target", "yellow_cards", "red_cards",
+        "gols_por_jogo", "assistencias_por_jogo", "participacoes_por_jogo",
+        "chutes_no_alvo_por_jogo", "defesas_por_jogo",
+        "faltas_cometidas_por_jogo", "faltas_sofridas_por_jogo",
+    ]
+    for n in sorted(ptl["snapshot_jogo"].unique()):
+        snap = ptl[ptl["snapshot_jogo"] == n]
+        rows = []
+        for _, r in snap.iterrows():
+            entry = {"slug": r["player_slug"], "name": r["player_name"],
+                     "team": r["team"], "perfil": r.get("perfil"),
+                     "nivel_evidencia": r.get("nivel_evidencia")}
+            for k in _PNUM:
+                v = r.get(k)
+                try:
+                    entry[k] = round(float(v), 2) if v is not None and not pd.isna(v) else None
+                except (TypeError, ValueError):
+                    entry[k] = None
+            rows.append(entry)
+        player_data[str(int(n))] = rows
+    # metadados estáticos (do estado final): perfil/time/slug/camisa por jogador
+    last = ptl[ptl["snapshot_jogo"] == ptl["snapshot_jogo"].max()]
+    for _, r in last.iterrows():
+        _sn = r.get("shirt_number")
+        player_meta[r["player_slug"]] = {
+            "name": r["player_name"], "team": r["team"], "perfil": r.get("perfil"),
+            "shirt": int(_sn) if _sn is not None and not pd.isna(_sn) else None,
+        }
+
+player_data_json = json.dumps(player_data, ensure_ascii=False)
+player_meta_json = json.dumps(player_meta, ensure_ascii=False)
 
 
 def _sort_key_ptbr(s: str) -> str:
@@ -206,6 +273,17 @@ def _name_key(s) -> str:
     if not isinstance(s, str):
         return ""
     return _ud.normalize("NFKD", s).encode("ASCII", "ignore").decode().lower().strip()
+
+
+def _name_key_exact(s) -> str:
+    """Chave que PRESERVA acento/caixa (só normaliza espaços) — distingue jogadores
+    homônimos quando o acento é o que os diferencia (ex.: 'Ederson' goleiro vs
+    'Éderson' volante, ambos do Brasil). Usada nos joins DENTRO do mesmo time
+    (camisa, posição, rating), onde o nome exato é confiável; o _name_key folded
+    fica só p/ casamento fuzzy entre fontes (365scores)."""
+    if not isinstance(s, str):
+        return ""
+    return " ".join(s.split())
 
 
 def _surname_key(s) -> str:
@@ -283,8 +361,12 @@ def _player_stats_for(mid: str, team: str, date: str, opponent: str = "") -> dic
                 "fouls_committed": _num0(r.get("fouls_committed")), "fouls_drawn": _num0(r.get("fouls_drawn")),
                 "offsides": _num0(r.get("offsides")),
                 "yellow": _num0(r.get("yellow_cards")), "red": _num0(r.get("red_cards")),
+                "own_goals": _num0(r.get("own_goals")),
+                # nota de atuação: vem do canonical (fonte única, já casada)
+                "rating": _num0(r.get("rating")),
             }
-    # enriquecimento 365scores (rating, minutos, xA, key passes, % passes) por nome+time
+    # enriquecimento 365scores (minutos, xA, key passes, % passes) por nome+time —
+    # a nota (rating) NÃO é sobrescrita aqui: já veio do canonical acima.
     if not _p365.empty:
         s365 = _p365[(_p365["team"] == team)]
         if opponent and "opponent" in s365.columns:
@@ -298,7 +380,6 @@ def _player_stats_for(mid: str, team: str, date: str, opponent: str = "") -> dic
             r = _find_365_player_row(s365, nm)
             if r is None:
                 continue
-            st["rating"] = _num0(r.get("rating"))
             st["minutes"] = _num0(r.get("minutes"))
             st["xa"] = _num0(r.get("expected_assists"))
             st["key_passes"] = _num0(r.get("key_passes"))
@@ -613,15 +694,25 @@ def _build_team_lineup(mid: str, team: str, date: str = "", opponent: str = "") 
             }
             (starters if bool(p.get("is_starter")) else subs).append(item)
 
-    nrm = lambda s: (s or "").strip()
+    # chave de match tolerante: minúsculas, sem acento, hífen→espaço, espaços
+    # colapsados. Necessária porque lineup e commentary divergem (ex.: lineup
+    # "Al-Harbi" vs commentary "Al Harbi"; "Mohammed Abu Al-Shamat" vs "...Al Shamat").
+    def _mk(s):
+        s = _ud.normalize("NFKD", s or "").encode("ASCII", "ignore").decode().lower()
+        return " ".join(s.replace("-", " ").split())
+
     game_subs = _subs_for(mid, team)
-    entrou_min = {nrm(s["in"]): s["minute"] for s in game_subs if s.get("in")}
-    saiu_min = {nrm(s["out"]): s["minute"] for s in game_subs if s.get("out")}
+    # mapa chave-normalizada → nome de exibição do lineup (p/ o par da troca)
+    name_by_mk = {_mk(it["name"]): it["name"] for it in starters + subs if it.get("name")}
+    entrou_min = {_mk(s["in"]): s["minute"] for s in game_subs if s.get("in")}
+    saiu_min = {_mk(s["out"]): s["minute"] for s in game_subs if s.get("out")}
     partner_of = {}
     for s in game_subs:
         if s.get("in") and s.get("out"):
-            partner_of[nrm(s["in"])] = nrm(s["out"])
-            partner_of[nrm(s["out"])] = nrm(s["in"])
+            ki, ko = _mk(s["in"]), _mk(s["out"])
+            # guarda o nome de exibição do parceiro (do lineup se existir; senão o do commentary)
+            partner_of[ki] = name_by_mk.get(ko, s["out"].strip())
+            partner_of[ko] = name_by_mk.get(ki, s["in"].strip())
 
     roster_names = [it["name"] for it in starters + subs if it.get("name")]
 
@@ -640,7 +731,7 @@ def _build_team_lineup(mid: str, team: str, date: str = "", opponent: str = "") 
     if not _events.empty:
         ce = _events[(_events["match_id"] == mid) & (_events["team"] == team)]
         for _, e in ce.iterrows():
-            et, ply = e.get("event_type"), resolve_name(e.get("player"))
+            et, ply = e.get("event_type"), _mk(resolve_name(e.get("player")))
             if not ply:
                 continue
             if et == "cartao_vermelho":
@@ -653,19 +744,22 @@ def _build_team_lineup(mid: str, team: str, date: str = "", opponent: str = "") 
     pstats_map = _player_stats_for(mid, team, date, opponent)
     for it in starters + subs:
         nm = it.get("name")
-        if nm in entrou_min:
-            it["entered"] = entrou_min[nm]
-        if nm in saiu_min:
-            it["exited"] = saiu_min[nm]
-        if nm in partner_of:
-            it["sub_with"] = partner_of[nm]
-        if nm in cards_of:
-            it["card"] = cards_of[nm]
-        if nm in goals_of:
-            it["goals"] = goals_of[nm]
+        k = _mk(nm)
+        if k in entrou_min:
+            it["entered"] = entrou_min[k]
+        if k in saiu_min:
+            it["exited"] = saiu_min[k]
+        if k in partner_of:
+            it["sub_with"] = partner_of[k]
+        if k in cards_of:
+            it["card"] = cards_of[k]
+        if k in goals_of:
+            it["goals"] = goals_of[k]
         if nm in pstats_map:
             # só guarda chaves com valor, p/ o card não mostrar campos vazios
             it["stats"] = {k: v for k, v in pstats_map[nm].items() if v is not None}
+            if it["stats"].get("own_goals"):
+                it["own_goal"] = it["stats"]["own_goals"]  # marca negativa no card
 
     return {
         "formation": formation, "starters": starters, "subs": subs,
@@ -820,6 +914,8 @@ for _team in _all_cup_teams:
     # — elenco agregado (stats somadas em todos os jogos)
     ps = _pstats[_pstats["team"] == _team]
     roster_team = _rosters[_rosters["team"] == _team] if not _rosters.empty else pd.DataFrame()
+    roster_keys = set(roster_team["player_name"].dropna().map(_name_key_exact)) if not roster_team.empty and "player_name" in roster_team.columns else set()
+    roster_count = len(roster_keys)
     players = []
     if not ps.empty or not roster_team.empty:
         pos_by_name: dict[str, str] = {}
@@ -835,7 +931,7 @@ for _team in _all_cup_teams:
                     if _clean_pos(v) and _clean_pos(v).upper() != "SUB"
                 ]
                 if vals:
-                    out[_name_key(nm)] = pd.Series(vals).value_counts().index[0]
+                    out[_name_key_exact(nm)] = pd.Series(vals).value_counts().index[0]
             return out
 
         def _mode_num(df: pd.DataFrame, col: str) -> dict[str, int]:
@@ -846,7 +942,7 @@ for _team in _all_cup_teams:
                 vals = [_num(v) for v in grp[col].tolist()]
                 vals = [v for v in vals if v is not None]
                 if vals:
-                    out[_name_key(nm)] = int(pd.Series(vals).value_counts().index[0])
+                    out[_name_key_exact(nm)] = int(pd.Series(vals).value_counts().index[0])
             return out
 
         if not _lineups.empty:
@@ -867,8 +963,9 @@ for _team in _all_cup_teams:
         else:
             p365_team = pd.DataFrame()
 
-        stat_cols = ["jogos", "gols", "assist", "chutes", "no_alvo", "amarelos", "vermelhos", "defesas", "faltas", "faltas_sofridas", "impedimentos"]
+        stat_cols = ["jogos", "gols", "assist", "chutes", "no_alvo", "amarelos", "vermelhos", "defesas", "faltas", "faltas_sofridas", "impedimentos", "gols_contra"]
         if not ps.empty:
+            _og_agg = ("own_goals", "sum") if "own_goals" in ps.columns else ("goals", lambda s: 0)
             agg = ps.groupby("player_name", dropna=True).agg(
                 jogos=("appearances", "sum"), gols=("goals", "sum"), assist=("assists", "sum"),
                 chutes=("shots", "sum"), no_alvo=("shots_on_target", "sum"),
@@ -876,14 +973,15 @@ for _team in _all_cup_teams:
                 defesas=("saves", "sum"),
                 faltas=("fouls_committed", "sum"), faltas_sofridas=("fouls_drawn", "sum"),
                 impedimentos=("offsides", "sum"),
+                gols_contra=_og_agg,
             ).reset_index()
         else:
             agg = pd.DataFrame(columns=["player_name", *stat_cols])
         if not roster_team.empty and "player_name" in roster_team.columns:
-            present = set(agg["player_name"].map(_name_key)) if not agg.empty else set()
+            present = set(agg["player_name"].map(_name_key_exact)) if not agg.empty else set()
             roster_missing = roster_team[
                 roster_team["player_name"].notna()
-                & ~roster_team["player_name"].map(_name_key).isin(present)
+                & ~roster_team["player_name"].map(_name_key_exact).isin(present)
             ][["player_name"]].drop_duplicates()
             if not roster_missing.empty:
                 for col in stat_cols:
@@ -892,14 +990,17 @@ for _team in _all_cup_teams:
         # ordena: gols, assistências, jogos
         agg = agg.sort_values(["gols", "assist", "jogos"], ascending=False)
         for _, p in agg.iterrows():
-            pkey = _name_key(p["player_name"])
+            pkey = _name_key_exact(p["player_name"])
             pos_raw = pos_by_name.get(pkey)
             pos_group = _position_group(pos_raw)
+            # nota de atuação média: do CANONICAL (fonte única, já casada por
+            # match+nome em _attach_player_rating) — substitui o casamento 365
+            # próprio do dashboard, que dava valores divergentes.
             rating_media = None
             rating_jogos = 0
-            if not p365_team.empty and "rating" in p365_team.columns:
-                r365 = _find_365_player_rows(p365_team, p["player_name"])
-                ratings = pd.to_numeric(r365.get("rating"), errors="coerce").dropna() if not r365.empty else pd.Series(dtype=float)
+            if not _pstats.empty and "rating" in _pstats.columns:
+                cps_p = _pstats[(_pstats["team"] == _team) & (_pstats["player_name"] == p["player_name"])]
+                ratings = pd.to_numeric(cps_p.get("rating"), errors="coerce").dropna() if not cps_p.empty else pd.Series(dtype=float)
                 if len(ratings):
                     rating_media = round(float(ratings.mean()), 1)
                     rating_jogos = int(len(ratings))
@@ -909,6 +1010,7 @@ for _team in _all_cup_teams:
                 "pos": _position_label(pos_raw),
                 "pos_group": pos_group,
                 "pos_order": _POS_GROUP_ORDER.get(pos_group, 99),
+                "in_roster": (pkey in roster_keys) if roster_keys else True,
                 "rating_media": rating_media,
                 "rating_jogos": rating_jogos,
                 "jogos": _num(p["jogos"]), "gols": _num(p["gols"]), "assist": _num(p["assist"]),
@@ -917,6 +1019,7 @@ for _team in _all_cup_teams:
                 "defesas": _num(p["defesas"]),
                 "faltas": _num(p["faltas"]), "faltas_sofridas": _num(p["faltas_sofridas"]),
                 "impedimentos": _num(p["impedimentos"]),
+                "gols_contra": _num(p.get("gols_contra", 0)),
             })
 
     # — resumo de scores + campanha (snapshot mais recente)
@@ -1014,6 +1117,7 @@ for _team in _all_cup_teams:
         },
         "score_labels": {k: v for k, v in _SCORE_KEYS},
         "jogos": jogos_list,
+        "roster_count": roster_count or len(players),
         "players": players,
     }
 
@@ -1021,7 +1125,6 @@ teams_detail_json = json.dumps(teams_detail, ensure_ascii=False)
 
 # Metadados de fase por snapshot — para colorir e agrupar os dots
 matches = matches_df
-match_order = json.loads(Path("data/gold/analytics/snapshots/match_order.json").read_text())
 
 STAGE_META = {
     "fase_de_grupos": {"label": "Fase de Grupos", "color": "#3b82f6"},
@@ -1045,9 +1148,10 @@ ROUND_LABELS = {
     ("final",9): "Final",
 }
 
-# match_id → número do snapshot (posição em match_order), se já processado
-snapshot_n_by_mid = {mid: n for n, mid in enumerate(match_order, 1)
-                     if str(n) in data}
+# match_id → número do snapshot real, se já processado. Usa o DATA gerado a
+# partir da timeline, não a posição do match_order persistido, porque a ordem
+# canônica pode ser corrigida sem mudar imediatamente os arquivos antigos.
+snapshot_n_by_mid = {frame["match_id"]: int(n) for n, frame in data.items()}
 
 # Dots de TODOS os 104 jogos, em ordem cronológica (temporal_order).
 # Cada um carrega o status (done/live/pending) para colorir.
@@ -1087,6 +1191,7 @@ for _ord, (_, mrow) in enumerate(matches_sorted.iterrows()):
     })
 
 snapshot_meta_json = json.dumps(snapshot_meta, ensure_ascii=False)
+snapshot_order_json = json.dumps([m["n"] for m in snapshot_meta if m["n"] is not None], ensure_ascii=False)
 
 # Grupos de métricas para o seletor agrupado no HTML (4 colunas no card)
 METRIC_GROUPS = [
@@ -1148,6 +1253,7 @@ LOWER_IS_BETTER = {
 metric_groups_json = json.dumps(METRIC_GROUPS, ensure_ascii=False)
 lower_is_better_json = json.dumps(list(LOWER_IS_BETTER), ensure_ascii=False)
 snapshot_meta_json_var = snapshot_meta_json  # alias para usar no f-string
+snapshot_order_json_var = snapshot_order_json
 
 # Métricas relacionadas: ao selecionar uma, as outras ficam destacadas no card
 METRIC_RELATIONS: dict[str, list[str]] = {
@@ -1171,12 +1277,13 @@ METRIC_RELATIONS: dict[str, list[str]] = {
     "precisao_chute":          ["chutes_por_jogo", "chutes_no_alvo_por_jogo", "gols_por_jogo", "score_eficiencia"],
     "key_passes_por_jogo":     ["gols_por_jogo", "escanteios_por_jogo", "score_eficiencia", "score_controle"],
 
-    # ── score_defesa ← gols_contra/jogo + chutes_no_alvo_sofridos/jogo + clean_sheet_rate
-    "score_defesa":            ["gols_contra_por_jogo", "chutes_sofridos_por_jogo", "jogos_sem_sofrer_gol", "defesas_por_jogo", "gols_contra"],
-    "gols_contra_por_jogo":    ["gols_contra", "chutes_sofridos_por_jogo", "jogos_sem_sofrer_gol", "defesas_por_jogo", "score_defesa"],
-    "chutes_sofridos_por_jogo":["gols_contra_por_jogo", "defesas_por_jogo", "jogos_sem_sofrer_gol", "score_defesa"],
-    "defesas_por_jogo":        ["chutes_sofridos_por_jogo", "gols_contra_por_jogo", "jogos_sem_sofrer_gol", "score_defesa"],
-    "jogos_sem_sofrer_gol":    ["gols_contra_por_jogo", "gols_contra", "defesas_por_jogo", "score_defesa"],
+    # ── score_defesa ← gols sofridos/jogo (eixo dominante, gol contra pesa +) +
+    #    volume sofrido segurado (solidez) ponderado pela força do adversário (Elo)
+    "score_defesa":            ["gols_contra_por_jogo", "gols_contra", "chutes_sofridos_por_jogo"],
+    "gols_contra_por_jogo":    ["gols_contra", "chutes_sofridos_por_jogo", "score_defesa"],
+    "chutes_sofridos_por_jogo":["gols_contra_por_jogo", "score_defesa"],
+    "defesas_por_jogo":        ["chutes_sofridos_por_jogo", "gols_contra_por_jogo"],
+    "jogos_sem_sofrer_gol":    ["gols_contra_por_jogo", "gols_contra"],
 
     # ── score_controle ← posse + passes + precisao_passes + posse_produtiva (chutes_no_alvo/posse) + dribbles
     "score_controle":          ["posse_media", "passes_por_jogo", "precisao_passes", "dribbles_won_por_jogo", "chutes_no_alvo_por_jogo"],
@@ -1221,9 +1328,10 @@ METRIC_RELATIONS_INDIRECT: dict[str, list[str]] = {
     "score_eficiencia":        ["chutes_por_jogo", "escanteios_por_jogo"],
     "precisao_chute":          ["escanteios_por_jogo"],
 
-    # defesa: chutes sofridos é proxy de chutes no alvo sofridos (insumo real)
-    "score_defesa":            ["faltas_por_jogo"],
-    "gols_contra_por_jogo":    ["faltas_por_jogo"],
+    # defesa: clean sheet e defesas do goleiro são CONSEQUÊNCIA da solidez, não
+    # insumo direto do score (que usa gols sofridos + volume × Elo do adversário).
+    "score_defesa":            ["jogos_sem_sofrer_gol", "defesas_por_jogo", "faltas_por_jogo"],
+    "gols_contra_por_jogo":    ["faltas_por_jogo", "jogos_sem_sofrer_gol"],
     "gols_contra":             ["chutes_sofridos_por_jogo", "faltas_por_jogo"],
 
     # controle: passes-chave e dribles são efeito do controle, não insumo direto
@@ -1263,32 +1371,60 @@ metric_relations_indirect_json = json.dumps(METRIC_RELATIONS_INDIRECT, ensure_as
 
 SCORE_INFO: dict[str, dict] = {
     "score_resultado": {
-        "desc": "Aproveitamento de pontos na campanha, ponderado por dificuldade dos adversários.",
-        "metricas": ["Pontos", "Aproveitamento %", "Saldo de Gols"],
+        "title": "Resultado",
+        "role": "Base da campanha",
+        "desc": "Mede o que o time já transformou em placar: pontos, saldo e aproveitamento.",
+        "detail": "Vitórias e empates pesam mais quando vêm contra adversários mais fortes. É o componente mais estável no começo da Copa.",
+        "good": "favorece quem pontua e constrói saldo",
+        "metricas": ["Pontos", "Aproveit.", "Saldo", "Gols +/-"],
     },
     "score_ataque": {
-        "desc": "Poder ofensivo: volume e qualidade das finalizações criadas.",
-        "metricas": ["Chutes", "Chutes no Alvo", "Passes-Chave", "Expected Assists"],
+        "title": "Ataque",
+        "role": "Volume ofensivo",
+        "desc": "Olha quanto o time cria e chega ao gol, não só se a bola entrou.",
+        "detail": "Finalizações, chutes no alvo e criação ajudam a separar um ataque dominante de um time que marcou em poucas chances.",
+        "good": "favorece pressão ofensiva constante",
+        "metricas": ["Gols/j", "Chutes", "No alvo", "P-chave"],
     },
     "score_defesa": {
-        "desc": "Solidez defensiva: sofrer poucas finalizações e poucos gols. Mede o resultado defensivo (chutes/gols sofridos), não o volume de desarmes — defender muito costuma indicar um time pressionado.",
-        "metricas": ["Chutes Sofridos", "Chutes no Alvo Sofridos", "Gols Sofridos", "Jogos sem sofrer gol"],
+        "title": "Defesa",
+        "role": "Proteção do gol",
+        "desc": "Sofrer menos gols sempre vale mais. Em caso de empate, sobe quem segurou mais pressão de um adversário forte.",
+        "detail": "Gol contra pesa mais (a defesa se desorganizou). Segurar volume sem levar gol conta a favor.",
+        "good": "favorece quem sofre poucos gols sob pressão de times fortes",
+        "metricas": ["Gols sofr.", "Gol contra", "Volume sofrido", "Força do rival"],
     },
     "score_eficiencia": {
-        "desc": "Conversão de oportunidades em gols: qualidade das finalizações.",
-        "metricas": ["Precisão de Chute %", "Conversão de Gols %", "Passes-Chave"],
+        "title": "Eficiência",
+        "role": "Qualidade da chance",
+        "desc": "Mede se o time transforma volume em perigo real.",
+        "detail": "Ajuda a diferenciar quem chuta muito sem direção de quem cria finalizações limpas e aproveita melhor as chances.",
+        "good": "favorece precisão e decisão no último terço",
+        "metricas": ["Precisão", "Alvo/chute", "Gols/chute", "P-chave"],
     },
     "score_controle": {
-        "desc": "Domínio do jogo: posse, passes e criação de jogadas.",
-        "metricas": ["Posse de Bola %", "Passes", "Precisão de Passes %", "Dribles"],
+        "title": "Controle",
+        "role": "Domínio territorial",
+        "desc": "Descreve o quanto o time controla a bola e sustenta posse com qualidade.",
+        "detail": "Tem peso menor porque posse não vence jogo sozinha, mas ajuda a explicar superioridade e estilo.",
+        "good": "favorece posse produtiva e circulação limpa",
+        "metricas": ["Posse", "Passes", "Precisão", "Dribles"],
     },
     "score_forca_relativa": {
-        "desc": "Força histórica via Rating Elo — cresce conforme os ratings se diferenciam ao longo do torneio.",
-        "metricas": ["Rating Elo", "Qualidade dos adversários vencidos"],
+        "title": "Força relativa",
+        "role": "Contexto do caminho",
+        "desc": "Usa o Elo acumulado para contextualizar contra quem o time performou.",
+        "detail": "No início pesa menos na prática, porque todos partem próximos. Conforme a Copa avança, vencer times fortes passa a separar melhor.",
+        "good": "favorece campanhas fortes contra adversários fortes",
+        "metricas": ["Rating Elo", "Margem", "Adversário", "Sequência"],
     },
     "score_disciplina": {
-        "desc": "Comportamento disciplinar: penaliza faltas, cartões amarelos e vermelhos.",
-        "metricas": ["Faltas / jogo", "Amarelos / jogo", "Vermelhos / jogo"],
+        "title": "Disciplina",
+        "role": "Risco disciplinar",
+        "desc": "Mostra o quanto faltas e cartões atrapalham o time.",
+        "detail": "É informativo e normalmente fica fora do peso principal quando não aparece nos pills. Vermelho pesa mais que amarelo.",
+        "good": "favorece times que competem sem se expor a punições",
+        "metricas": ["Faltas", "Amarelos", "Vermelhos", "Por jogo"],
     },
 }
 score_info_json = json.dumps(SCORE_INFO, ensure_ascii=False)
@@ -1362,23 +1498,44 @@ header {{
   display: none;
   position: absolute;
   top: calc(100% + 8px);
-  right: 0;
-  background: #161b22;
-  border: 1px solid #30363d;
-  border-radius: 8px;
-  padding: 9px 12px;
-  min-width: 200px;
-  max-width: 280px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: linear-gradient(180deg, #161d27 0%, #0d1117 100%);
+  border: 1px solid #2b3950;
+  border-radius: 10px;
+  padding: 12px;
+  width: 384px;
   white-space: normal;
-  z-index: 2000;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.8);
+  z-index: 20000;
+  box-shadow: 0 18px 46px rgba(0,0,0,0.85), 0 0 0 1px rgba(88,166,255,0.10);
   pointer-events: none;
 }}
 .w-pill:hover .w-tip {{ display: block; }}
-.w-tip-title {{ font-size: 0.68rem; font-weight: 700; color: #58a6ff; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 6px; }}
-.w-tip-desc  {{ font-size: 0.72rem; color: #8b949e; line-height: 1.5; margin-bottom: 6px; }}
-.w-tip-metrics {{ font-size: 0.7rem; color: #4ade80; }}
-.w-tip-metrics span {{ display: inline-block; background: #1a2a1a; border-radius: 3px; padding: 1px 5px; margin: 1px 2px; }}
+.w-tip::before {{
+  content: ""; position: absolute; top: -6px; left: 50%; transform: translateX(-50%) rotate(45deg);
+  width: 10px; height: 10px; background: #161d27; border-left: 1px solid #2b3950; border-top: 1px solid #2b3950;
+}}
+.w-tip-head {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 9px; }}
+.w-tip-title {{ font-size: 0.72rem; font-weight: 900; color: #79c0ff; text-transform: uppercase; letter-spacing: 0.8px; }}
+.w-tip-role {{ color: #8b949e; font-size: 0.68rem; font-weight: 700; margin-top: 2px; }}
+.w-tip-weight {{
+  min-width: 58px; text-align: right; color: #e6edf3; font-size: 1.15rem; font-weight: 900;
+  font-variant-numeric: tabular-nums; line-height: 1;
+}}
+.w-tip-weight span {{ display: block; margin-top: 3px; color: #6b7280; font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.5px; }}
+.w-tip-desc  {{ font-size: 0.78rem; color: #d6dee8; line-height: 1.35; margin-bottom: 7px; }}
+.w-tip-detail {{ color: #8b949e; font-size: 0.72rem; line-height: 1.35; margin-bottom: 9px; }}
+.w-tip-good {{
+  border: 1px solid #1f6feb55; background: #1f6feb18; color: #9fd1ff;
+  border-radius: 7px; padding: 7px 8px; font-size: 0.71rem; font-weight: 800; margin-bottom: 10px; line-height: 1.25;
+}}
+.w-tip-metrics {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; align-items: stretch; }}
+.w-tip-metrics span {{
+  display: inline-flex; align-items: center; justify-content: center; min-width: 0;
+  background: #0d2618; border: 1px solid #1f6f3a; color: #79d98f;
+  border-radius: 10px; padding: 4px 6px; font-size: 0.62rem; font-weight: 800;
+  text-align: center; line-height: 1.15; word-break: break-word; hyphens: auto;
+}}
 
 /* header direita: play + slider */
 .header-player {{
@@ -1579,6 +1736,10 @@ input[type=range] {{
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  --trajectory-sidebar-w: 190px;
+}}
+.main.trajectory-bottom {{
+  flex-direction: column;
 }}
 
 /* ── CHART ── */
@@ -1901,31 +2062,184 @@ input[type=range] {{
 
 /* ── SIDEBAR ── */
 .sidebar {{
-  width: 190px;
+  width: var(--trajectory-sidebar-w);
   background: #0d1117;
-  border-left: 1px solid #21262d;
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
   overflow: hidden;
+}}
+.trajectory-sidebar-resizer {{
+  width: 7px;
+  flex: 0 0 7px;
+  cursor: col-resize;
+  background: #0d1117;
+  border-left: 1px solid #21262d;
+  border-right: 1px solid #21262d;
+  position: relative;
+}}
+.trajectory-sidebar-resizer::before {{
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  width: 3px;
+  height: 52px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background: #30363d;
+}}
+.trajectory-sidebar-resizer:hover::before,
+.trajectory-sidebar-resizer.dragging::before {{
+  background: #58a6ff;
+}}
+.main.trajectory-bottom .sidebar {{
+  width: 100%;
+  height: 270px;
+  border-left: 0;
+  border-top: 1px solid #21262d;
+}}
+.main.trajectory-bottom .sidebar-header {{
+  display: grid;
+  grid-template-columns: auto minmax(220px, 1fr) minmax(260px, auto) auto;
+  align-items: center;
+  gap: 10px;
 }}
 .sidebar-header {{
   padding: 12px 12px 8px;
   border-bottom: 1px solid #21262d;
   flex-shrink: 0;
 }}
+.sidebar-title-row {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}}
+.traj-open-btn {{
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  background: #161b22;
+  color: #c9d1d9;
+  padding: 5px 8px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
+}}
+.traj-open-btn:hover {{ border-color: #58a6ff; color: #79c0ff; background: #1f6feb18; }}
 .sidebar-header h3 {{
   font-size: 0.68rem;
   color: #8b949e;
   text-transform: uppercase;
   letter-spacing: 1px;
-  margin-bottom: 5px;
+  margin-bottom: 0;
+}}
+.trajectory-dock,
+.trajectory-mode {{
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: #060910;
+  border: 1px solid #21262d;
+  border-radius: 6px;
+  padding: 2px;
+}}
+.traj-icon-btn,
+.traj-mode-btn {{
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #8b949e;
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+  padding: 5px 6px;
+}}
+.traj-mode-btn {{ padding: 5px 7px; }}
+.traj-icon-btn:hover,
+.traj-mode-btn:hover {{ color: #c9d1d9; background: #161b22; }}
+.traj-icon-btn.active,
+.traj-mode-btn.active {{ color: #58a6ff; background: #1f6feb22; }}
+.trajectory-controls {{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}}
+.main.trajectory-bottom .trajectory-controls {{ margin-top: 0; }}
+.trajectory-controls select {{
+  min-width: 0;
+  flex: 1;
+  background: #060910;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #e6edf3;
+  padding: 5px 7px;
+  font-size: 0.72rem;
+}}
+.trajectory-controls select:focus {{ outline: none; border-color: #1f6feb; }}
+.trajectory-teams {{
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  min-height: 24px;
+}}
+.main.trajectory-bottom .trajectory-teams {{
+  margin-top: 0;
+  justify-content: flex-end;
+}}
+.traj-chip {{
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  border: 1px solid #30363d;
+  background: #161b22;
+  color: #c9d1d9;
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 0.68rem;
+  font-weight: 800;
+}}
+.traj-chip-dot {{
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}}
+.traj-chip-name {{
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}}
+.traj-chip button {{
+  border: 0;
+  background: transparent;
+  color: #8b949e;
+  cursor: pointer;
+  font-size: 0.78rem;
+  line-height: 1;
+  padding: 0 1px;
+}}
+.traj-chip button:hover {{ color: #e6edf3; }}
+.trajectory-empty-chip {{
+  color: #6b7280;
+  font-size: 0.68rem;
 }}
 .sidebar-team {{
   font-size: 0.85rem;
   font-weight: 700;
   color: #58a6ff;
   min-height: 18px;
+  margin-top: 7px;
+}}
+.main.trajectory-bottom .sidebar-team {{
+  margin-top: 0;
+  text-align: right;
 }}
 .sidebar-body {{
   flex: 1;
@@ -1952,6 +2266,284 @@ input[type=range] {{
 .h-jogo {{ color: #6b7280; width: 24px; flex-shrink: 0; }}
 .h-val {{ font-weight: 700; color: #e6edf3; width: 38px; text-align: right; flex-shrink: 0; }}
 .h-rank {{ color: #e8c84a; font-size: 0.68rem; width: 28px; text-align: right; flex-shrink: 0; }}
+.trajectory-panel {{
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 100%;
+}}
+.main.trajectory-bottom .trajectory-panel {{
+  display: grid;
+  grid-template-columns: minmax(360px, 1fr) minmax(280px, 430px);
+  gap: 12px;
+  min-height: 0;
+}}
+.trajectory-chart {{
+  position: relative;
+  min-height: 138px;
+  border: 1px solid #21262d;
+  border-radius: 9px;
+  background:
+    radial-gradient(circle at 18% 14%, rgba(88,166,255,0.08), transparent 32%),
+    linear-gradient(180deg, #0b111b 0%, #070b12 100%);
+  overflow: hidden;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
+}}
+.main.trajectory-bottom .trajectory-chart {{ min-height: 190px; }}
+.trajectory-chart svg {{
+  width: 100%;
+  height: 100%;
+  display: block;
+}}
+.trajectory-axis-label {{
+  position: absolute;
+  left: 14px;
+  top: 12px;
+  color: #6b7280;
+  font-size: 0.62rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}}
+.trajectory-current-label {{
+  position: absolute;
+  right: 14px;
+  top: 12px;
+  color: #c9d1d9;
+  background: #161b22cc;
+  border: 1px solid #30363d;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 0.62rem;
+  font-weight: 800;
+}}
+.trajectory-summary {{
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}}
+.main.trajectory-bottom .trajectory-summary {{
+  overflow-y: auto;
+  padding-right: 4px;
+}}
+.trajectory-row {{
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #21262d;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #101722 0%, #0b1018 100%);
+  padding: 7px 8px;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.025);
+  overflow: hidden;
+}}
+.trajectory-row::before {{
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--traj-color, #58a6ff);
+  opacity: 0.85;
+}}
+.trajectory-row:hover {{
+  border-color: #3b536f;
+  background: linear-gradient(180deg, #121c29 0%, #0d1420 100%);
+}}
+.trajectory-row.focused {{
+  border-color: var(--traj-color, #58a6ff);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.025), 0 0 0 1px color-mix(in srgb, var(--traj-color, #58a6ff) 42%, transparent);
+}}
+.trajectory-row-main {{
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}}
+.trajectory-row-dot {{
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}}
+.trajectory-row-name {{
+  color: #e6edf3;
+  font-weight: 800;
+  font-size: 0.74rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}}
+.trajectory-row-value {{
+  color: var(--traj-color, #dce6f2);
+  font-weight: 900;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}}
+.trajectory-row-delta {{
+  min-width: 34px;
+  text-align: center;
+  color: #8b949e;
+  background: #060910;
+  border: 1px solid #21262d;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 0.66rem;
+  font-weight: 800;
+  white-space: nowrap;
+}}
+.trajectory-row-delta.good {{ color: #4ade80; border-color: #1f6f3a; background: #0d2618; }}
+.trajectory-row-delta.bad {{ color: #f87171; border-color: #7f1d1d; background: #2a1114; }}
+.trajectory-mini {{
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}}
+.trajectory-modal {{
+  position: fixed;
+  left: 260px;
+  top: 92px;
+  width: min(1120px, calc(100vw - 320px));
+  height: min(630px, calc((100vw - 320px) * 0.5625), calc(100vh - 130px));
+  min-width: 760px;
+  min-height: 428px;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 24px);
+  z-index: 1100;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  box-shadow: 0 24px 70px rgba(0,0,0,0.88);
+  overflow: hidden;
+  flex-direction: column;
+}}
+.trajectory-resize-handle {{
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 22px;
+  height: 22px;
+  cursor: nwse-resize;
+  z-index: 3;
+}}
+.trajectory-resize-handle::before {{
+  content: "";
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 10px;
+  height: 10px;
+  border-right: 1px solid #6b7280;
+  border-bottom: 1px solid #6b7280;
+  box-shadow: 4px 4px 0 -3px #6b7280;
+  opacity: 0.85;
+}}
+.trajectory-modal-bar {{
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px 0 14px;
+  border-bottom: 1px solid #21262d;
+  background: #111720;
+  cursor: grab;
+}}
+.trajectory-modal-bar:active {{ cursor: grabbing; }}
+.trajectory-modal-title {{
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}}
+.trajectory-modal-title span {{
+  color: #e6edf3;
+  font-weight: 900;
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}}
+.trajectory-modal-title strong {{
+  color: #58a6ff;
+  font-size: 0.78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}}
+.trajectory-modal-actions {{ display: flex; align-items: center; gap: 6px; }}
+.trajectory-modal-toolbar {{
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto auto minmax(260px, 1.2fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #21262d;
+  background: #0b1018;
+}}
+.trajectory-modal-toolbar select {{
+  min-width: 0;
+  background: #060910;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #e6edf3;
+  padding: 7px 9px;
+  font-size: 0.78rem;
+}}
+.trajectory-modal-toolbar select:focus {{ outline: none; border-color: #1f6feb; }}
+.trajectory-modal-teams {{
+  margin-top: 0;
+  justify-content: flex-end;
+}}
+.trajectory-modal-body {{
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+}}
+.trajectory-modal-body .trajectory-panel {{
+  display: grid;
+  grid-template-columns: minmax(520px, 1fr) minmax(250px, 330px);
+  gap: 14px;
+  min-height: 100%;
+}}
+.trajectory-modal-body .trajectory-chart {{
+  min-height: 430px;
+  height: 100%;
+}}
+.trajectory-modal-body .trajectory-summary {{
+  overflow-y: auto;
+  padding-right: 4px;
+}}
+.trajectory-modal-body .trajectory-row {{
+  padding: 10px 11px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}}
+.trajectory-modal-body .trajectory-row-name {{ font-size: 0.82rem; }}
+.trajectory-modal-body .trajectory-row-value {{ font-size: 0.82rem; }}
+.trajectory-modal-body .trajectory-row-delta {{ font-size: 0.72rem; }}
+@media (max-width: 980px) {{
+  .trajectory-modal {{
+    left: 12px;
+    top: 80px;
+    width: calc(100vw - 24px);
+    min-width: 0;
+  }}
+  .trajectory-modal-toolbar {{
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }}
+  .trajectory-modal-teams {{ justify-content: flex-start; }}
+  .trajectory-modal-body .trajectory-panel {{
+    grid-template-columns: 1fr;
+  }}
+  .trajectory-modal-body .trajectory-chart {{ min-height: 280px; }}
+}}
 .no-team {{ color: #6b7280; font-size: 0.78rem; font-style: italic; padding: 10px 12px; }}
 
 /* ── METRIC LABEL ── */
@@ -2001,6 +2593,7 @@ input[type=range] {{
 /* min-height:0 é essencial: sem isso o item flex não encolhe abaixo do conteúdo
    e a grade cresce além da viewport em vez de rolar internamente. */
 #viewTeams {{ flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }}
+#viewPlayers {{ flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }}
 .teams-toolbar {{
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 12px 20px; border-bottom: 1px solid #21262d; flex-shrink: 0;
@@ -2010,6 +2603,25 @@ input[type=range] {{
   color: #e6edf3; padding: 6px 12px; font-size: 0.82rem; width: 220px;
 }}
 .teams-search:focus {{ outline: none; border-color: #1f6feb; }}
+.team-search-wrap {{ position: relative; flex: 0 0 auto; }}
+.team-suggest {{
+  display: none; position: absolute; top: calc(100% + 6px); left: 0;
+  width: min(320px, calc(100vw - 24px)); max-height: 280px; overflow: auto;
+  background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+  box-shadow: 0 14px 34px rgba(0,0,0,0.65); z-index: 12000; padding: 5px;
+}}
+.team-suggest.open {{ display: block; }}
+.team-suggest-item {{
+  width: 100%; display: grid; grid-template-columns: auto 1fr auto; align-items: center;
+  gap: 8px; border: 0; background: transparent; color: #e6edf3; text-align: left;
+  padding: 8px 9px; border-radius: 6px; cursor: pointer; font-size: 0.8rem;
+}}
+.team-suggest-item:hover,
+.team-suggest-item.active {{ background: #1f6feb22; color: #79c0ff; }}
+.team-suggest-flag {{ font-size: 1rem; line-height: 1; }}
+.team-suggest-name {{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 800; }}
+.team-suggest-meta {{ color: #8b949e; font-size: 0.68rem; font-weight: 800; white-space: nowrap; }}
+.team-suggest-empty {{ padding: 10px; color: #8b949e; font-size: 0.76rem; }}
 .tb-field {{ display: flex; align-items: center; gap: 6px; font-size: 0.72rem; color: #6b7280; white-space: nowrap; }}
 .tb-field select {{
   background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
@@ -2357,6 +2969,38 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 .md-xi.subs .pl {{ opacity: 0.7; }}
 .md-sub-label {{ font-size: 0.68rem; color: #6b7280; margin: 8px 0 4px; text-transform: uppercase; letter-spacing: 0.4px; }}
 .md-empty {{ color: #6b7280; font-size: 0.82rem; padding: 12px 0; }}
+/* modal do jogador: comparação + histórico */
+.pm-section {{ margin-top: 14px; }}
+.pm-hist {{ margin-top: 16px; }}
+.pm-table {{ width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 8px; }}
+.pm-table th {{ text-align: left; color: #8b949e; font-weight: 600; padding: 5px 8px; border-bottom: 1px solid #21262d; }}
+.pm-table td {{ padding: 5px 8px; border-bottom: 1px solid #161b22; color: #c9d1d9; }}
+.pm-table tr:hover td {{ background: #161b22; }}
+/* tabela densa de jogadores */
+.players-wrap {{ flex: 1; min-height: 0; overflow: auto; padding: 0 20px; }}
+.players-table {{ width: 100%; }}
+.players-table {{ width: 100%; border-collapse: collapse; font-size: 0.82rem; }}
+.players-table th {{
+  position: sticky; top: 0; z-index: 1; background: #0d1117;
+  text-align: left; color: #8b949e; font-weight: 600; letter-spacing: .2px;
+  padding: 8px 10px; border-bottom: 1px solid #21262d; white-space: nowrap;
+}}
+.players-table td {{ padding: 7px 10px; border-bottom: 1px solid #161b22; white-space: nowrap; }}
+.players-table .pt-num {{ text-align: right; }}
+.players-table .pt-rank {{ text-align: right; width: 38px; color: #6b7280; }}
+.players-table .pt-shirt {{ text-align: center; width: 34px; color: #8b949e; font-variant-numeric: tabular-nums; }}
+.players-table .pt-name {{ color: #e6edf3; font-weight: 600; }}
+.players-table .pt-dim {{ color: #8b949e; }}
+.players-table .pt-metric {{ background: #1f6feb12; color: #e6edf3; }}
+.players-table th.pt-metric {{ color: #58a6ff; }}
+.players-table th.pt-sort {{ cursor: pointer; user-select: none; }}
+.players-table th.pt-sort:hover {{ color: #c9d1d9; background: #161b22; }}
+.players-table th.pt-active {{ color: #58a6ff; }}
+.pt-row {{ cursor: pointer; transition: background .12s; }}
+.pt-row:hover td {{ background: #161b22; }}
+.pt-row.pt-focus td {{ background: #1f6feb22; box-shadow: inset 2px 0 0 #58a6ff; }}
+.pt-row.pt-empty {{ opacity: .4; cursor: default; }}
+.pt-row.pt-empty:hover td {{ background: transparent; }}
 
 /* ── aba Elenco ── */
 .el-board {{ display: flex; flex-direction: column; gap: 14px; }}
@@ -2433,6 +3077,12 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 .el-stat.danger {{ border-color: #ef444455; background: #ef444414; }}
 .el-unused {{
   border-top: 1px solid #21262d; padding-top: 12px;
+}}
+.el-extra {{
+  border-top: 1px solid #3b2f18; padding-top: 12px;
+}}
+.el-extra-note {{
+  color: #8b949e; font-size: 0.72rem; line-height: 1.35; margin: -4px 0 10px;
 }}
 .el-unused-group {{ margin-top: 9px; }}
 .el-unused-group:first-of-type {{ margin-top: 8px; }}
@@ -2884,13 +3534,14 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
     <nav class="tabs">
       <button class="tab active" data-tab="race" onclick="switchTab('race')">Ranking Race</button>
       <button class="tab" data-tab="teams" onclick="switchTab('teams')">Seleções</button>
+      <button class="tab" data-tab="players" onclick="switchTab('players')">Jogadores</button>
     </nav>
   </div>
   <div class="weights-row" id="weightsPills"></div>
   <div class="header-player">
     <button class="btn" id="btnPlay" onclick="togglePlay()">▶ Play</button>
     <span class="slider-label" id="sliderLabel" style="font-size:0.75rem;color:#8b949e;white-space:nowrap">Jogo 1</span>
-    <input type="range" id="jogoSlider" min="1" value="1" style="width:160px" oninput="goToJogo(+this.value)">
+    <input type="range" id="jogoSlider" min="1" value="1" style="width:160px" oninput="goToJogo(jogoFromSliderValue(this.value))">
     <select id="speedSelect" onchange="updateSpeed()" style="font-size:0.75rem;padding:3px 6px">
       <option value="1400">Lenta</option>
       <option value="900" selected>Normal</option>
@@ -2901,12 +3552,24 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 
 <!-- ══ BARRA DE FILTROS ÚNICA — idêntica e compartilhada pelas duas abas ══ -->
 <div class="controls" id="sharedControls">
-  <input type="text" id="teamSearch" class="teams-search" placeholder="Buscar/destacar seleção…" oninput="onFocusInput()">
+  <div class="team-search-wrap">
+    <input type="text" id="teamSearch" class="teams-search" placeholder="Buscar/destacar seleção…" autocomplete="off" oninput="onFocusInput()" onfocus="renderTeamSuggestions()" onkeydown="onTeamSearchKey(event)">
+    <div id="teamSuggestions" class="team-suggest"></div>
+  </div>
   <label class="tb-field">Métrica
     <select id="metricSelect" onchange="changeMetric(this.value)"></select>
   </label>
   <button class="btn" id="btnDir" onclick="toggleDir()">↓ Maior primeiro</button>
   <div style="width:1px;height:18px;background:#30363d;margin:0 4px"></div>
+  <label class="tb-field" id="fieldPos" style="display:none">Posição
+    <select id="filterPos" onchange="applyTeamFilters()">
+      <option value="">Todas</option>
+      <option value="goleiro">Goleiro</option>
+      <option value="defensor">Defensor</option>
+      <option value="meio">Meio</option>
+      <option value="atacante">Atacante</option>
+    </select>
+  </label>
   <label class="tb-field">Grupo
     <select id="filterGroup" onchange="applyTeamFilters()"><option value="">Todos</option></select>
   </label>
@@ -2941,22 +3604,61 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
     </div>
   </div>
 
+  <div class="trajectory-sidebar-resizer" id="trajectorySidebarResizer" title="Arrastar para ajustar a largura da trajetória"></div>
   <div class="sidebar">
     <div class="sidebar-header">
-      <h3>Trajetória</h3>
+      <div class="sidebar-title-row">
+        <h3>Trajetória</h3>
+      </div>
+      <div class="trajectory-teams" id="trajectoryTeams"></div>
       <div class="sidebar-team" id="sidebarTeam">—</div>
     </div>
     <div class="sidebar-body" id="sidebarBody">
-      <div class="no-team">Clique em um time para ver sua trajetória</div>
+      <div class="no-team">Clique em até 16 seleções para comparar a trajetória</div>
     </div>
   </div>
 </div>
 </div><!-- /viewRace -->
 
+<!-- ══ MODAL FLUTUANTE: trajetória comparativa ══ -->
+<div id="trajectoryModal" class="trajectory-modal" style="display:none">
+  <div class="trajectory-modal-bar" id="trajectoryModalBar">
+    <div class="trajectory-modal-title">
+      <span>Trajetória</span>
+      <strong id="trajectoryModalSubtitle">—</strong>
+    </div>
+    <div class="trajectory-modal-actions">
+      <button class="modal-card-close" onclick="closeTrajectoryModal()" title="Fechar">✕</button>
+    </div>
+  </div>
+  <div class="trajectory-modal-toolbar">
+    <select id="trajectoryMetricSelect" onchange="setTrajectoryMetric(this.value)"></select>
+    <div class="trajectory-mode">
+      <button class="traj-mode-btn active" id="trajModeRank" onclick="setTrajectoryMode('rank')">Ranking</button>
+      <button class="traj-mode-btn" id="trajModeValue" onclick="setTrajectoryMode('value')">Valor</button>
+    </div>
+    <div class="trajectory-mode">
+      <button class="traj-mode-btn active" id="trajAxisTournament" onclick="setTrajectoryAxis('tournament')">Torneio</button>
+      <button class="traj-mode-btn" id="trajAxisTeam" onclick="setTrajectoryAxis('team')">Jogo do time</button>
+    </div>
+    <div class="trajectory-teams trajectory-modal-teams" id="trajectoryModalTeams"></div>
+  </div>
+  <div class="trajectory-modal-body" id="trajectoryModalBody">
+    <div class="no-team">Clique em até 16 seleções para comparar a trajetória</div>
+  </div>
+  <div class="trajectory-resize-handle" id="trajectoryResizeHandle" title="Redimensionar mantendo proporção"></div>
+</div>
+
 <!-- ══ VIEW: Seleções (grade de países) ══ -->
 <div id="viewTeams" style="display:none">
   <div class="teams-grid" id="teamsGrid"></div>
   <div class="teams-pager" id="teamsPager"></div>
+</div>
+
+<!-- ══ VIEW: Jogadores (grade de jogadores) ══ -->
+<div id="viewPlayers" style="display:none">
+  <div id="playersGrid" class="players-wrap"></div>
+  <div class="teams-pager" id="playersPager"></div>
 </div>
 
 <!-- ══ MODAL: detalhe da seleção ══ -->
@@ -2971,6 +3673,18 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
   </div>
 </div>
 
+<!-- ══ MODAL: detalhe do jogador ══ -->
+<div id="playerModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closePlayerModal()">
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-topbar">
+      <div class="modal-mini" id="playerModalTitle"></div>
+      <div style="flex:1"></div>
+      <button class="modal-close" onclick="closePlayerModal()" title="Fechar (Esc)">✕</button>
+    </div>
+    <div class="modal-body" id="playerModalBody"></div>
+  </div>
+</div>
+
 <!-- Cards flutuantes gerados dinamicamente pelo JS -->
 
 <script>
@@ -2982,7 +3696,14 @@ const TEAMS_GRID = Object.keys(TEAMS_DETAIL);
 const METRIC_GROUPS = {metric_groups_json};
 const LOWER_IS_BETTER = new Set({lower_is_better_json});
 
-const jogos = Object.keys(DATA).map(Number).sort((a,b)=>a-b);
+// dados de JOGADORES por snapshot + metadados estáticos
+const PLAYER_DATA = {player_data_json};
+const PLAYER_META = {player_meta_json};
+
+const JOGO_ORDER = {snapshot_order_json_var};
+const jogos = (JOGO_ORDER.length ? JOGO_ORDER : Object.keys(DATA).map(Number).sort((a,b)=>a-b))
+  .map(Number)
+  .filter(n => DATA[n]);
 const N = jogos.length;
 const ROW_H = 44;
 
@@ -3058,11 +3779,27 @@ function teamDetailAt(team, n = currentJogo) {{
 
 let currentJogo = jogos[jogos.length - 1];
 let selectedTeam = '';
+let teamSuggestItems = [];
+let teamSuggestIndex = -1;
 let currentMetric = 'score_geral';
 let sortDir = 'desc';   // 'desc' = maior primeiro, 'asc' = menor primeiro
 let playing = false;
 let timer = null;
 let speed = 900;
+const MAX_TRAJECTORY_TEAMS = 16;
+const TRAJECTORY_COLORS = [
+  '#4ade80', '#58a6ff', '#f5c542', '#f87171',
+  '#a78bfa', '#2dd4bf', '#fb923c', '#f472b6',
+  '#22d3ee', '#bef264', '#c084fc', '#60a5fa',
+  '#facc15', '#34d399', '#fb7185', '#94a3b8',
+];
+let trajectoryTeams = [];
+let trajectoryMetric = '__current';
+let trajectoryMode = 'rank';
+let trajectoryAxis = 'tournament';
+let trajectoryDock = 'right';
+let trajectorySliderDrag = null;
+const trajectoryFocusTeams = new Set();
 
 // ── colour scale: rank 1 = green→red dependendo de sortDir
 // asc (menor primeiro) = rank 1 é o pior → vermelho no topo
@@ -3107,12 +3844,57 @@ METRIC_GROUPS.forEach(([groupLabel, , options]) => {{
 const METRIC_LABELS = {{}};
 METRIC_GROUPS.forEach(([, , opts]) => opts.forEach(([k, l]) => METRIC_LABELS[k] = l));
 
+function initTrajectoryMetricSelect() {{
+  const sel = document.getElementById('trajectoryMetricSelect');
+  if (!sel) return;
+  sel.innerHTML = '<option value="__current">Seguir métrica</option>' +
+    METRIC_GROUPS.map(([gl, , opts]) =>
+      `<optgroup label="${{gl}}">` + opts.map(([k, l]) => `<option value="${{k}}">${{l}}</option>`).join('') + '</optgroup>'
+    ).join('');
+  sel.value = trajectoryMetric;
+}}
+initTrajectoryMetricSelect();
+
 const METRIC_RELATIONS = {metric_relations_json};
 const METRIC_RELATIONS_INDIRECT = {metric_relations_indirect_json};
 
 // ── init slider
 const slider = document.getElementById('jogoSlider');
+slider.min = 1;
 slider.max = N;
+slider.step = 1;
+
+function jogoIndex(n) {{
+  return jogos.indexOf(Number(n));
+}}
+
+function jogoFromSliderValue(value) {{
+  const idx = Math.max(0, Math.min(jogos.length - 1, Number(value) - 1));
+  return jogos[idx];
+}}
+
+function sliderValueForJogo(n) {{
+  const idx = jogoIndex(n);
+  return idx >= 0 ? idx + 1 : 1;
+}}
+
+function firstJogo() {{
+  return jogos[0];
+}}
+
+function lastJogo() {{
+  return jogos[jogos.length - 1];
+}}
+
+function nextJogo(n = currentJogo) {{
+  const idx = jogoIndex(n);
+  return idx >= 0 && idx < jogos.length - 1 ? jogos[idx + 1] : null;
+}}
+
+function prevJogo(n = currentJogo) {{
+  const idx = jogoIndex(n);
+  return idx > 0 ? jogos[idx - 1] : null;
+}}
 
 // ── dots agrupados por fase
 const SNAPSHOT_META = {snapshot_meta_json_var};
@@ -3293,16 +4075,17 @@ function syncDotRows() {{
   const teamRows = document.getElementById('teamDotRows');
   teamRows.innerHTML = '';
   const cards = [...openCards.keys()];
+  const timelineTeams = [...new Set([...trajectoryTeams, ...cards])];
 
-  if (cards.length >= 2) {{
+  if (timelineTeams.length >= 2) {{
     mainRow.style.display = 'none';           // esconde a régua principal
-    teamRows.style.setProperty('--team-dot-label-w', measureTeamDotLabelWidth(cards) + 'px');
+    teamRows.style.setProperty('--team-dot-label-w', measureTeamDotLabelWidth(timelineTeams) + 'px');
     teamRows.appendChild(buildPhaseLabelRow());
-    cards.forEach(t => teamRows.appendChild(buildTeamDotRow(t)));
+    timelineTeams.forEach(t => teamRows.appendChild(buildTeamDotRow(t)));
   }} else {{
     mainRow.style.display = '';               // mostra a principal
     teamRows.style.removeProperty('--team-dot-label-w');
-    const focus = cards.length === 1 ? cards[0] : (selectedTeam || null);
+    const focus = timelineTeams.length === 1 ? timelineTeams[0] : (selectedTeam || null);
     applyDotTeamFilter(focus);
   }}
 }}
@@ -3385,7 +4168,7 @@ function getRow(team) {{
     nameEl.className = 'bar-name';
     nameEl.textContent = team;
     nameEl.style.cursor = 'pointer';
-    nameEl.addEventListener('click', e => {{ e.stopPropagation(); if (!selectedTeam) openModal(team); }});
+    nameEl.addEventListener('click', e => {{ e.stopPropagation(); openModal(team); }});
 
     const trackEl = document.createElement('div');
     trackEl.className = 'bar-track';
@@ -3479,11 +4262,12 @@ function renderJogo(n) {{
   const frame = DATA[n];
   if (!frame) return;
 
-  slider.value = n;
-  document.getElementById('sliderLabel').textContent = `Jogo ${{n}} / ${{N}}`;
+  const timelinePos = sliderValueForJogo(n);
+  slider.value = timelinePos;
+  document.getElementById('sliderLabel').textContent = `Jogo ${{timelinePos}} / ${{N}}`;
   // título único, bandeiras ao redor do placar: Casa 🏠 placar 🚩 Fora
   document.getElementById('frameTitle').innerHTML =
-    `<span style="color:#8b949e;font-weight:400">Após o Jogo ${{frame.match_n}} ·</span> ` +
+    `<span style="color:#8b949e;font-weight:400">Após ${{timelinePos}}/${{N}} · Jogo ${{frame.source_match_n || String(frame.match_n).padStart(3, '0')}} ·</span> ` +
     `${{frame.home}} ${{frame.home_flag}} ` +
     `<span style="color:#58a6ff">${{frame.score}}</span> ` +
     `${{frame.away_flag}} ${{frame.away}}`;
@@ -3508,8 +4292,16 @@ function renderJogo(n) {{
       <span class="w-name">${{label}}</span>
       <span class="w-val">${{v}}%</span>
       <div class="w-tip">
-        <div class="w-tip-title">${{label}}</div>
+        <div class="w-tip-head">
+          <div>
+            <div class="w-tip-title">${{info.title || label}}</div>
+            <div class="w-tip-role">${{info.role || 'Componente da nota'}}</div>
+          </div>
+          <div class="w-tip-weight">${{v}}%<span>peso atual</span></div>
+        </div>
         <div class="w-tip-desc">${{info.desc || ''}}</div>
+        ${{info.detail ? `<div class="w-tip-detail">${{info.detail}}</div>` : ''}}
+        ${{info.good ? `<div class="w-tip-good">${{info.good}}</div>` : ''}}
         ${{metricas ? `<div class="w-tip-metrics">${{metricas}}</div>` : ''}}
       </div>
     </div>`;
@@ -3568,10 +4360,11 @@ function renderJogo(n) {{
     els.row.style.top = `${{i * (ROW_H + 4)}}px`;
     els.row.style.height = `${{ROW_H}}px`;
     const isInCard = openCards.has(t.team);
-    const isActive = isInCard || t.team === selectedTeam;
+    const isInTrajectory = trajectoryTeams.includes(t.team);
+    const isActive = isInCard || isInTrajectory || t.team === selectedTeam;
     // cards abertos: sem dimming, todos visíveis e clicáveis — só o destaque diferencia
     // selectedTeam sem cards: comportamento original de dimming
-    const dimOthers = !openCards.size && selectedTeam && !isActive;
+    const dimOthers = !openCards.size && (selectedTeam || trajectoryTeams.length) && !isActive;
     els.row.style.opacity = dimOthers ? '0.12' : '1';
     els.row.style.pointerEvents = 'auto';
     els.row.classList.toggle('selected', isActive);
@@ -3604,56 +4397,643 @@ function renderJogo(n) {{
   }});
 
   renderSidebar(n);
+  renderTrajectoryModal();
   refreshAllCards();
+}}
+
+function trajectoryMetricKey() {{
+  return trajectoryMetric === '__current' ? currentMetric : trajectoryMetric;
+}}
+
+function trajectoryMetricDir(metric) {{
+  if (trajectoryMetric === '__current') return sortDir;
+  return LOWER_IS_BETTER.has(metric) ? 'asc' : 'desc';
+}}
+
+function trajectoryColor(team) {{
+  const idx = Math.max(0, trajectoryTeams.indexOf(team));
+  return TRAJECTORY_COLORS[idx % TRAJECTORY_COLORS.length];
+}}
+
+function trajectoryUniverse(frame, team) {{
+  let teams = (frame.teams || []).filter(x => passesGlobalFilters(x.team));
+  if (!teams.some(x => x.team === team)) teams = frame.teams || [];
+  return teams;
+}}
+
+function trajectoryPoint(team, j, metric, dir) {{
+  const frame = DATA[j];
+  if (!frame) return null;
+  const entry = (SNAP_BY_TEAM[j] || {{}})[team];
+  if (!entry || entry[metric] === null || entry[metric] === undefined) return null;
+  const universe = trajectoryUniverse(frame, team);
+  const mr = metricRank(metric, universe, team, dir);
+  if (!mr) return null;
+  return {{ jogo: j, value: entry[metric], rank: mr.rank, total: mr.total, teamGames: entry.jogos || 0 }};
+}}
+
+function trajectorySeries(team, metric, dir) {{
+  const all = jogos.map(j => trajectoryPoint(team, j, metric, dir)).filter(Boolean);
+  if (trajectoryAxis !== 'team') {{
+    return all.map(p => Object.assign({{}}, p, {{ teamOrder: p.teamGames || 0 }}));
+  }}
+  const byGame = [];
+  let lastGames = 0;
+  all.forEach(p => {{
+    const games = p.teamGames || 0;
+    if (games > lastGames) {{
+      byGame.push(Object.assign({{}}, p, {{ teamOrder: games }}));
+      lastGames = games;
+    }}
+  }});
+  return byGame;
+}}
+
+function trajectoryCurrentPoint(series) {{
+  let cur = null;
+  series.forEach(p => {{
+    if (p.jogo <= currentJogo) cur = p;
+  }});
+  return cur || series[series.length - 1] || null;
+}}
+
+function trajectoryPreviousPoint(series, point) {{
+  if (!point) return null;
+  let prev = null;
+  series.forEach(p => {{
+    if (p.jogo < point.jogo) prev = p;
+  }});
+  return prev;
+}}
+
+function trajectoryPointState(series) {{
+  if (!series.length) return {{ point: null, status: 'none' }};
+  let cur = null;
+  series.forEach(p => {{
+    if (p.jogo <= currentJogo) cur = p;
+  }});
+  if (cur) return {{ point: cur, status: cur.jogo === currentJogo ? 'current' : 'past' }};
+  return {{ point: series[0], status: 'future' }};
+}}
+
+function trajectoryValueRange(seriesByTeam, metric, dir) {{
+  const vals = Object.values(seriesByTeam).flat().map(p => p.value).filter(v => v !== null && v !== undefined);
+  if (!vals.length) return {{ min: 0, max: 1 }};
+  let min = Math.min(...vals);
+  let max = Math.max(...vals);
+  if (min === max) {{
+    const pad = Math.max(1, Math.abs(max) * 0.1);
+    min -= pad; max += pad;
+  }} else {{
+    const pad = (max - min) * 0.14;
+    min -= pad; max += pad;
+  }}
+  if (PERCENT_FRAC.has(metric)) {{ min = Math.max(0, min); max = Math.min(1, max); }}
+  if (PERCENT_DIRECT.has(metric) || metric.startsWith('score_') || STYLE_AXES.has(metric)) {{
+    min = Math.max(0, min); max = Math.min(100, max);
+  }}
+  return {{ min, max }};
+}}
+
+function trajectoryRankRange(seriesByTeam) {{
+  const pts = Object.values(seriesByTeam).flat();
+  const ranks = pts.map(p => p.rank).filter(v => v != null);
+  const totals = pts.map(p => p.total).filter(v => v != null);
+  const universeMax = Math.max(...totals, 1);
+  if (!ranks.length) return {{ min: 1, max: universeMax, universeMax }};
+  let min = Math.min(...ranks);
+  let max = Math.max(...ranks);
+  const spread = Math.max(max - min, 1);
+  const pad = Math.max(2, Math.ceil(spread * 0.35));
+  min = Math.max(1, min - pad);
+  max = Math.min(universeMax, max + pad);
+  if (max - min < 6) {{
+    const need = 6 - (max - min);
+    min = Math.max(1, min - Math.ceil(need / 2));
+    max = Math.min(universeMax, max + Math.floor(need / 2));
+  }}
+  return {{ min, max, universeMax }};
+}}
+
+function trajectoryY(point, mode, metric, dir, range, h, pad) {{
+  if (mode === 'rank') {{
+    const denom = Math.max((range.rankMax || point.total) - 1, 1);
+    return pad + ((point.rank - 1) / denom) * (h - pad * 2);
+  }}
+  const span = Math.max(range.max - range.min, 1e-9);
+  const norm = (point.value - range.min) / span;
+  const betterTop = dir === 'asc' ? norm : 1 - norm;
+  return pad + betterTop * (h - pad * 2);
+}}
+
+function trajectoryDeltaClass(delta, mode, dir) {{
+  if (!delta) return '';
+  const good = mode === 'rank' ? delta < 0 : (dir === 'asc' ? delta < 0 : delta > 0);
+  return good ? ' good' : ' bad';
+}}
+
+function trajectoryDeltaText(cur, prev, mode, metric) {{
+  if (!cur || !prev) return 'novo';
+  if (mode === 'rank') {{
+    const d = cur.rank - prev.rank;
+    if (d === 0) return '=';
+    return (d < 0 ? '↑ ' : '↓ ') + Math.abs(d);
+  }}
+  const d = cur.value - prev.value;
+  if (Math.abs(d) < 0.005) return '=';
+  return (d > 0 ? '+' : '') + formatVal(d, metric);
+}}
+
+function trajectorySmoothPath(points) {{
+  if (!points.length) return '';
+  if (points.length === 1) return `M ${{points[0].x}} ${{points[0].y}}`;
+  let d = `M ${{points[0].x}} ${{points[0].y}}`;
+  for (let i = 0; i < points.length - 1; i++) {{
+    const p0 = points[i - 1] || points[i];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[i + 2] || p2;
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+    d += ` C ${{cp1x.toFixed(1)}} ${{cp1y.toFixed(1)}}, ${{cp2x.toFixed(1)}} ${{cp2y.toFixed(1)}}, ${{p2.x}} ${{p2.y}}`;
+  }}
+  return d;
+}}
+
+function trajectoryShortTeam(team) {{
+  return team.length > 13 ? team.slice(0, 12) + '…' : team;
+}}
+
+function trajectoryLabelKey(team) {{
+  return encodeURIComponent(team);
+}}
+
+function toggleTrajectoryFocus(team) {{
+  if (trajectoryFocusTeams.has(team)) trajectoryFocusTeams.delete(team);
+  else trajectoryFocusTeams.add(team);
+  selectedTeam = team;
+  renderTrajectoryModal();
+  renderJogo(currentJogo);
+}}
+
+function renderTrajectoryChips(teams, targetId = 'trajectoryTeams') {{
+  const el = document.getElementById(targetId);
+  if (!el) return;
+  if (!teams.length) {{
+    el.innerHTML = '<span class="trajectory-empty-chip">Nenhuma seleção fixa</span>';
+    return;
+  }}
+  el.innerHTML = teams.map(team => {{
+    const color = trajectoryColor(team);
+    const flag = TEAM_FLAGS[team] || (TEAMS_DETAIL[team] || {{}}).flag || '';
+    return `<span class="traj-chip" title="${{_esc(team)}}">
+      <span class="traj-chip-dot" style="background:${{color}}"></span>
+      <span class="traj-chip-name">${{flag}} ${{_esc(team)}}</span>
+      <button type="button" data-traj-remove="${{encodeURIComponent(team)}}" title="Remover">×</button>
+    </span>`;
+  }}).join('');
+  el.querySelectorAll('[data-traj-remove]').forEach(btn => {{
+    btn.onclick = e => {{
+      e.stopPropagation();
+      removeTrajectoryTeam(decodeURIComponent(btn.dataset.trajRemove));
+    }};
+  }});
+}}
+
+function renderTrajectoryChart(teams, seriesByTeam, metric, dir) {{
+  const w = 920, h = 520, padX = 64, padTop = 62, padBottom = 58;
+  const visibleSeries = {{}};
+  teams.forEach(team => {{ visibleSeries[team] = seriesByTeam[team] || []; }});
+  const range = trajectoryValueRange(visibleSeries, metric, dir);
+  const rankRange = trajectoryRankRange(visibleSeries);
+  const maxTeamOrder = Math.max(...Object.values(visibleSeries).flat().map(p => p.teamOrder || 0), 1);
+  const xFor = j => {{
+    const idx = jogos.indexOf(j);
+    return padX + (idx / Math.max(N - 1, 1)) * (w - padX * 2);
+  }};
+  const xForPoint = p => {{
+    if (trajectoryAxis === 'team') {{
+      return padX + ((p.teamOrder - 1) / Math.max(maxTeamOrder - 1, 1)) * (w - padX * 2);
+    }}
+    return xFor(p.jogo);
+  }};
+  const plotBottom = h - padBottom;
+  const plotH = plotBottom - padTop;
+  const yManual = ratio => padTop + ratio * plotH;
+  const yFor = p => {{
+    if (trajectoryMode === 'rank') {{
+      const denom = Math.max(rankRange.max - rankRange.min, 1);
+      return padTop + ((p.rank - rankRange.min) / denom) * plotH;
+    }}
+    const span = Math.max(range.max - range.min, 1e-9);
+    const norm = (p.value - range.min) / span;
+    return padTop + (dir === 'asc' ? norm : 1 - norm) * plotH;
+  }};
+  const gridDefs = trajectoryMode === 'rank'
+    ? [
+        {{ label: '#' + rankRange.min, y: yManual(0) }},
+        {{ label: '#' + Math.round((rankRange.min + rankRange.max) / 2), y: yManual(0.5) }},
+        {{ label: '#' + rankRange.max, y: yManual(1) }},
+      ]
+    : [0, 0.5, 1].map(r => {{
+        const val = dir === 'asc'
+          ? range.min + (1 - r) * (range.max - range.min)
+          : range.max - r * (range.max - range.min);
+        return {{ label: formatVal(val, metric), y: yManual(r) }};
+      }});
+  const grid = gridDefs.map(g => {{
+    const y = g.y.toFixed(1);
+    return `<line x1="${{padX}}" y1="${{y}}" x2="${{w - padX}}" y2="${{y}}" stroke="#233044" stroke-width="1" opacity="0.72" />
+      <text x="${{padX - 12}}" y="${{(+y + 4).toFixed(1)}}" fill="#6b7280" font-size="12" font-weight="800" text-anchor="end">${{g.label}}</text>`;
+  }}).join('');
+  const currentX = xFor(currentJogo);
+  const startLabel = trajectoryAxis === 'team' ? 'Jogo 1' : `J${{jogos[0]}}`;
+  const endLabel = trajectoryAxis === 'team' ? `Jogo ${{maxTeamOrder}}` : `J${{jogos[jogos.length - 1]}}`;
+  const lines = teams.map(team => {{
+    const series = seriesByTeam[team] || [];
+    if (!series.length) return '';
+    const color = trajectoryColor(team);
+    const pts = series.map(p => ({{ p, x: +xForPoint(p).toFixed(1), y: +yFor(p).toFixed(1) }}));
+    const path = trajectorySmoothPath(pts);
+    const activePoint = trajectoryPointState(series).point;
+    const activePt = activePoint ? (pts.find(x => x.p.jogo === activePoint.jogo) || pts[0]) : pts[0];
+    const flag = TEAM_FLAGS[team] || (TEAMS_DETAIL[team] || {{}}).flag || '';
+    const labelKey = trajectoryLabelKey(team);
+    const circles = series.map(p => {{
+      const state = trajectoryPointState(series);
+      const isCurrent = trajectoryAxis === 'team'
+        ? (state.point && p.jogo === state.point.jogo)
+        : p.jogo === currentJogo;
+      const r = isCurrent ? 5.6 : 2.2;
+      const opacity = isCurrent ? 1 : 0.62;
+      const label = trajectoryMode === 'rank'
+        ? `${{trajectoryAxis === 'team' ? `Jogo do time ${{p.teamOrder}}` : `J${{p.jogo}}`}} · #${{p.rank}} · ${{formatVal(p.value, metric)}}`
+        : `${{trajectoryAxis === 'team' ? `Jogo do time ${{p.teamOrder}}` : `J${{p.jogo}}`}} · ${{formatVal(p.value, metric)}} · #${{p.rank}}`;
+      const x = xForPoint(p).toFixed(1);
+      const y = yFor(p).toFixed(1);
+      return `${{isCurrent ? `<circle cx="${{x}}" cy="${{y}}" r="11" fill="${{color}}" opacity="0.13" />` : ''}}
+        <circle cx="${{x}}" cy="${{y}}" r="${{r}}" fill="${{color}}" stroke="#07101a" stroke-width="${{isCurrent ? 2.2 : 1.4}}" opacity="${{opacity}}" onclick="goToJogo(${{p.jogo}})" style="cursor:pointer"><title>${{_esc(team)}} · ${{label}}</title></circle>`;
+    }}).join('');
+    return `<path d="${{path}}" fill="none" stroke="${{color}}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" opacity="0.11" />
+      <path d="${{path}}" fill="none" stroke="${{color}}" stroke-width="3.1" stroke-linecap="round" stroke-linejoin="round" />
+      ${{circles}}
+      <g class="traj-flag-label" data-label-key="${{labelKey}}" transform="translate(${{activePt.x.toFixed(1)}} ${{activePt.y.toFixed(1)}})" onmousedown="startTrajectorySliderDrag(event, '${{labelKey}}')" style="cursor:grab;transition:transform 0.22s ease">
+        <circle cx="0" cy="0" r="18" fill="transparent" />
+        <text x="0" y="0" dominant-baseline="middle" text-anchor="middle" font-size="24">${{flag}}</text>
+        <title>${{_esc(team)}} · arraste para navegar pelos jogos do time</title>
+      </g>`;
+  }}).join('');
+  return `<div class="trajectory-chart">
+    <div class="trajectory-axis-label">${{trajectoryMode === 'rank' ? '# melhor no topo' : 'melhor no topo'}}</div>
+    <div class="trajectory-current-label">J${{currentJogo}}</div>
+    <svg viewBox="0 0 ${{w}} ${{h}}" preserveAspectRatio="xMidYMid meet" role="img">
+      <defs>
+        <linearGradient id="trajPlotFade" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stop-color="#172236" stop-opacity="0.32" />
+          <stop offset="100%" stop-color="#060910" stop-opacity="0.02" />
+        </linearGradient>
+      </defs>
+      <rect x="0" y="0" width="${{w}}" height="${{h}}" fill="transparent" />
+      <rect x="${{padX}}" y="${{padTop}}" width="${{w - padX * 2}}" height="${{plotH}}" rx="10" fill="url(#trajPlotFade)" stroke="#1d293a" />
+      ${{grid}}
+      ${{trajectoryAxis === 'tournament' ? `<line x1="${{currentX.toFixed(1)}}" y1="${{padTop}}" x2="${{currentX.toFixed(1)}}" y2="${{plotBottom}}" stroke="#79c0ff" stroke-width="1.4" stroke-dasharray="5 7" opacity="0.45" />` : ''}}
+      <text x="${{padX}}" y="${{h - 14}}" fill="#6b7280" font-size="12" font-weight="800">${{startLabel}}</text>
+      ${{trajectoryAxis === 'tournament' ? `<text x="${{currentX.toFixed(1)}}" y="${{h - 14}}" fill="#9ecfff" font-size="12" font-weight="900" text-anchor="middle">J${{currentJogo}}</text>` : ''}}
+      <text x="${{w - padX}}" y="${{h - 14}}" fill="#6b7280" font-size="12" font-weight="800" text-anchor="end">${{endLabel}}</text>
+      ${{lines}}
+    </svg>
+  </div>`;
+}}
+
+function renderTrajectorySummary(teams, seriesByTeam, metric, dir) {{
+  const rows = teams.map(team => {{
+    const series = seriesByTeam[team] || [];
+    const state = trajectoryPointState(series);
+    const cur = state.point;
+    const prev = trajectoryPreviousPoint(series, cur);
+    const color = trajectoryColor(team);
+    const flag = TEAM_FLAGS[team] || (TEAMS_DETAIL[team] || {{}}).flag || '';
+    const focusCls = trajectoryFocusTeams.has(team) ? ' focused' : '';
+    if (!cur) {{
+      return `<div class="trajectory-row${{focusCls}}" style="--traj-color:${{color}}" data-traj-team="${{encodeURIComponent(team)}}">
+        <div class="trajectory-row-main"><span class="trajectory-row-dot" style="background:${{color}}"></span><span class="trajectory-row-name">${{flag}} ${{_esc(team)}}</span></div>
+        <span class="trajectory-row-value">sem dados</span>
+        <span class="trajectory-row-delta">—</span>
+      </div>`;
+    }}
+    const deltaRaw = state.status !== 'future' && trajectoryMode === 'rank' && prev ? cur.rank - prev.rank : (state.status !== 'future' && prev ? cur.value - prev.value : 0);
+    const deltaCls = trajectoryDeltaClass(deltaRaw, trajectoryMode, dir);
+    const mainVal = state.status === 'future' ? `entra J${{cur.jogo}}` : trajectoryMode === 'rank'
+      ? `#${{cur.rank}} de ${{cur.total}}`
+      : formatVal(cur.value, metric);
+    const subVal = trajectoryMode === 'rank'
+      ? formatVal(cur.value, metric)
+      : `#${{cur.rank}}`;
+    const deltaText = state.status === 'future' ? 'novo' : trajectoryDeltaText(cur, prev, trajectoryMode, metric);
+    return `<div class="trajectory-row${{focusCls}}" style="--traj-color:${{color}}" data-traj-team="${{encodeURIComponent(team)}}">
+      <div class="trajectory-row-main"><span class="trajectory-row-dot" style="background:${{color}}"></span><span class="trajectory-row-name">${{flag}} ${{_esc(team)}}</span></div>
+      <span class="trajectory-row-value">${{mainVal}}</span>
+      <span class="trajectory-row-delta${{deltaCls}}" title="${{subVal}}">${{deltaText}}</span>
+    </div>`;
+  }}).join('');
+  return `<div class="trajectory-summary">${{rows}}</div>`;
 }}
 
 function renderSidebar(n) {{
   const nameEl = document.getElementById('sidebarTeam');
   const bodyEl = document.getElementById('sidebarBody');
+  const teams = trajectoryTeams.length ? trajectoryTeams.slice() : (selectedTeam ? [selectedTeam] : []);
 
-  if (!selectedTeam) {{
+  renderTrajectoryChips(trajectoryTeams);
+
+  if (!teams.length) {{
     nameEl.textContent = '—';
-    bodyEl.innerHTML = '<div class="no-team">Clique em um time para ver sua trajetória</div>';
+    bodyEl.innerHTML = '<button class="traj-open-btn" onclick="openTrajectoryModal()">Abrir painel flutuante</button><div class="no-team">Clique em até 16 seleções para comparar a trajetória.</div>';
     return;
   }}
 
-  nameEl.textContent = selectedTeam;
+  const metric = trajectoryMetricKey();
+  const metricLabel = METRIC_LABELS[metric] || metric;
+  nameEl.textContent = teams.length === 1 ? teams[0] : `${{teams.length}} seleções · ${{metricLabel}}`;
+  bodyEl.innerHTML = `<button class="traj-open-btn" onclick="openTrajectoryModal()">Abrir painel flutuante</button>
+    <div class="no-team">${{teams.length}} seleção${{teams.length !== 1 ? 'es' : ''}} · ${{metricLabel}}</div>`;
+}}
 
-  const vals = jogos
-    .map(j => {{ const e = DATA[j].teams.find(t => t.team === selectedTeam); return e ? e[currentMetric] : null; }})
-    .filter(v => v !== null);
-  const _maxV = Math.max(...vals, 0);
-  const maxRef = PERCENT_FRAC.has(currentMetric) ? 1
-               : (PERCENT_DIRECT.has(currentMetric) || currentMetric.startsWith('score_') || STYLE_AXES.has(currentMetric)) ? 100
-               : (_maxV || 1);
+function renderTrajectoryModal() {{
+  const modal = document.getElementById('trajectoryModal');
+  const bodyEl = document.getElementById('trajectoryModalBody');
+  const subEl = document.getElementById('trajectoryModalSubtitle');
+  if (!modal || !bodyEl || !subEl) return;
 
-  bodyEl.innerHTML = '';
-  jogos.forEach(j => {{
-    const entry = DATA[j].teams.find(t => t.team === selectedTeam);
-    if (!entry) return;
-    const sorted = sortedTeams(DATA[j].teams);
-    const rank = sorted.findIndex(t => t.team === selectedTeam) + 1;
-    const total = sorted.length;
-    const color = rankColor(rank, total);
-    const v = entry[currentMetric];
-    const pct = v !== null ? Math.min(100, Math.abs(v) / maxRef * 100).toFixed(1) : 0;
+  const teams = trajectoryTeams.length ? trajectoryTeams.slice() : (selectedTeam ? [selectedTeam] : []);
+  renderTrajectoryChips(trajectoryTeams, 'trajectoryModalTeams');
+  const metric = trajectoryMetricKey();
+  const dir = trajectoryMetricDir(metric);
+  const metricLabel = METRIC_LABELS[metric] || metric;
+  const axisLabel = trajectoryAxis === 'team' ? 'por jogo do time' : 'por jogo do torneio';
+  const focusCount = [...trajectoryFocusTeams].filter(t => teams.includes(t)).length;
+  const focusLabel = focusCount ? ` · ${{focusCount}} em foco` : '';
+  subEl.textContent = teams.length ? `${{teams.length}} seleção${{teams.length !== 1 ? 'es' : ''}}${{focusLabel}} · ${{metricLabel}} · ${{axisLabel}}` : 'sem seleções fixadas';
 
-    const row = document.createElement('div');
-    row.className = 'history-row' + (j === n ? ' current' : '');
-    row.innerHTML = `
-      <span class="h-jogo">J${{j}}</span>
-      <div style="flex:1;margin:0 5px;height:4px;background:#21262d;border-radius:2px;position:relative;">
-        <div style="width:${{pct}}%;height:100%;background:${{color}};border-radius:2px;transition:width 0.4s;"></div>
-      </div>
-      <span class="h-val">${{formatVal(v, currentMetric)}}</span>
-      <span class="h-rank">#${{rank}}</span>
-    `;
-    row.onclick = () => goToJogo(j);
-    bodyEl.appendChild(row);
+  if (!teams.length) {{
+    bodyEl.innerHTML = '<div class="no-team">Clique em uma seleção na corrida para começar a comparar.</div>';
+    return;
+  }}
+
+  const seriesByTeam = {{}};
+  teams.forEach(team => {{ seriesByTeam[team] = trajectorySeries(team, metric, dir); }});
+  const focusTeams = [...trajectoryFocusTeams].filter(t => teams.includes(t));
+  const chartTeams = focusTeams.length ? focusTeams : teams;
+  bodyEl.innerHTML = `<div class="trajectory-panel">
+    ${{renderTrajectoryChart(chartTeams, seriesByTeam, metric, dir)}}
+    ${{renderTrajectorySummary(teams, seriesByTeam, metric, dir)}}
+  </div>`;
+  bodyEl.querySelectorAll('[data-traj-team]').forEach(row => {{
+    row.onclick = () => {{
+      const team = decodeURIComponent(row.dataset.trajTeam);
+      toggleTrajectoryFocus(team);
+    }};
   }});
+}}
 
-  const cur = bodyEl.querySelector('.current');
-  if (cur) cur.scrollIntoView({{block: 'nearest'}});
+function openTrajectoryModal() {{
+  const modal = document.getElementById('trajectoryModal');
+  if (!modal) return;
+  if (!modal.style.width || !modal.style.height) {{
+    const size = clampTrajectoryModalSize(Math.min(1120, window.innerWidth - 120), 630);
+    modal.style.width = size.w + 'px';
+    modal.style.height = size.h + 'px';
+  }}
+  modal.style.display = 'flex';
+  keepTrajectoryModalInViewport();
+  renderTrajectoryModal();
+}}
+
+function closeTrajectoryModal() {{
+  const modal = document.getElementById('trajectoryModal');
+  if (modal) modal.style.display = 'none';
+}}
+
+let trajectoryDrag = null;
+let trajectoryResize = null;
+let trajectorySidebarDrag = null;
+const TRAJECTORY_MODAL_RATIO = 16 / 9;
+
+function clampTrajectoryModalSize(w, h) {{
+  const minW = Math.min(760, window.innerWidth - 24);
+  const maxW = Math.max(minW, window.innerWidth - 24);
+  const maxH = Math.max(428, window.innerHeight - 24);
+  let outW = Math.max(minW, Math.min(w, maxW, maxH * TRAJECTORY_MODAL_RATIO));
+  let outH = outW / TRAJECTORY_MODAL_RATIO;
+  if (outH > maxH) {{
+    outH = maxH;
+    outW = outH * TRAJECTORY_MODAL_RATIO;
+  }}
+  return {{ w: outW, h: outH }};
+}}
+
+function keepTrajectoryModalInViewport() {{
+  const modal = document.getElementById('trajectoryModal');
+  if (!modal) return;
+  const rect = modal.getBoundingClientRect();
+  const margin = 8;
+  const left = Math.max(margin, Math.min(rect.left, window.innerWidth - margin - rect.width));
+  const top = Math.max(margin, Math.min(rect.top, window.innerHeight - margin - rect.height));
+  modal.style.left = left + 'px';
+  modal.style.top = top + 'px';
+  modal.style.right = 'auto';
+  modal.style.bottom = 'auto';
+}}
+
+function startTrajectoryDrag(e) {{
+  const modal = document.getElementById('trajectoryModal');
+  if (!modal || e.button !== 0) return;
+  if (e.target.closest('button, select')) return;
+  e.preventDefault();
+  const rect = modal.getBoundingClientRect();
+  trajectoryDrag = {{
+    startX: e.clientX,
+    startY: e.clientY,
+    left: rect.left,
+    top: rect.top,
+  }};
+  document.addEventListener('mousemove', moveTrajectoryDrag);
+  document.addEventListener('mouseup', endTrajectoryDrag);
+}}
+
+function moveTrajectoryDrag(e) {{
+  if (!trajectoryDrag) return;
+  const modal = document.getElementById('trajectoryModal');
+  if (!modal) return;
+  const margin = 8;
+  const w = modal.offsetWidth || 640;
+  const h = modal.offsetHeight || 380;
+  let left = trajectoryDrag.left + e.clientX - trajectoryDrag.startX;
+  let top = trajectoryDrag.top + e.clientY - trajectoryDrag.startY;
+  left = Math.max(margin, Math.min(left, window.innerWidth - margin - w));
+  top = Math.max(margin, Math.min(top, window.innerHeight - margin - h));
+  modal.style.left = left + 'px';
+  modal.style.top = top + 'px';
+  modal.style.right = 'auto';
+  modal.style.bottom = 'auto';
+}}
+
+function endTrajectoryDrag() {{
+  trajectoryDrag = null;
+  document.removeEventListener('mousemove', moveTrajectoryDrag);
+  document.removeEventListener('mouseup', endTrajectoryDrag);
+}}
+
+document.getElementById('trajectoryModalBar')?.addEventListener('mousedown', startTrajectoryDrag);
+
+function startTrajectoryResize(e) {{
+  const modal = document.getElementById('trajectoryModal');
+  if (!modal || e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const rect = modal.getBoundingClientRect();
+  trajectoryResize = {{
+    startX: e.clientX,
+    startY: e.clientY,
+    width: rect.width,
+    height: rect.height,
+    left: rect.left,
+    top: rect.top,
+  }};
+  document.addEventListener('mousemove', moveTrajectoryResize);
+  document.addEventListener('mouseup', endTrajectoryResize);
+}}
+
+function moveTrajectoryResize(e) {{
+  if (!trajectoryResize) return;
+  const modal = document.getElementById('trajectoryModal');
+  if (!modal) return;
+  const dx = e.clientX - trajectoryResize.startX;
+  const dy = e.clientY - trajectoryResize.startY;
+  const desiredW = trajectoryResize.width + dx;
+  const desiredH = trajectoryResize.height + dy;
+  const useHeight = Math.abs(dy / Math.max(trajectoryResize.height, 1)) > Math.abs(dx / Math.max(trajectoryResize.width, 1));
+  const rawW = useHeight ? desiredH * TRAJECTORY_MODAL_RATIO : desiredW;
+  const size = clampTrajectoryModalSize(rawW, rawW / TRAJECTORY_MODAL_RATIO);
+  modal.style.width = size.w + 'px';
+  modal.style.height = size.h + 'px';
+  keepTrajectoryModalInViewport();
+}}
+
+function endTrajectoryResize() {{
+  trajectoryResize = null;
+  document.removeEventListener('mousemove', moveTrajectoryResize);
+  document.removeEventListener('mouseup', endTrajectoryResize);
+}}
+
+document.getElementById('trajectoryResizeHandle')?.addEventListener('mousedown', startTrajectoryResize);
+
+function startTrajectorySidebarResize(e) {{
+  const main = document.querySelector('#viewRace .main');
+  const sidebar = document.querySelector('#viewRace .sidebar');
+  const handle = document.getElementById('trajectorySidebarResizer');
+  if (!main || !sidebar || !handle || e.button !== 0) return;
+  e.preventDefault();
+  trajectorySidebarDrag = {{
+    startX: e.clientX,
+    width: sidebar.getBoundingClientRect().width,
+  }};
+  handle.classList.add('dragging');
+  document.addEventListener('mousemove', moveTrajectorySidebarResize);
+  document.addEventListener('mouseup', endTrajectorySidebarResize);
+}}
+
+function moveTrajectorySidebarResize(e) {{
+  if (!trajectorySidebarDrag) return;
+  const main = document.querySelector('#viewRace .main');
+  if (!main) return;
+  const dx = trajectorySidebarDrag.startX - e.clientX;
+  const w = Math.max(170, Math.min(520, trajectorySidebarDrag.width + dx));
+  main.style.setProperty('--trajectory-sidebar-w', w + 'px');
+}}
+
+function endTrajectorySidebarResize() {{
+  trajectorySidebarDrag = null;
+  const handle = document.getElementById('trajectorySidebarResizer');
+  if (handle) handle.classList.remove('dragging');
+  document.removeEventListener('mousemove', moveTrajectorySidebarResize);
+  document.removeEventListener('mouseup', endTrajectorySidebarResize);
+}}
+
+document.getElementById('trajectorySidebarResizer')?.addEventListener('mousedown', startTrajectorySidebarResize);
+
+function trajectorySvgXFromMouse(e) {{
+  const svg = document.querySelector('#trajectoryModalBody .trajectory-chart svg');
+  if (!svg) return null;
+  const rect = svg.getBoundingClientRect();
+  const viewW = 920, viewH = 520, viewRatio = viewW / viewH;
+  const rectRatio = rect.width / Math.max(rect.height, 1);
+  let renderW = rect.width, offsetX = 0;
+  if (rectRatio > viewRatio) {{
+    renderW = rect.height * viewRatio;
+    offsetX = (rect.width - renderW) / 2;
+  }}
+  const x = (e.clientX - rect.left - offsetX) / Math.max(renderW, 1) * viewW;
+  return Math.max(0, Math.min(viewW, x));
+}}
+
+function trajectorySliderPoints(team) {{
+  const metric = trajectoryMetricKey();
+  const dir = trajectoryMetricDir(metric);
+  const teams = trajectoryTeams.length ? trajectoryTeams.slice() : (selectedTeam ? [selectedTeam] : []);
+  const focusTeams = [...trajectoryFocusTeams].filter(t => teams.includes(t));
+  const chartTeams = focusTeams.length ? focusTeams : teams;
+  const visible = {{}};
+  chartTeams.forEach(t => {{ visible[t] = trajectorySeries(t, metric, dir); }});
+  const maxTeamOrder = Math.max(...Object.values(visible).flat().map(p => p.teamOrder || 0), 1);
+  const padX = 64, w = 920;
+  const xFor = j => {{
+    const idx = jogos.indexOf(j);
+    return padX + (idx / Math.max(N - 1, 1)) * (w - padX * 2);
+  }};
+  const xForPoint = p => trajectoryAxis === 'team'
+    ? padX + ((p.teamOrder - 1) / Math.max(maxTeamOrder - 1, 1)) * (w - padX * 2)
+    : xFor(p.jogo);
+  return (visible[team] || trajectorySeries(team, metric, dir)).map(p => ({{ jogo: p.jogo, x: xForPoint(p) }}));
+}}
+
+function startTrajectorySliderDrag(e, key) {{
+  e.preventDefault();
+  e.stopPropagation();
+  const team = decodeURIComponent(key);
+  const points = trajectorySliderPoints(team);
+  if (!points.length) return;
+  trajectorySliderDrag = {{
+    key,
+    team,
+    points,
+    lastJogo: null,
+  }};
+  moveTrajectorySliderDrag(e);
+  document.addEventListener('mousemove', moveTrajectorySliderDrag);
+  document.addEventListener('mouseup', endTrajectorySliderDrag);
+}}
+
+function moveTrajectorySliderDrag(e) {{
+  if (!trajectorySliderDrag) return;
+  e.preventDefault();
+  const x = trajectorySvgXFromMouse(e);
+  if (x == null) return;
+  const nearest = trajectorySliderDrag.points.reduce((best, p) =>
+    Math.abs(p.x - x) < Math.abs(best.x - x) ? p : best,
+    trajectorySliderDrag.points[0]);
+  if (nearest && nearest.jogo !== trajectorySliderDrag.lastJogo) {{
+    trajectorySliderDrag.lastJogo = nearest.jogo;
+    goToJogo(nearest.jogo);
+  }}
+}}
+
+function endTrajectorySliderDrag() {{
+  trajectorySliderDrag = null;
+  document.removeEventListener('mousemove', moveTrajectorySliderDrag);
+  document.removeEventListener('mouseup', endTrajectorySliderDrag);
 }}
 
 // Métrica COMPARTILHADA: anima a corrida E ordena a grade Seleções. Atualiza
@@ -3665,14 +5045,69 @@ function changeMetric(metric) {{
 
 function selectTeam(t) {{
   selectedTeam = t;
+  if (t) addTrajectoryTeam(t, false);
   syncDotRows();
   renderJogo(currentJogo);
 }}
 
-// Re-renderiza a view ativa (e a grade Seleções é sempre time-aware).
+function setTrajectoryMetric(metric) {{
+  trajectoryMetric = metric;
+  renderJogo(currentJogo);
+}}
+
+function setTrajectoryMode(mode) {{
+  trajectoryMode = mode === 'value' ? 'value' : 'rank';
+  document.getElementById('trajModeRank').classList.toggle('active', trajectoryMode === 'rank');
+  document.getElementById('trajModeValue').classList.toggle('active', trajectoryMode === 'value');
+  renderJogo(currentJogo);
+}}
+
+function setTrajectoryAxis(axis) {{
+  trajectoryAxis = axis === 'team' ? 'team' : 'tournament';
+  document.getElementById('trajAxisTournament').classList.toggle('active', trajectoryAxis === 'tournament');
+  document.getElementById('trajAxisTeam').classList.toggle('active', trajectoryAxis === 'team');
+  renderJogo(currentJogo);
+}}
+
+function setTrajectoryDock(dock) {{
+  // Mantida só por compatibilidade com HTML antigo em cache.
+}}
+
+function addTrajectoryTeam(team, rerender = true) {{
+  if (!team || !TEAMS_DETAIL[team]) return;
+  if (!trajectoryTeams.includes(team)) {{
+    if (trajectoryTeams.length >= MAX_TRAJECTORY_TEAMS) {{
+      const removed = trajectoryTeams.shift();
+      trajectoryFocusTeams.delete(removed);
+    }}
+    trajectoryTeams.push(team);
+  }}
+  selectedTeam = team;
+  if (rerender) {{
+    syncDotRows();
+    renderBothViews();
+  }}
+}}
+
+function removeTrajectoryTeam(team) {{
+  trajectoryTeams = trajectoryTeams.filter(t => t !== team);
+  trajectoryFocusTeams.delete(team);
+  if (selectedTeam === team) selectedTeam = trajectoryTeams[trajectoryTeams.length - 1] || '';
+  syncDotRows();
+  renderBothViews();
+}}
+
+function toggleTrajectoryTeam(team) {{
+  if (trajectoryTeams.includes(team)) removeTrajectoryTeam(team);
+  else addTrajectoryTeam(team);
+}}
+
+// Re-renderiza a view ativa (grades são time-aware e dependem dos mesmos
+// controles compartilhados de busca, métrica, direção e filtros).
 function renderBothViews() {{
   renderJogo(currentJogo);
   if (activeTab === 'teams') renderTeamsGrid();
+  if (activeTab === 'players') renderPlayersGrid();
 }}
 
 // Busca/foco compartilhado: na grade filtra por nome; na corrida, se o texto
@@ -3681,9 +5116,98 @@ function onFocusInput() {{
   const raw = document.getElementById('teamSearch').value.trim();
   const exact = TEAMS_GRID.find(t => _norm(t) === _norm(raw));
   selectedTeam = exact || '';
+  teamPage = 1;
+  renderTeamSuggestions();
+  syncDotRows();
+  renderBothViews();
+  if (activeTab === 'players') {{
+    playerPage = 1;
+    renderPlayersGrid();
+  }}
+}}
+
+function _teamSuggestLabel(team) {{
+  const meta = TEAM_META[team] || {{}};
+  return [meta.group ? 'Grupo ' + meta.group : '', meta.confed || ''].filter(Boolean).join(' · ');
+}}
+
+function renderTeamSuggestions() {{
+  const box = document.getElementById('teamSuggestions');
+  const input = document.getElementById('teamSearch');
+  if (!box || !input) return;
+  const qRaw = input.value.trim();
+  const q = _norm(qRaw);
+  const scored = TEAMS_GRID
+    .filter(t => !q || _norm(t).includes(q))
+    .sort((a, b) => {{
+      const an = _norm(a), bn = _norm(b);
+      const ap = q && an.startsWith(q) ? 0 : 1;
+      const bp = q && bn.startsWith(q) ? 0 : 1;
+      return ap - bp || a.localeCompare(b);
+    }})
+    .slice(0, 12);
+  teamSuggestItems = scored;
+  if (teamSuggestIndex >= scored.length) teamSuggestIndex = scored.length - 1;
+  if (!scored.length) {{
+    box.innerHTML = '<div class="team-suggest-empty">Nenhuma seleção encontrada</div>';
+    box.classList.add('open');
+    return;
+  }}
+  const escJs = s => (s || '').replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'");
+  box.innerHTML = scored.map((team, i) => {{
+    const flag = TEAM_FLAGS[team] || (TEAMS_DETAIL[team] || {{}}).flag || '🏳️';
+    const meta = _teamSuggestLabel(team);
+    return `<button type="button" class="team-suggest-item${{i === teamSuggestIndex ? ' active' : ''}}" onmousedown="event.preventDefault();chooseTeamSuggestion('${{escJs(team)}}')">
+      <span class="team-suggest-flag">${{flag}}</span>
+      <span class="team-suggest-name">${{_esc(team)}}</span>
+      <span class="team-suggest-meta">${{_esc(meta)}}</span>
+    </button>`;
+  }}).join('');
+  box.classList.add('open');
+}}
+
+function hideTeamSuggestions() {{
+  const box = document.getElementById('teamSuggestions');
+  if (box) box.classList.remove('open');
+  teamSuggestIndex = -1;
+}}
+
+function chooseTeamSuggestion(team) {{
+  const input = document.getElementById('teamSearch');
+  if (input) input.value = team;
+  addTrajectoryTeam(team, false);
+  teamPage = 1;
+  hideTeamSuggestions();
   syncDotRows();
   renderBothViews();
 }}
+
+function onTeamSearchKey(e) {{
+  const box = document.getElementById('teamSuggestions');
+  const isOpen = box && box.classList.contains('open');
+  if (e.key === 'ArrowDown') {{
+    e.preventDefault();
+    if (!isOpen) renderTeamSuggestions();
+    if (teamSuggestItems.length) teamSuggestIndex = (teamSuggestIndex + 1) % teamSuggestItems.length;
+    renderTeamSuggestions();
+  }} else if (e.key === 'ArrowUp') {{
+    e.preventDefault();
+    if (!isOpen) renderTeamSuggestions();
+    if (teamSuggestItems.length) teamSuggestIndex = teamSuggestIndex <= 0 ? teamSuggestItems.length - 1 : teamSuggestIndex - 1;
+    renderTeamSuggestions();
+  }} else if (e.key === 'Enter') {{
+    if (isOpen && teamSuggestIndex >= 0 && teamSuggestItems[teamSuggestIndex]) {{
+      e.preventDefault();
+      chooseTeamSuggestion(teamSuggestItems[teamSuggestIndex]);
+    }}
+  }} else if (e.key === 'Escape') {{
+    hideTeamSuggestions();
+  }}
+}}
+
+document.addEventListener('click', e => {{
+  if (!e.target.closest('.team-search-wrap')) hideTeamSuggestions();
+}});
 
 // ── Cards flutuantes arrastáveis (N times) ──
 const openCards = new Map();  // team → {{ el, contentEl }}
@@ -3913,10 +5437,13 @@ document.addEventListener('keydown', e => {{
 }});
 
 function goToJogo(n) {{
+  n = Number(n);
+  if (!DATA[n]) return;
   currentJogo = n;
   renderJogo(n);
-  // a grade Seleções reflete o momento selecionado — re-renderiza se estiver ativa
+  // grades refletem o momento selecionado — re-renderiza a que estiver ativa
   if (activeTab === 'teams') renderTeamsGrid();
+  if (activeTab === 'players') renderPlayersGrid();
 }}
 
 function updateSpeed() {{
@@ -3926,8 +5453,9 @@ function updateSpeed() {{
 
 function startPlay() {{
   timer = setInterval(() => {{
-    if (currentJogo >= N) {{ stopPlay(); return; }}
-    goToJogo(currentJogo + 1);
+    const next = nextJogo();
+    if (next == null) {{ stopPlay(); return; }}
+    goToJogo(next);
   }}, speed);
 }}
 
@@ -3947,7 +5475,7 @@ function togglePlay() {{
     const btn = document.getElementById('btnPlay');
     btn.textContent = '⏸ Pause';
     btn.classList.add('playing');
-    if (currentJogo >= N) goToJogo(1);
+    if (currentJogo === lastJogo()) goToJogo(firstJogo());
     startPlay();
   }}
 }}
@@ -3970,7 +5498,7 @@ document.getElementById('barsContainer').addEventListener('click', e => {{
   const row = e.target.closest('.bar-row');
   if (!row) return;
   const team = row.dataset.team;
-  selectTeam(selectedTeam === team ? '' : team);
+  toggleTrajectoryTeam(team);
 }});
 
 document.addEventListener('keydown', e => {{
@@ -3978,13 +5506,25 @@ document.addEventListener('keydown', e => {{
   if (e.key === 'Escape' && document.getElementById('teamModal').style.display !== 'none') {{
     closeTeamModal(); return;
   }}
+  if (e.key === 'Escape' && document.getElementById('playerModal').style.display !== 'none') {{
+    closePlayerModal(); return;
+  }}
+  if (e.key === 'Escape' && document.getElementById('trajectoryModal').style.display !== 'none') {{
+    closeTrajectoryModal(); return;
+  }}
   // controles da race só valem na aba race, com modal fechado e fora de inputs
   if (activeTab !== 'race') return;
   if (document.getElementById('teamModal').style.display !== 'none') return;
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (e.key === ' ') {{ e.preventDefault(); togglePlay(); }}
-  if (e.key === 'ArrowRight' && currentJogo < N) goToJogo(currentJogo + 1);
-  if (e.key === 'ArrowLeft' && currentJogo > 1) goToJogo(currentJogo - 1);
+  if (e.key === 'ArrowRight') {{
+    const next = nextJogo();
+    if (next != null) goToJogo(next);
+  }}
+  if (e.key === 'ArrowLeft') {{
+    const prev = prevJogo();
+    if (prev != null) goToJogo(prev);
+  }}
 }});
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -3998,15 +5538,58 @@ function switchTab(tab) {{
     t.classList.toggle('active', t.dataset.tab === tab));
   document.getElementById('viewRace').style.display = tab === 'race' ? '' : 'none';
   document.getElementById('viewTeams').style.display = tab === 'teams' ? 'flex' : 'none';
-  // a barra de tempo (Play/slider) agora é COMPARTILHADA — visível nas duas abas,
-  // já que a grade Seleções também reflete o jogo selecionado.
+  document.getElementById('viewPlayers').style.display = tab === 'players' ? 'flex' : 'none';
+  // barra de tempo compartilhada por todas as abas
   document.querySelector('.header-player').style.visibility = 'visible';
+  // filtro de Posição só na aba Jogadores; placeholder da busca muda por contexto
+  document.getElementById('fieldPos').style.display = tab === 'players' ? '' : 'none';
+  document.getElementById('teamSearch').placeholder =
+    tab === 'players' ? 'Buscar/destacar jogador…' : 'Buscar/destacar seleção…';
+  // a métrica disponível muda entre seleções e jogadores
+  syncMetricOptions(tab);
   if (tab === 'teams') {{
     if (!_teamsInit) {{ initTeamsControls(); _teamsInit = true; }}
     renderTeamsGrid();
+  }} else if (tab === 'players') {{
+    renderPlayersGrid();
   }}
 }}
 let _teamsInit = false;
+
+// Métricas por aba: a corrida/seleções usam METRIC_GROUPS; jogadores têm um
+// conjunto próprio (score geral, gols, assistências, defesas…). Troca o
+// dropdown e garante uma métrica válida ao mudar de contexto.
+const PLAYER_METRICS = [
+  ['rating_365', 'Nota de atuação'],
+  ['score_geral', 'Score (qualidade)'],
+  ['gols_por_jogo', 'Gols / jogo'],
+  ['assistencias_por_jogo', 'Assistências / jogo'],
+  ['participacoes_por_jogo', 'G+A / jogo'],
+  ['chutes_no_alvo_por_jogo', 'Chutes no alvo / jogo'],
+  ['defesas_por_jogo', 'Defesas / jogo'],
+  ['goals', 'Gols (total)'],
+  ['assists', 'Assistências (total)'],
+  ['saves', 'Defesas (total)'],
+  ['jogos', 'Jogos disputados'],
+];
+const PLAYER_METRIC_LABELS = {{}};
+PLAYER_METRICS.forEach(([k, l]) => PLAYER_METRIC_LABELS[k] = l);
+
+function syncMetricOptions(tab) {{
+  const sel = document.getElementById('metricSelect');
+  if (tab === 'players') {{
+    sel.innerHTML = PLAYER_METRICS.map(([k, l]) => `<option value="${{k}}">${{l}}</option>`).join('');
+    if (!PLAYER_METRIC_LABELS[currentMetric]) currentMetric = 'score_geral';
+    sel.value = currentMetric;
+  }} else {{
+    // restaura as métricas de seleção/corrida (agrupadas)
+    sel.innerHTML = METRIC_GROUPS.map(([gl, , opts]) =>
+      `<optgroup label="${{gl}}">` + opts.map(([k, l]) => `<option value="${{k}}">${{l}}</option>`).join('') + '</optgroup>'
+    ).join('');
+    if (!METRIC_LABELS[currentMetric]) currentMetric = 'score_geral';
+    sel.value = currentMetric;
+  }}
+}}
 
 function _norm(s) {{
   return (s || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
@@ -4076,8 +5659,9 @@ let teamPage = 1;
 function applyTeamFilters() {{
   syncFiltersFromTeamsUI();
   refreshFilterOptions();   // dropdowns se cruzam: só opções compatíveis
-  teamPage = 1;
+  teamPage = 1; playerPage = 1;
   renderTeamsGrid();
+  if (activeTab === 'players') renderPlayersGrid();
   renderJogo(currentJogo);  // reflete os filtros nas barras da Race também
 }}
 
@@ -4090,6 +5674,8 @@ function syncFiltersFromTeamsUI() {{
   if (g) teamFilters.group = g.value;
   if (c) teamFilters.confed = c.value;
   if (s) teamFilters.stage = s.value;
+  const pos = document.getElementById('filterPos');
+  if (pos) playerFilters.pos = pos.value;
 }}
 
 function goTeamPage(p) {{
@@ -4107,11 +5693,16 @@ function resetAllFilters() {{
   document.getElementById('filterStage').value = '';
   document.getElementById('filterPlayed').checked = false;
   teamFilters.group = ''; teamFilters.confed = ''; teamFilters.stage = '';
-  selectedTeam = '';
-  teamPage = 1;
+  const pos = document.getElementById('filterPos'); if (pos) pos.value = '';
+  playerFilters.pos = '';
+  selectedTeam = ''; selectedPlayer = '';
+  trajectoryTeams = [];
+  hideTeamSuggestions();
+  teamPage = 1; playerPage = 1;
   refreshFilterOptions();   // volta os dropdowns à lista completa
   syncDotRows();
   renderBothViews();
+  if (activeTab === 'players') renderPlayersGrid();
 }}
 
 function renderTeamsPager(totalPages) {{
@@ -4196,8 +5787,9 @@ function renderTeamsGrid() {{
     const empty = nj === 0;
     // o badge # reflete a POSIÇÃO na métrica escolhida; vazio reserva o mesmo espaço.
     const rankBadge = (!empty && hlPos[t]) ? `<span class="tc-rank">#${{hlPos[t]}}</span>` : '<span class="tc-rank muted">#—</span>';
+    const playerCount = d.roster_count || (d.players ? d.players.filter(p => p.in_roster !== false).length : 0);
     const sub = empty ? 'sem jogos ainda · ' + (d.group ? 'Grupo ' + d.group : '')
-      : nj + (nj === 1 ? ' jogo' : ' jogos') + ' · ' + (d.players ? d.players.length : 0) + ' jogadores';
+      : nj + (nj === 1 ? ' jogo' : ' jogos') + ' · ' + playerCount + ' jogadores';
 
     const cp = d.campanha || {{}};
 
@@ -4226,7 +5818,7 @@ function renderTeamsGrid() {{
       d.stage_now ? `<span class="tc-badge">${{d.stage_now}}</span>` : '',
     ].join('');
 
-    const focusCls = (selectedTeam && t === selectedTeam) ? ' tc-focus' : '';
+    const focusCls = ((selectedTeam && t === selectedTeam) || trajectoryTeams.includes(t)) ? ' tc-focus' : '';
     return `<div class="team-card${{empty ? ' tc-empty' : ''}}${{focusCls}}" ${{empty ? '' : `onclick="openTeamModal('${{t.replace(/'/g, "\\\\'")}}')"`}}>
       <div class="tc-head">
         <span class="tc-flag">${{flag}}</span>
@@ -4241,6 +5833,293 @@ function renderTeamsGrid() {{
       ${{stats}}
     </div>`;
   }}).join('');
+}}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ABA JOGADORES — grade time-aware + filtros compartilhados + modal de detalhe
+// ════════════════════════════════════════════════════════════════════════════
+const PLAYER_SLUGS = Object.keys(PLAYER_META);
+const PLAYERS_PER_PAGE = 50;
+let playerPage = 1;
+let selectedPlayer = '';
+const playerFilters = {{ pos: '' }};
+const PERFIL_LABEL = {{ goleiro: 'Goleiro', defensor: 'Defensor', meio: 'Meio', atacante: 'Atacante' }};
+
+// índice [jogo][slug] → linha do jogador naquele snapshot (lookup O(1))
+const PSNAP_BY_SLUG = {{}};
+Object.entries(PLAYER_DATA).forEach(([n, rows]) => {{
+  const by = {{}};
+  rows.forEach(r => {{ by[r.slug] = r; }});
+  PSNAP_BY_SLUG[n] = by;
+}});
+
+// jogador passa nos filtros (posição + os filtros de SELEÇÃO via time dele)
+function playerPasses(slug, snapRow) {{
+  const meta = PLAYER_META[slug] || {{}};
+  if (playerFilters.pos && (snapRow ? snapRow.perfil : meta.perfil) !== playerFilters.pos) return false;
+  // reaproveita os filtros de grupo/confed/fase aplicados ao TIME do jogador
+  if (!passesGlobalFilters(meta.team)) return false;
+  return true;
+}}
+
+function _pmetricFmt(metric) {{
+  return v => {{
+    if (v == null) return '—';
+    if (metric === 'score_geral' || metric === 'rating_365') return v.toFixed(1);
+    if (Number.isInteger(v) || Math.abs(v - Math.round(v)) < 0.005) return String(Math.round(v));
+    return v.toFixed(2);
+  }};
+}}
+
+function goPlayerPage(p) {{
+  playerPage = p;
+  renderPlayersGrid();
+  document.getElementById('playersGrid').scrollTop = 0;
+}}
+
+function renderPlayersGrid() {{
+  const host = document.getElementById('playersGrid');
+  if (!host) return;
+  const q = _norm(document.getElementById('teamSearch').value.trim());
+  const dir = sortDir;
+  const metric = PLAYER_METRIC_LABELS[currentMetric] ? currentMetric : 'score_geral';
+  const snap = PSNAP_BY_SLUG[currentJogo] || {{}};
+  const pv = slug => {{ const r = snap[slug]; return r ? r[metric] : null; }};
+
+  // filtra
+  let players = PLAYER_SLUGS.filter(slug => {{
+    const r = snap[slug];
+    const meta = PLAYER_META[slug] || {{}};
+    if (q && !_norm(meta.name).includes(q) && !_norm(meta.team).includes(q)) return false;
+    if (!playerPasses(slug, r)) return false;
+    if (document.getElementById('filterPlayed').checked && (!r || !(r.jogos > 0))) return false;
+    return true;
+  }});
+
+  // ordena pela métrica (ausentes no fim)
+  players.sort((a, b) => {{
+    let va = pv(a), vb = pv(b);
+    const na = va == null, nb = vb == null;
+    if (na && nb) return PLAYER_META[a].name.localeCompare(PLAYER_META[b].name, 'pt-BR');
+    if (na) return 1; if (nb) return -1;
+    if (va === vb) return PLAYER_META[a].name.localeCompare(PLAYER_META[b].name, 'pt-BR');
+    return dir === 'asc' ? va - vb : vb - va;
+  }});
+
+  document.getElementById('teamsCount').textContent =
+    players.length + ' de ' + PLAYER_SLUGS.length + ' jogadores';
+
+  // ranking da métrica DENTRO do conjunto filtrado (Xº de N)
+  const ranked = players.map(s => ({{ s, v: pv(s) }})).filter(x => x.v != null)
+    .sort((a, b) => dir === 'asc' ? a.v - b.v : b.v - a.v);
+  const posR = {{}};
+  ranked.forEach((x, i) => {{ posR[x.s] = (i > 0 && x.v === ranked[i - 1].v) ? posR[ranked[i - 1].s] : i + 1; }});
+
+  // colunas POR POSIÇÃO: 'Todas' = só básicas; posição filtrada = stats dela.
+  // Cada coluna: [chave no snapshot, rótulo curto, formatação].
+  const intF = v => v == null ? '—' : String(Math.round(v));
+  const f1F = v => v == null ? '—' : v.toFixed(1);
+  const colsByPos = {{
+    goleiro:  [['saves','Defesas',intF], ['goals_conceded','Sofridos',intF]],
+    defensor: [['goals','Gols',intF], ['assists','Assist',intF], ['shots_on_target','No alvo',intF]],
+    meio:     [['goals','Gols',intF], ['assists','Assist',intF], ['shots_on_target','No alvo',intF]],
+    atacante: [['goals','Gols',intF], ['assists','Assist',intF], ['shots_on_target','No alvo',intF]],
+  }};
+  const pos = playerFilters.pos;
+  // 'Todas' = Gols e Assist separados (não G+A); posição filtrada = stats dela.
+  let statCols = pos && colsByPos[pos] ? colsByPos[pos] : [['goals','Gols',intF], ['assists','Assist',intF]];
+  // a métrica selecionada vira coluna destacada (se já não estiver entre as fixas)
+  const baseKeys = new Set(['rating_365', 'score_geral', 'jogos', ...statCols.map(c => c[0])]);
+  const metricCol = (!baseKeys.has(metric)) ? metric : null;
+
+  // paginação (tabela cabe mais linhas)
+  const totalPages = Math.max(1, Math.ceil(players.length / PLAYERS_PER_PAGE));
+  if (playerPage > totalPages) playerPage = totalPages;
+  const startI = (playerPage - 1) * PLAYERS_PER_PAGE;
+  const pageSlugs = players.slice(startI, startI + PLAYERS_PER_PAGE);
+  renderPlayersPager(totalPages);
+
+  // cabeçalho — colunas de métrica são CLICÁVEIS para ordenar (seta ↑/↓ na ativa)
+  const arrow = key => key === metric ? (dir === 'asc' ? ' ▲' : ' ▼') : '';
+  const thSort = (key, label, extra='') =>
+    `<th class="pt-num pt-sort${{extra}}${{key === metric ? ' pt-active' : ''}}" onclick="sortByCol('${{key}}')">${{label}}${{arrow(key)}}</th>`;
+  let head = `<th class="pt-rank">#</th><th class="pt-shirt">Nº</th><th class="pt-name">Jogador</th><th>Time</th><th>Pos</th>`;
+  if (metricCol) head += thSort(metricCol, PLAYER_METRIC_LABELS[metricCol] || metricCol, ' pt-metric');
+  head += thSort('rating_365', 'Nota');   // nota de atuação (365scores, ~2.9-9.8)
+  head += thSort('score_geral', 'Score');  // z-score de qualidade (0-100, vs posição)
+  statCols.forEach(c => head += thSort(c[0], c[1]));
+  head += thSort('jogos', 'Jogos');
+
+  const rows = pageSlugs.map(slug => {{
+    const meta = PLAYER_META[slug];
+    const r = snap[slug];
+    const empty = !r || !(r.jogos > 0);
+    const flag = (TEAMS_DETAIL[meta.team] || {{}}).flag || TEAM_FLAGS[meta.team] || '🏳️';
+    const perfil = (r ? r.perfil : meta.perfil) || '';
+    const focusCls = (selectedPlayer && slug === selectedPlayer) ? ' pt-focus' : '';
+    const rk = posR[slug] ? posR[slug] : '';
+    const score = r && r.score_geral != null ? r.score_geral : null;
+    const scoreColor = score != null ? _scoreColor(score) : '#8b949e';
+    const rating = r && r.rating_365 != null ? r.rating_365 : null;
+    const ratingColor = rating != null ? _ratingColor(rating) : '#8b949e';
+    let tds = `<td class="pt-rank">${{rk}}</td>` +
+      `<td class="pt-shirt">${{meta.shirt != null ? meta.shirt : ''}}</td>` +
+      `<td class="pt-name">${{flag}} ${{meta.name}}</td>` +
+      `<td class="pt-dim">${{meta.team}}</td>` +
+      `<td class="pt-dim">${{(PERFIL_LABEL[perfil]||perfil||'').slice(0,3)}}</td>`;
+    if (metricCol) {{
+      const mv = r ? r[metricCol] : null;
+      tds += `<td class="pt-num pt-metric"><b>${{_pmetricFmt(metricCol)(mv)}}</b></td>`;
+    }}
+    tds += `<td class="pt-num" style="color:${{ratingColor}};font-weight:700">${{rating != null ? rating.toFixed(1) : '—'}}</td>`;
+    tds += `<td class="pt-num" style="color:${{scoreColor}}">${{score != null ? score.toFixed(1) : '—'}}</td>`;
+    statCols.forEach(([k,, ff]) => {{ tds += `<td class="pt-num">${{r ? ff(r[k]) : '—'}}</td>`; }});
+    tds += `<td class="pt-num pt-dim">${{r ? Math.round(r.jogos||0) : 0}}</td>`;
+    const click = empty ? '' : `onclick="openPlayerModal('${{slug.replace(/'/g, "\\'")}}')"`;
+    return `<tr class="pt-row${{empty ? ' pt-empty' : ''}}${{focusCls}}" ${{click}}>${{tds}}</tr>`;
+  }}).join('');
+
+  host.innerHTML = `<table class="players-table"><thead><tr>${{head}}</tr></thead><tbody>${{rows}}</tbody></table>`;
+}}
+
+// clicar no cabeçalho ordena por aquela coluna: 1º clique = métrica ativa
+// (maior primeiro); reclique na mesma coluna inverte a direção. Sincroniza o
+// dropdown de Métrica quando a coluna corresponde a uma métrica do seletor.
+function sortByCol(key) {{
+  if (currentMetric === key) {{
+    sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+  }} else {{
+    currentMetric = key;
+    sortDir = 'desc';
+  }}
+  // reflete no dropdown de Métrica (se a coluna existe lá) e no botão de direção
+  const sel = document.getElementById('metricSelect');
+  if (sel && PLAYER_METRIC_LABELS[key]) sel.value = key;
+  const btn = document.getElementById('btnDir');
+  if (btn) btn.textContent = sortDir === 'desc' ? '↓ Maior primeiro' : '↑ Menor primeiro';
+  renderPlayersGrid();
+}}
+
+function renderPlayersPager(totalPages) {{
+  const pager = document.getElementById('playersPager');
+  if (!pager) return;
+  if (totalPages <= 1) {{ pager.innerHTML = ''; return; }}
+  let btns = `<button class="pager-btn" onclick="goPlayerPage(${{playerPage - 1}})" ${{playerPage === 1 ? 'disabled' : ''}}>‹</button>`;
+  for (let p = 1; p <= totalPages; p++)
+    btns += `<button class="pager-btn${{p === playerPage ? ' active' : ''}}" onclick="goPlayerPage(${{p}})">${{p}}</button>`;
+  btns += `<button class="pager-btn" onclick="goPlayerPage(${{playerPage + 1}})" ${{playerPage === totalPages ? 'disabled' : ''}}>›</button>`;
+  pager.innerHTML = btns + `<span class="pager-info">página ${{playerPage}} de ${{totalPages}}</span>`;
+}}
+
+// histórico do jogador: progressão score/jogos por snapshot (do PLAYER_DATA)
+function playerHistory(slug, uptoN = currentJogo) {{
+  const hist = [];
+  let prevJogos = null;
+  Object.keys(PLAYER_DATA).map(Number).sort((a, b) => a - b).forEach(n => {{
+    if (n > uptoN) return;
+    const r = (PSNAP_BY_SLUG[n] || {{}})[slug];
+    if (!r || !(r.jogos > 0)) return;
+    // só registra quando o nº de jogos AUMENTA (jogador entrou em campo num jogo novo)
+    if (prevJogos === null || r.jogos > prevJogos) {{
+      hist.push(n);
+      prevJogos = r.jogos;
+    }}
+  }});
+  return hist.map(n => (PSNAP_BY_SLUG[n] || {{}})[slug]);
+}}
+
+// média do PERFIL no snapshot atual (para comparação "acima/abaixo da posição")
+function profileAvg(perfil, metric, n = currentJogo) {{
+  const rows = (PLAYER_DATA[n] || []).filter(r => r.perfil === perfil && r.jogos > 0);
+  const vals = rows.map(r => r[metric]).filter(v => v != null);
+  if (!vals.length) return null;
+  return vals.reduce((a, b) => a + b, 0) / vals.length;
+}}
+
+function openPlayerModal(slug) {{
+  const meta = PLAYER_META[slug];
+  if (!meta) return;
+  const r = (PSNAP_BY_SLUG[currentJogo] || {{}})[slug];
+  const flag = (TEAMS_DETAIL[meta.team] || {{}}).flag || TEAM_FLAGS[meta.team] || '🏳️';
+  document.getElementById('playerModalTitle').innerHTML =
+    `<span class="modal-flag">${{flag}}</span> ${{meta.name}}` +
+    (r ? ` <span style="font-size:0.75rem;color:#8b949e">${{PERFIL_LABEL[r.perfil] || r.perfil}} · ${{meta.team}}</span>` : '');
+  document.getElementById('playerModalBody').innerHTML = renderPlayerModalBody(slug, r);
+  document.getElementById('playerModal').style.display = 'flex';
+}}
+function closePlayerModal() {{ document.getElementById('playerModal').style.display = 'none'; }}
+
+function renderPlayerModalBody(slug, r) {{
+  const meta = PLAYER_META[slug];
+  if (!r || !(r.jogos > 0)) {{
+    return `<div class="md-empty">${{meta.name}} ainda não entrou em campo até o Jogo ${{currentJogo}}.</div>`;
+  }}
+  const perfil = r.perfil;
+  // hero: nota geral + ranking no perfil
+  const hero = `<div class="rs-hero">
+    <span class="rs-hero-flag">${{(TEAMS_DETAIL[meta.team]||{{}}).flag || TEAM_FLAGS[meta.team] || '🏳️'}}</span>
+    <div class="rs-hero-info">
+      <div class="rs-hero-top"><span class="rs-hero-name" style="color:${{r.rating_365 != null ? _ratingColor(r.rating_365) : '#e6edf3'}}">${{r.rating_365 != null ? r.rating_365.toFixed(1) : '—'}}</span>
+        <span class="rs-hero-rank">nota de atuação · Score ${{r.score_geral != null ? r.score_geral.toFixed(1) : '—'}} (#${{Math.round(r.ranking_score_geral)}} entre ${{PERFIL_LABEL[perfil] || perfil}}s)</span></div>
+      <div class="rs-hero-meta">${{r.jogos}} jogo${{r.jogos !== 1 ? 's' : ''}} · evidência ${{r.nivel_evidencia || '—'}} ·
+        <a href="#" onclick="event.preventDefault(); openTeamFromPlayer('${{meta.team.replace(/'/g, "\\'")}}')" style="color:#58a6ff">ver ${{meta.team}}</a></div>
+    </div>
+  </div>`;
+
+  // resumo de stats (relevante ao perfil)
+  const kv = (k, v) => `<div class="rs-kv"><span class="rs-k">${{k}}</span><span class="rs-v">${{v}}</span></div>`;
+  const colA = `<div class="rs-col"><div class="rs-col-title">Produção</div>
+    ${{kv('Gols', Math.round(r.goals || 0))}}
+    ${{kv('Assistências', Math.round(r.assists || 0))}}
+    ${{kv('G+A', Math.round(r.participacoes_gol || 0))}}
+    ${{perfil === 'goleiro' ? kv('Defesas', Math.round(r.saves || 0)) : kv('Chutes no alvo', Math.round(r.shots_on_target || 0))}}
+  </div>`;
+  const colB = `<div class="rs-col"><div class="rs-col-title">Disciplina · médias/jogo</div>
+    ${{kv('Amarelos', Math.round(r.yellow_cards || 0))}}
+    ${{kv('Vermelhos', Math.round(r.red_cards || 0))}}
+    ${{kv('Faltas cometidas/jogo', (r.faltas_cometidas_por_jogo ?? 0).toFixed(1))}}
+    ${{kv('Faltas sofridas/jogo', (r.faltas_sofridas_por_jogo ?? 0).toFixed(1))}}
+  </div>`;
+
+  // comparação com o perfil: barras valor-vs-média da posição
+  const CMP = perfil === 'goleiro'
+    ? [['Defesas/jogo', 'defesas_por_jogo']]
+    : [['Gols/jogo', 'gols_por_jogo'], ['Assist./jogo', 'assistencias_por_jogo'], ['Chutes no alvo/jogo', 'chutes_no_alvo_por_jogo']];
+  const cmpHtml = CMP.map(([lbl, key]) => {{
+    const val = r[key] ?? 0;
+    const avg = profileAvg(perfil, key) || 0;
+    const ratio = avg > 0 ? val / avg : (val > 0 ? 2 : 1);
+    const pct = Math.max(4, Math.min(100, ratio * 50));   // 50% = na média
+    const cor = ratio >= 1.15 ? '#3fb950' : ratio >= 0.85 ? '#58a6ff' : '#d29922';
+    const rel = avg > 0 ? `${{(ratio * 100 - 100 >= 0 ? '+' : '')}}${{Math.round(ratio * 100 - 100)}}% vs média` : 'sem base';
+    return `<div class="es-mm">
+      <div class="es-mm-head"><span class="es-mm-lbl">${{lbl}}</span>
+        <span class="es-mm-vals"><b>${{val.toFixed(2)}}</b> <span class="es-mm-meta">${{rel}}</span></span></div>
+      <div class="es-mm-bar"><span class="es-mm-fill" style="width:${{pct}}%;background:${{cor}}"></span></div>
+    </div>`;
+  }}).join('');
+
+  // histórico jogo a jogo (acumulado por snapshot em que jogou)
+  const hist = playerHistory(slug);
+  const histRows = hist.map(h => {{
+    return `<tr><td>J${{h.jogos}}</td><td>${{h.score_geral != null ? h.score_geral.toFixed(1) : '—'}}</td>
+      <td>${{Math.round(h.goals||0)}}</td><td>${{Math.round(h.assists||0)}}</td>
+      <td>#${{Math.round(h.ranking_score_geral)}}</td></tr>`;
+  }}).join('');
+  const histHtml = hist.length > 1 ? `<div class="pm-hist">
+    <div class="rs-col-title">Evolução por jogo disputado</div>
+    <table class="pm-table"><thead><tr><th>Após</th><th>Nota</th><th>G</th><th>A</th><th>Rank</th></tr></thead>
+    <tbody>${{histRows}}</tbody></table></div>` : '';
+
+  return `${{hero}}<div class="rs-cols">${{colA}}${{colB}}</div>
+    <div class="pm-section"><div class="rs-col-title">Comparação com a posição (50% da barra = média)</div>${{cmpHtml}}</div>
+    ${{histHtml}}`;
+}}
+
+// abre o modal da seleção a partir do jogador
+function openTeamFromPlayer(team) {{
+  closePlayerModal();
+  if (TEAMS_DETAIL[team]) openTeamModal(team);
 }}
 
 let modalTeam = null;
@@ -4258,7 +6137,7 @@ function openTeamModal(team) {{
     ['scores', 'Resumo'],
     ['estilo', 'Estilo'],
     ['jogos', 'Jogos (' + (d.jogos ? d.jogos.length : 0) + ')'],
-    ['elenco', 'Elenco (' + (d.players ? d.players.length : 0) + ')'],
+    ['elenco', 'Elenco (' + (d.roster_count || (d.players ? d.players.filter(p => p.in_roster !== false).length : 0)) + ')'],
   ];
   document.getElementById('modalTabs').innerHTML = tabs.map(([k, l]) =>
     `<button class="modal-tab${{k === 'scores' ? ' active' : ''}}" data-mt="${{k}}" onclick="switchModalTab('${{k}}')">${{l}}</button>`
@@ -4494,6 +6373,7 @@ function _playerCardHtml(p, vside, hside) {{
   // tags de contexto (gol/cartão/entrada-saída)
   const ctx = [];
   if (p.goals) ctx.push(`<span class="pc-tag goal">⚽ ${{p.goals}} gol${{p.goals > 1 ? 's' : ''}}</span>`);
+  if (p.own_goal) ctx.push(`<span class="pc-tag vermelho">🥅 ${{p.own_goal > 1 ? p.own_goal + ' gols contra' : 'Gol contra'}}</span>`);
   if (p.card) ctx.push(`<span class="pc-tag ${{p.card}}">${{p.card === 'vermelho' ? '🟥 Expulso' : '🟨 Amarelo'}}</span>`);
   if (p.exited) ctx.push(`<span class="pc-tag out">↓ Saiu ${{p.exited}}'</span>`);
   if (p.entered) ctx.push(`<span class="pc-tag in">↑ Entrou ${{p.entered}}'</span>`);
@@ -4537,6 +6417,7 @@ function _rosterPlayerCardHtml(p) {{
   const n = (k) => p[k] == null ? 0 : Number(p[k] || 0);
   const ctx = [];
   if (n('gols')) ctx.push(`<span class="pc-tag goal">⚽ ${{n('gols')}} gol${{n('gols') > 1 ? 's' : ''}}</span>`);
+  if (n('gols_contra')) ctx.push(`<span class="pc-tag vermelho">🥅 ${{n('gols_contra')}} gol${{n('gols_contra') > 1 ? 's' : ''}} contra</span>`);
   if (n('amarelos')) ctx.push(`<span class="pc-tag amarelo">🟨 ${{n('amarelos')}} amarelo${{n('amarelos') > 1 ? 's' : ''}}</span>`);
   if (n('vermelhos')) ctx.push(`<span class="pc-tag vermelho">🟥 ${{n('vermelhos')}} vermelho${{n('vermelhos') > 1 ? 's' : ''}}</span>`);
 
@@ -4569,7 +6450,7 @@ function _rosterPlayerCardHtml(p) {{
   return `<div class="pcard el-pop" style="--el-pop-left:${{anchor.left}}px;--el-pop-top:${{anchor.top}}px;--pc-x:${{off.x || 0}}px;--pc-y:${{off.y || 0}}px" onclick="event.stopPropagation()">
     <div class="pc-head" onpointerdown="startPlayerCardDrag(event, '${{keyEsc}}')">
       <span class="pc-num">${{p.num ?? ''}}</span>
-      <div class="pc-id"><span class="pc-name">${{escName}}</span><span class="pc-pos">${{_esc(p.pos || '—')}} · ${{_esc(p.pos_group || 'Sem posição')}}</span></div>
+      <div class="pc-id"><span class="pc-name">${{escName}}</span><span class="pc-pos">${{_esc(p.pos || '—')}}</span></div>
       <button class="pc-close" onclick="event.stopPropagation();showRosterPlayer('${{closeName}}')">✕</button>
     </div>
     <div class="pc-meta">${{ratingHtml}}<div class="pc-meta-side"><div class="pc-ctx">${{gamesCtx}}${{ratingCtx}}</div>${{ctxHtml}}</div></div>
@@ -4834,6 +6715,15 @@ function renderPitch(homePitch, awayPitch, isHi, allPlayers = []) {{
   </div>`;
   const hasCard = openPlayerCards.size ? ' has-card' : '';
   return `<div class="pitch-h pitch-vs${{dimmed}}${{hasCard}}">${{lines}}${{dots}}</div>`;
+}}
+
+// cor da nota de atuação (365scores, ~3-10): vermelho fraco → verde destaque
+function _ratingColor(v) {{
+  if (v == null) return '#8b949e';
+  if (v >= 7.5) return '#3fb950';
+  if (v >= 6.8) return '#7bc96f';
+  if (v >= 6.2) return '#d29922';
+  return '#e0795b';
 }}
 
 function _scoreColor(v) {{
@@ -5112,14 +7002,17 @@ function renderModalBody() {{
   if (modalTab === 'elenco') {{
     if (!d.players || !d.players.length) {{ body.innerHTML = '<div class="md-empty">Sem dados de jogadores.</div>'; return; }}
     const players = d.players || [];
+    const rosterPlayers = players.filter(p => p.in_roster !== false);
+    const extraPlayers = players.filter(p => p.in_roster === false);
     const val = (p, k) => p[k] == null ? 0 : Number(p[k] || 0);
     const impact = (p) => val(p, 'gols') * 6 + val(p, 'assist') * 5 + val(p, 'no_alvo') * 3 + val(p, 'chutes') + val(p, 'defesas') * 4;
     const sortPlayer = (a, b) => (a.pos_order ?? 99) - (b.pos_order ?? 99) || impact(b) - impact(a) || val(b, 'jogos') - val(a, 'jogos') || _esc(a.name).localeCompare(_esc(b.name));
-    const active = players.filter(p => val(p, 'jogos') > 0).sort(sortPlayer);
-    const unused = players.filter(p => val(p, 'jogos') <= 0).sort(sortPlayer);
+    const active = rosterPlayers.filter(p => val(p, 'jogos') > 0).sort(sortPlayer);
+    const unused = rosterPlayers.filter(p => val(p, 'jogos') <= 0).sort(sortPlayer);
+    const extras = extraPlayers.sort(sortPlayer);
     const posGroups = ['Goleiros', 'Defensores', 'Meias', 'Atacantes', 'Sem posição'];
     const topBy = (key) => {{
-      const ranked = players.filter(p => val(p, key) > 0).sort((a, b) => val(b, key) - val(a, key) || impact(b) - impact(a));
+      const ranked = rosterPlayers.filter(p => val(p, key) > 0).sort((a, b) => val(b, key) - val(a, key) || impact(b) - impact(a));
       return ranked[0] || null;
     }};
     const leader = (label, key) => {{
@@ -5133,13 +7026,25 @@ function renderModalBody() {{
       </div>`;
     }};
     const stat = (label, value, cls = '') => `<span class="el-stat ${{cls}}"><b>${{value}}</b><span>${{label}}</span></span>`;
+    const displayRosterPos = (p) => {{
+      const pos = p.pos && p.pos !== '—' ? p.pos : '';
+      const group = p.pos_group || '';
+      const generic = {{
+        'Goleiros': 'Goleiro',
+        'Defensores': 'Defensor',
+        'Meias': 'Meia',
+        'Atacantes': 'Atacante',
+        'Sem posição': '',
+      }};
+      return pos && generic[group] !== pos ? pos : '';
+    }};
     const marks = (p) => [
       val(p, 'gols') ? `<span class="el-mark goal">⚽ ${{val(p, 'gols')}}</span>` : '',
       val(p, 'amarelos') ? `<span class="el-mark"><span class="el-card-dot yellow"></span>${{val(p, 'amarelos')}}</span>` : '',
       val(p, 'vermelhos') ? `<span class="el-mark"><span class="el-card-dot red"></span>${{val(p, 'vermelhos')}}</span>` : '',
     ].filter(Boolean).join('');
     const playerCard = (p) => {{
-      const pos = p.pos && p.pos !== '—' ? p.pos : '—';
+      const pos = displayRosterPos(p);
       const num = p.num ?? '—';
       const nameEscAttr = (p.name || '').replace(/'/g, "\\\\'");
       const isOpen = openRosterCards.has(p.name);
@@ -5148,7 +7053,7 @@ function renderModalBody() {{
           <span class="el-avatar">${{_esc(String(num))}}</span>
           <div class="el-player-id">
             <span class="el-name">${{_esc(p.name)}}</span>
-            <span class="el-pos-label">${{_esc(pos)}} · ${{_esc(p.pos_group || 'Sem posição')}}</span>
+            ${{pos ? `<span class="el-pos-label">${{_esc(pos)}}</span>` : ''}}
           </div>
           <div class="el-marks">${{marks(p)}}</div>
         </div>
@@ -5171,6 +7076,11 @@ function renderModalBody() {{
         <div class="el-unused-list">${{items.map(p => `<span class="el-unused-chip">${{_esc(String(p.num ?? '—'))}} · ${{_esc(p.name)}}</span>`).join('')}}</div>
       </div>`;
     }};
+    const extraHtml = extras.length ? `<div class="el-extra">
+      <div class="el-section-title">Dados de jogo fora do roster · ${{extras.length}}</div>
+      <div class="el-extra-note">Aparecem em estatísticas/escalação, mas não no elenco oficial da ESPN usado para a contagem.</div>
+      <div class="el-player-grid">${{extras.map(playerCard).join('')}}</div>
+    </div>` : '';
     const leaders = [
       leader('Gols', 'gols'),
       leader('Assistências', 'assist'),
@@ -5181,6 +7091,7 @@ function renderModalBody() {{
       <div class="el-leaders">${{leaders}}</div>
       ${{active.length ? `<div class="el-section-title">Entraram em campo · ${{active.length}}</div>${{posGroups.map(activeGroup).join('')}}` : ''}}
       ${{unused.length ? `<div class="el-unused"><div class="el-section-title">Ainda não jogaram · ${{unused.length}}</div>${{posGroups.map(unusedGroup).join('')}}</div>` : ''}}
+      ${{extraHtml}}
     </div>`;
     return;
   }}
