@@ -7,45 +7,87 @@ from typing import Any
 import pandas as pd
 import requests
 
+from fifa_analytics.config import load_config
 from fifa_analytics.transforms.team_names import traduzir_selecao
 from fifa_analytics.utils.time import utc_now_iso
 
 
-_BASE_URL = "https://webws.365scores.com/web"
-_COMPETITION_ID = 5930  # FIFA World Cup 2026
+_FALLBACK_BASE_URL = "https://webws.365scores.com/web"
+_FALLBACK_COMPETITION_ID = 5930  # FIFA World Cup 2026
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125",
     "Origin": "https://www.365scores.com",
     "Referer": "https://www.365scores.com/",
 }
 
+
+def _source_config() -> dict[str, Any]:
+    try:
+        return load_config("sources.yaml").get("sources", {}).get("scores365", {})
+    except Exception:
+        return {}
+
+
+def _base_url() -> str:
+    return str(_source_config().get("base_url") or _FALLBACK_BASE_URL)
+
+
+def _competition_id() -> int:
+    return int(_source_config().get("competition_id") or _FALLBACK_COMPETITION_ID)
+
 # stat type id → coluna canônica
 _STAT_TYPE_MAP: dict[int, str] = {
     3: "shots",
     4: "shots_on_target",
     5: "shots_off_target",
+    6: "shots_blocked",
     9: "offsides",
     19: "accurate_passes",
-    20: "long_passes_completed",
     23: "saves",
+    24: "big_chances_created",
+    25: "shots_woodwork",
     26: "assists",
     27: "goals",
     33: "penalties_scored",
+    35: "goals_conceded",
+    36: "big_chances_missed",
     37: "was_fouled",
+    39: "tackles_won",
+    40: "clearances",
+    41: "interceptions",
     42: "fouls",
+    43: "punches",
+    44: "penalties_saved",
     45: "touches",
     46: "key_passes",
+    47: "penalty_won",
+    48: "penalty_committed",
+    49: "penalties_missed",
+    52: "crosses_completed",
+    53: "long_passes_completed",
     54: "dribbles_won",
+    55: "ground_duels_won",
+    56: "aerial_duels_won",
+    57: "high_claims",
     60: "was_dribbled_past",
     65: "error_led_to_shot",
+    66: "error_led_to_goal",
     73: "possession_lost",
+    76: "expected_goals",
     78: "expected_assists",
+    79: "expected_goals_on_target",
     80: "passes_into_final_third",
+    81: "backward_passes",
+    82: "expected_goals_on_target_conceded",
+    83: "expected_goals_prevented",
     84: "final_third_possession_won",
+    85: "played_sweeper",
+    86: "ball_recovery",
+    87: "big_chances_scored",
 }
 
 # Stat types que têm numerador/denominador (ex: "32/36 (89%)") — pegar só o numerador
-_RATIO_TYPES: set[int] = {19, 20, 54}
+_RATIO_TYPES: set[int] = {19, 39, 52, 53, 54, 55, 56}
 
 # Stat type para minutos jogados (valor como "90'" — remover apóstrofo)
 _MINUTES_TYPE = 30
@@ -79,11 +121,11 @@ def discover_game_ids(
         for gid in range(start, end + 1):
             try:
                 detail = _get_json(
-                    f"{_BASE_URL}/game/",
+                    f"{_base_url()}/game/",
                     params={"gameId": gid, "langId": 17, "userCountryId": 21},
                 )
                 g = detail.get("game", {})
-                if g.get("competitionId") == _COMPETITION_ID and g.get("sportId") == 1:
+                if g.get("competitionId") == _competition_id() and g.get("sportId") == 1:
                     found.append(gid)
             except Exception:
                 pass
@@ -93,7 +135,7 @@ def discover_game_ids(
 
 def fetch_game_detail(game_id: int | str) -> dict[str, Any]:
     return _get_json(
-        f"{_BASE_URL}/game/",
+        f"{_base_url()}/game/",
         params={
             "gameId": int(game_id),
             "langId": 17,

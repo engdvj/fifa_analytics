@@ -22,8 +22,6 @@ def _base_url() -> str:
     except Exception:
         return _FALLBACK_BASE_URL
 
-
-BASE_URL = _FALLBACK_BASE_URL
 START_DATE = date(2026, 6, 11)
 END_DATE = date(2026, 7, 19)
 TEAM_STAT_COLUMNS = {

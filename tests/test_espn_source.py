@@ -63,6 +63,8 @@ def test_normalize_espn_match_info_and_commentary():
     assert shots.iloc[0]["outcome"] == "bloqueado"
     assert shots.iloc[0]["player"] == "Casemiro"
     assert shots.iloc[0]["assist_player"] == "Achraf Hakimi"
+    assert shots.iloc[0]["location_x"] == 44.4
+    assert shots.iloc[0]["location_y"] == 90.4
 
 
 def _fake_event():
