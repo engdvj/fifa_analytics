@@ -2272,12 +2272,12 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
   display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 9px;
 }}
 .el-player {{
-  min-width: 0; border: 1px solid #222b38; border-radius: 8px; padding: 10px;
+  min-width: 0; border: 1px solid #222b38; border-radius: 8px; padding: 10px 11px;
   background: rgba(22,27,34,0.64); position: relative; cursor: pointer;
 }}
 .el-player:hover {{ border-color: #1f6feb55; background: rgba(31,111,235,0.09); }}
 .el-player.open {{ z-index: 30; border-color: #58a6ff88; }}
-.el-player-top {{ display: flex; align-items: center; gap: 9px; min-width: 0; margin-bottom: 9px; }}
+.el-player-top {{ display: flex; align-items: center; gap: 9px; min-width: 0; }}
 .el-avatar {{
   width: 34px; height: 34px; border-radius: 50%; flex: 0 0 auto;
   display: inline-flex; align-items: center; justify-content: center;
@@ -2620,8 +2620,13 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 }}
 .pcard.v-above {{ bottom: 130%; transform: translate(calc(-50% + var(--pc-x, 0px)), var(--pc-y, 0px)); }}
 .pcard.v-below {{ top: 130%; transform: translate(calc(-50% + var(--pc-x, 0px)), var(--pc-y, 0px)); }}
-.pcard.h-l {{ left: auto; right: 50%; transform: translate(calc(40% + var(--pc-x, 0px)), var(--pc-y, 0px)); }}
-.pcard.h-r {{ left: 50%; transform: translate(calc(-40% + var(--pc-x, 0px)), var(--pc-y, 0px)); }}
+.pcard.h-l {{ left: auto; right: 100%; transform: translate(calc(-8px + var(--pc-x, 0px)), var(--pc-y, 0px)); }}
+.pcard.h-r {{ left: 100%; transform: translate(calc(8px + var(--pc-x, 0px)), var(--pc-y, 0px)); }}
+.pcard.field-pop {{
+  position: fixed; left: var(--field-pop-left, 16px); top: var(--field-pop-top, 16px);
+  right: auto; bottom: auto; transform: translate(var(--pc-x, 0px), var(--pc-y, 0px));
+  z-index: 10000; max-height: calc(100vh - 16px); overflow: auto;
+}}
 .pcard.dragging {{ user-select: none; box-shadow: 0 20px 48px rgba(0,0,0,0.85), 0 0 0 1px #58a6ff66; }}
 
 .pc-head {{
@@ -3962,7 +3967,7 @@ function openTeamModal(team) {{
   modalTeam = team;
   modalTab = 'scores';
   expandedGame = null;
-  openRosterPlayer = null;
+  openRosterCards.clear();
   const tabs = [
     ['scores', 'Resumo'],
     ['estilo', 'Estilo'],
@@ -3979,7 +3984,7 @@ function openTeamModal(team) {{
 function closeTeamModal() {{
   document.getElementById('teamModal').style.display = 'none';
   openPlayerCards.clear();
-  openRosterPlayer = null;
+  openRosterCards.clear();
   highlightedPlayer = null;
   modalTeam = null;
 }}
@@ -3988,7 +3993,7 @@ function switchModalTab(t) {{
   modalTab = t;
   expandedGame = null;  // ao trocar de aba, fecha qualquer jogo expandido
   openPlayerCards.clear();
-  openRosterPlayer = null;
+  openRosterCards.clear();
   highlightedPlayer = null;
   document.querySelectorAll('.modal-tab').forEach(b =>
     b.classList.toggle('active', b.dataset.mt === t));
@@ -4005,8 +4010,9 @@ function toggleGame(i) {{
 let gameDetailTab = 'historia';  // mini-aba ativa dentro do jogo expandido
 let highlightedPlayer = null;     // jogador destacado no campo (par da troca)
 const openPlayerCards = new Set(); // jogadores com card de dados aberto
-let openRosterPlayer = null;       // card acumulado aberto na aba Elenco
+const openRosterCards = new Set(); // cards acumulados abertos na aba Elenco
 const rosterCardAnchors = {{}};
+const fieldCardAnchors = {{}};
 const playerCardOffsets = {{}};      // chave jogador/jogo -> deslocamento arrastado
 let playerCardDrag = null;
 
@@ -4031,7 +4037,7 @@ function startPlayerCardDrag(ev, key) {{
     startY: ev.clientY,
     baseX: off.x || 0,
     baseY: off.y || 0,
-    fixed: card.classList.contains('el-pop'),
+    fixed: card.classList.contains('el-pop') || card.classList.contains('field-pop'),
     anchorLeft: parseFloat(getComputedStyle(card).left) || 0,
     anchorTop: parseFloat(getComputedStyle(card).top) || 0,
   }};
@@ -4074,7 +4080,8 @@ function switchGameTab(t) {{
 }}
 
 // clica num jogador no campo → alterna o card dele, sem fechar os outros
-function showPlayerCard(name) {{
+function showPlayerCard(name, anchorEl = null) {{
+  const key = _playerCardKey(name);
   if (openPlayerCards.has(name)) {{
     openPlayerCards.delete(name);
     highlightedPlayer = highlightedPlayer === name
@@ -4083,18 +4090,32 @@ function showPlayerCard(name) {{
   }} else {{
     openPlayerCards.add(name);
     highlightedPlayer = name;
+    if (anchorEl) {{
+      const rect = anchorEl.getBoundingClientRect();
+      const margin = 8;
+      const w = Math.min(248, window.innerWidth - margin * 2);
+      const estimatedH = 286;
+      let left = rect.right + 12;
+      if (left + w > window.innerWidth - margin) left = rect.left - w - 12;
+      if (left < margin) left = rect.left + rect.width / 2 - w / 2;
+      left = Math.max(margin, Math.min(left, window.innerWidth - margin - w));
+      let top = rect.top + rect.height / 2 - estimatedH / 2;
+      top = Math.max(margin, Math.min(top, window.innerHeight - margin - 120));
+      fieldCardAnchors[key] = {{ left: Math.round(left), top: Math.round(top) }};
+      playerCardOffsets[key] = {{ x: 0, y: 0 }};
+    }}
   }}
   renderModalBody();
 }}
 
 function showRosterPlayer(name, anchorEl = null) {{
   const key = _rosterCardKey(name);
-  if (openRosterPlayer === name) {{
-    openRosterPlayer = null;
+  if (openRosterCards.has(name)) {{
+    openRosterCards.delete(name);
     renderModalBody();
     return;
   }}
-  openRosterPlayer = name;
+  openRosterCards.add(name);
   if (anchorEl) {{
     const rect = anchorEl.getBoundingClientRect();
     const margin = 8;
@@ -4171,9 +4192,10 @@ function _playerCardHtml(p, vside, hside) {{
 
   const key = _playerCardKey(p.name);
   const off = playerCardOffsets[key] || {{ x: 0, y: 0 }};
+  const anchor = fieldCardAnchors[key] || {{ left: 16, top: 16 }};
   const keyEsc = key.replace(/\\\\/g, "\\\\\\\\").replace(/'/g, "\\\\'");
   const esc = (p.name || '').replace(/'/g, "\\\\'");
-  return `<div class="pcard v-${{vside}} h-${{hside}}" style="--pc-x:${{off.x || 0}}px;--pc-y:${{off.y || 0}}px" onclick="event.stopPropagation()">
+  return `<div class="pcard field-pop" style="--field-pop-left:${{anchor.left}}px;--field-pop-top:${{anchor.top}}px;--pc-x:${{off.x || 0}}px;--pc-y:${{off.y || 0}}px" onclick="event.stopPropagation()">
     <div class="pc-head" onpointerdown="startPlayerCardDrag(event, '${{keyEsc}}')">
       <span class="pc-num">${{p.num ?? ''}}</span>
       <div class="pc-id"><span class="pc-name">${{p.name}}</span>${{p.pos ? `<span class="pc-pos">${{p.pos}}</span>` : ''}}</div>
@@ -4438,18 +4460,18 @@ function renderPitch(homePitch, awayPitch, isHi) {{
     const top = p.x;
     // todo jogador é clicável → abre o card de dados (e destaca a troca, se houver)
     const cls = `pitch-player ${{who}} clickable${{p.exited ? ' subbed-out' : ''}}${{isHi(p.name) ? ' hi' : ''}}`;
-    // flip do card: abaixo se o jogador está na parte de cima; alinhado p/ dentro nas bordas
-    const vside = top < 38 ? 'below' : 'above';
-    const hside = left < 22 ? 'r' : (left > 78 ? 'l' : 'c');
-    const card = openPlayerCards.has(p.name) ? _playerCardHtml(p, vside, hside) : '';
-    return `<div class="${{cls}}" style="left:${{left}}%;top:${{top}}%" onclick="showPlayerCard('${{esc(p.name)}}')">
+    return `<div class="${{cls}}" style="left:${{left}}%;top:${{top}}%" onclick="showPlayerCard('${{esc(p.name)}}', this)">
       <div class="pitch-shirt">${{p.num ?? ''}}${{cardMark(p)}}${{goalMark(p)}}${{p.exited ? `<span class="sub-out">↓${{p.exited}}'</span>` : ''}}</div>
       <div class="pitch-name">${{splitName(p.name)}}</div>
-      ${{card}}
     </div>`;
   }};
+  const allPitchPlayers = (homePitch || []).concat(awayPitch || []);
   const dots = (homePitch || []).map(p => dot(p, 'home')).join('')
     + (awayPitch || []).map(p => dot(p, 'away')).join('');
+  const cards = allPitchPlayers
+    .filter(p => openPlayerCards.has(p.name))
+    .map(p => _playerCardHtml(p, 'above', 'c'))
+    .join('');
   // marcações horizontais: meio (vertical), círculo, áreas/gols nas laterais
   const lines = `<div class="pitch-lines">
     <div class="pl-line plh-half"></div>
@@ -4459,7 +4481,7 @@ function renderPitch(homePitch, awayPitch, isHi) {{
     <div class="pl-line plh-box right"></div><div class="pl-line plh-box-s right"></div><div class="pl-goal-h right"></div>
   </div>`;
   const hasCard = openPlayerCards.size ? ' has-card' : '';
-  return `<div class="pitch-h pitch-vs${{dimmed}}${{hasCard}}">${{lines}}${{dots}}</div>`;
+  return `<div class="pitch-h pitch-vs${{dimmed}}${{hasCard}}">${{lines}}${{dots}}${{cards}}</div>`;
 }}
 
 function _scoreColor(v) {{
@@ -4779,20 +4801,7 @@ function renderModalBody() {{
       const pos = p.pos && p.pos !== '—' ? p.pos : '—';
       const num = p.num ?? '—';
       const nameEscAttr = (p.name || '').replace(/'/g, "\\\\'");
-      const isOpen = openRosterPlayer === p.name;
-      const stats = [
-        stat('Jogos', val(p, 'jogos'), 'hot'),
-        val(p, 'gols') ? stat('Gols', val(p, 'gols'), 'hot') : '',
-        val(p, 'assist') ? stat('Assistências', val(p, 'assist'), 'hot') : '',
-        val(p, 'chutes') ? stat('Chutes', val(p, 'chutes')) : '',
-        val(p, 'no_alvo') ? stat('No alvo', val(p, 'no_alvo')) : '',
-        val(p, 'faltas') ? stat('Faltas', val(p, 'faltas')) : '',
-        val(p, 'faltas_sofridas') ? stat('Faltas sofridas', val(p, 'faltas_sofridas')) : '',
-        val(p, 'impedimentos') ? stat('Impedimentos', val(p, 'impedimentos')) : '',
-        val(p, 'amarelos') ? stat('Amarelos', val(p, 'amarelos'), 'warn') : '',
-        val(p, 'vermelhos') ? stat('Vermelhos', val(p, 'vermelhos'), 'danger') : '',
-        val(p, 'defesas') ? stat('Defesas', val(p, 'defesas'), 'hot') : '',
-      ].filter(Boolean).join('');
+      const isOpen = openRosterCards.has(p.name);
       return `<div class="el-player${{isOpen ? ' open' : ''}}" onclick="showRosterPlayer('${{nameEscAttr}}', this)">
         <div class="el-player-top">
           <span class="el-avatar">${{_esc(String(num))}}</span>
@@ -4802,7 +4811,6 @@ function renderModalBody() {{
           </div>
           <div class="el-marks">${{marks(p)}}</div>
         </div>
-        <div class="el-stat-grid">${{stats}}</div>
         ${{isOpen ? _rosterPlayerCardHtml(p) : ''}}
       </div>`;
     }};
