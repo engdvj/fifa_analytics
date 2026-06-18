@@ -114,6 +114,30 @@ def build_team_match_features(
         features = features.merge(enrich, on=["match_id", "team"], how="left", suffixes=("", "_365"))
         features = features.merge(formation_365, on=["match_id", "team"], how="left")
 
+    # Gols contra SOFRIDOS por time/jogo. No fact_events, o evento gol_contra é
+    # atribuído ao time BENEFICIADO; quem sofreu o gol contra é o adversário
+    # daquele jogo. Marcamos no time que se desorganizou a ponto de mandar contra
+    # o próprio gol — pesa mais na defesa (ver score_defesa).
+    features["own_goals_against"] = 0  # gol contra SOFRIDO (a marcação se desorganizou)
+    features["own_goals_for"] = 0      # gol contra GANHO (não é mérito ofensivo)
+    if events is not None and not events.empty and "event_type" in events.columns:
+        og = events[events["event_type"] == "gol_contra"]
+        if not og.empty:
+            # no fact_events, team = BENEFICIÁRIO; quem sofreu é o adversário do jogo
+            benef = og.groupby(["match_id", "team"]).size().rename("n").reset_index()
+            opp_map = features[["match_id", "team", "opponent"]]
+            benef = benef.merge(opp_map, on=["match_id", "team"], how="left")
+            # gol contra a favor (beneficiário)
+            afavor = benef.groupby(["match_id", "team"])["n"].sum().rename("_og_for").reset_index()
+            features = features.merge(afavor, on=["match_id", "team"], how="left")
+            features["own_goals_for"] = features["_og_for"].fillna(0)
+            # gol contra sofrido (o adversário do beneficiário)
+            sofridos = benef[["match_id", "opponent", "n"]].rename(columns={"opponent": "team"})
+            sofridos = sofridos.groupby(["match_id", "team"])["n"].sum().rename("_og_against").reset_index()
+            features = features.merge(sofridos, on=["match_id", "team"], how="left")
+            features["own_goals_against"] = features["_og_against"].fillna(0)
+            features = features.drop(columns=["_og_for", "_og_against"])
+
     process_cols = ["shots", "shots_on_target", "passes", "possession", "fouls"]
     available_process = [c for c in process_cols if c in features.columns]
     features["team_stats_available"] = features[available_process].notna().any(axis=1) if available_process else False
@@ -474,6 +498,8 @@ def build_team_scores(
         "points": "sum",
         "goals_for": "sum",
         "goals_against": "sum",
+        "own_goals_against": "sum",
+        "own_goals_for": "sum",
         "shots": "sum",
         "shots_on_target": "sum",
         "blocked_shots": "sum",
@@ -652,7 +678,11 @@ def build_team_scores(
     # em si é avaliada à parte em score_eficiencia. Multiplicado pelo contexto do
     # adversário ANTES do z-score: marcar contra quem criou muito volume de jogo
     # conta mais do que contra quem praticamente não jogou.
-    _ataque_gol = _zscore_to_100(scores["gols_por_jogo"] * scores["ataque_ctx"])
+    # gol contra GANHO não é mérito do ataque — desconta do gols/jogo só p/ o
+    # score_ataque (o placar/resultado segue contando o gol normalmente).
+    _og_for = scores.get("own_goals_for", pd.Series(0, index=scores.index)).fillna(0)
+    _gols_ataque_por_jogo = _safe_divide((scores["gols_pro"] - _og_for).clip(lower=0), scores["jogos"])
+    _ataque_gol = _zscore_to_100(_gols_ataque_por_jogo * scores["ataque_ctx"])
     _ataque_vol = _zscore_to_100(scores["chutes_no_alvo_por_jogo"] * scores["ataque_ctx"])
     _ataque_raw = _ataque_gol * 0.70 + _ataque_vol * 0.30
     scores["score_ataque"] = _apply_confidence(_ataque_raw, _amostra_conf)
@@ -687,7 +717,12 @@ def build_team_scores(
     # de gols, então o ajuste contextual precisa ser proporcional ao gap LOCAL.
     def _band(gc):
         return 85.0 / (1.0 + gc * 0.55)
-    _gc = scores["gols_contra_por_jogo"].clip(lower=0)
+    # gol contra pesa MAIS na defesa: a marcação se desorganizou a ponto do próprio
+    # jogador mandar contra. Cada gol contra conta como 1.5 gol sofrido (penalidade
+    # de +0.5) no eixo da banda — empurra o time pra uma banda defensiva pior.
+    _og_against = scores.get("own_goals_against", pd.Series(0, index=scores.index)).fillna(0)
+    _gc_efetivo = scores["gols_contra"] + _og_against * 0.5
+    _gc = _safe_divide(_gc_efetivo, scores["jogos"]).clip(lower=0)
     _banda_base = _band(_gc)
 
     # gap adjacente à banda do time — limita o ajuste pra NUNCA cruzar de banda
