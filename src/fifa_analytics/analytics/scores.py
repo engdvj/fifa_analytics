@@ -659,9 +659,24 @@ def build_team_scores(
 
     # score_defesa: solidez defensiva — segurar adversário que criou muito
     # volume vale mais do que segurar quem quase não chegou ao ataque.
+    #
+    # O resultado defensivo (gols sofridos) é o que MAIS importa: segurar muito
+    # volume sem sofrer gol é mérito, não fragilidade. Por isso o termo de chutes
+    # no alvo sofridos é "perdoado" na proporção em que o time converteu pressão
+    # em zero gols — `eficacia_defensiva` ∈ [0,1]: 1 = segurou tudo (todos os
+    # chutes no alvo defendidos/perdidos), 0 = todos viraram gol. Sem isso, quem
+    # apanha muito mas não leva gol (ex.: Cabo Verde 7 no alvo da Espanha, 0 gol)
+    # era punido por sofrer volume, contradizendo o próprio clean sheet.
+    _alvo_sofridos = scores["chutes_no_alvo_sofridos_por_jogo"].clip(lower=0)
+    _eficacia_defensiva = (
+        1.0 - _safe_divide(scores["gols_contra_por_jogo"], _alvo_sofridos)
+    ).clip(0.0, 1.0).fillna(1.0)
+    # alvo sofridos "efetivo": pondera o volume sofrido pela parcela que NÃO virou
+    # gol — segurar 7 a 0 conta quase como não ter sido vazado.
+    _alvo_efetivo = _alvo_sofridos * (1.0 - _eficacia_defensiva)
     _defesa_raw = _mean_score([
         _zscore_to_100(scores["gols_contra_por_jogo"] / scores["defesa_ctx"], lower_is_better=True),
-        _zscore_to_100(scores["chutes_no_alvo_sofridos_por_jogo"] / scores["defesa_ctx"], lower_is_better=True),
+        _zscore_to_100(_alvo_efetivo / scores["defesa_ctx"], lower_is_better=True),
         _zscore_to_100(scores["clean_sheet_rate"] * scores["defesa_ctx"]),
     ])
     # Defesa pouco testada (adversário criou pouco volume — defesa_ctx baixo)
