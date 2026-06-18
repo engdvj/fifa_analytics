@@ -239,6 +239,26 @@ def _find_365_player_row(rows: pd.DataFrame, player_name: str):
     return None
 
 
+def _find_365_player_rows(rows: pd.DataFrame, player_name: str) -> pd.DataFrame:
+    """Versão agregada do match 365Scores: retorna todas as linhas do jogador."""
+    if rows.empty:
+        return rows
+
+    key = _name_key(player_name)
+    source_keys = rows["player_name"].map(_name_key)
+    exact = rows[source_keys == key]
+    if not exact.empty:
+        return exact
+
+    surname = _surname_key(player_name)
+    if not surname:
+        return rows.iloc[0:0]
+    surname_only = rows[source_keys == surname]
+    if surname_only.empty:
+        return surname_only
+    return surname_only if surname_only["player_name"].map(_name_key).nunique() == 1 else rows.iloc[0:0]
+
+
 def _num0(v):
     try:
         return None if v is None or pd.isna(v) else (int(v) if float(v) == int(float(v)) else round(float(v), 2))
@@ -479,26 +499,53 @@ def _position_label(pos: str | None) -> str:
         return "—"
     norm = p.upper().replace("_", " ").replace("-", " ")
     mapped = {
-        "GOALKEEPER": "G",
-        "DEFENDER": "D",
-        "MIDFIELDER": "M",
-        "ATTACKER": "F",
-        "FORWARD": "F",
-        "CENTRE BACK": "CD",
-        "CENTER BACK": "CD",
-        "LEFT BACK": "LB",
-        "RIGHT BACK": "RB",
-        "CENTRAL MIDFIELD": "CM",
-        "CENTRE MIDFIELD": "CM",
-        "CENTER MIDFIELD": "CM",
-        "DEFENSIVE MIDFIELD": "DM",
-        "ATTACKING MIDFIELD": "AM",
-        "LEFT MIDFIELD": "LM",
-        "RIGHT MIDFIELD": "RM",
-        "CENTRE FORWARD": "CF",
-        "CENTER FORWARD": "CF",
-        "LEFT FORWARD": "LF",
-        "RIGHT FORWARD": "RF",
+        "G": "Goleiro",
+        "GK": "Goleiro",
+        "GOALKEEPER": "Goleiro",
+        "D": "Defensor",
+        "DEFENDER": "Defensor",
+        "SW": "Líbero",
+        "CD": "Zagueiro",
+        "CD L": "Zagueiro esquerdo",
+        "CD R": "Zagueiro direito",
+        "CENTRE BACK": "Zagueiro",
+        "CENTER BACK": "Zagueiro",
+        "LB": "Lateral esquerdo",
+        "LEFT BACK": "Lateral esquerdo",
+        "RB": "Lateral direito",
+        "RIGHT BACK": "Lateral direito",
+        "M": "Meia",
+        "MIDFIELDER": "Meia",
+        "DM": "Volante",
+        "DEFENSIVE MIDFIELD": "Volante",
+        "CM": "Meia central",
+        "CM L": "Meia central esquerdo",
+        "CM R": "Meia central direito",
+        "CENTRAL MIDFIELD": "Meia central",
+        "CENTRE MIDFIELD": "Meia central",
+        "CENTER MIDFIELD": "Meia central",
+        "AM": "Meia ofensivo",
+        "AM L": "Meia ofensivo esquerdo",
+        "AM R": "Meia ofensivo direito",
+        "ATTACKING MIDFIELD": "Meia ofensivo",
+        "LM": "Meia esquerdo",
+        "LEFT MIDFIELD": "Meia esquerdo",
+        "RM": "Meia direito",
+        "RIGHT MIDFIELD": "Meia direito",
+        "F": "Atacante",
+        "FW": "Atacante",
+        "ATTACKER": "Atacante",
+        "FORWARD": "Atacante",
+        "CF": "Centroavante",
+        "CF L": "Centroavante esquerdo",
+        "CF R": "Centroavante direito",
+        "RCF": "Centroavante direito",
+        "CENTRE FORWARD": "Centroavante",
+        "CENTER FORWARD": "Centroavante",
+        "LF": "Atacante esquerdo",
+        "LEFT FORWARD": "Atacante esquerdo",
+        "RF": "Atacante direito",
+        "RIGHT FORWARD": "Atacante direito",
     }
     return mapped.get(norm, p.upper())
 
@@ -652,6 +699,7 @@ def _timeline_for(mid: str, team: str, game_subs: list) -> list:
             "player": f"{entra} ↔ {saiu}{extra}" if entra and saiu else (entra or saiu),
             "team": team, "mine": True, "sym": "🔄", "label": "Substituição",
             "is_sub": True, "hl_name": entra or saiu,
+            "hl_names": [x for x in (entra, saiu) if x],
         })
 
     def _min_key(t):
@@ -771,8 +819,9 @@ for _team in _all_cup_teams:
 
     # — elenco agregado (stats somadas em todos os jogos)
     ps = _pstats[_pstats["team"] == _team]
+    roster_team = _rosters[_rosters["team"] == _team] if not _rosters.empty else pd.DataFrame()
     players = []
-    if not ps.empty:
+    if not ps.empty or not roster_team.empty:
         pos_by_name: dict[str, str] = {}
         num_by_name: dict[str, int] = {}
 
@@ -804,10 +853,10 @@ for _team in _all_cup_teams:
             lineup_team = _lineups[_lineups["team"] == _team]
             pos_by_name.update(_mode_pos(lineup_team, "position"))
             num_by_name.update(_mode_num(lineup_team, "shirt_number"))
-        if not _rosters.empty and "squad_position" in _rosters.columns:
-            roster_team = _rosters[_rosters["team"] == _team]
-            for key, pos in _mode_pos(roster_team, "squad_position").items():
-                pos_by_name.setdefault(key, pos)
+        if not roster_team.empty and "squad_position" in roster_team.columns:
+            # No elenco agregado, prioriza a função de convocação. A posição de
+            # escalação é tática e pode listar pontas como AM-L/AM-R em um jogo.
+            pos_by_name.update(_mode_pos(roster_team, "squad_position"))
             for key, num in _mode_num(roster_team, "shirt_number").items():
                 num_by_name.setdefault(key, num)
         if not _p365.empty:
@@ -815,27 +864,53 @@ for _team in _all_cup_teams:
             for col in ("formation_position", "position"):
                 for key, pos in _mode_pos(p365_team, col).items():
                     pos_by_name.setdefault(key, pos)
+        else:
+            p365_team = pd.DataFrame()
 
-        agg = ps.groupby("player_name", dropna=True).agg(
-            jogos=("appearances", "sum"), gols=("goals", "sum"), assist=("assists", "sum"),
-            chutes=("shots", "sum"), no_alvo=("shots_on_target", "sum"),
-            amarelos=("yellow_cards", "sum"), vermelhos=("red_cards", "sum"),
-            defesas=("saves", "sum"),
-            faltas=("fouls_committed", "sum"), faltas_sofridas=("fouls_drawn", "sum"),
-            impedimentos=("offsides", "sum"),
-        ).reset_index()
+        stat_cols = ["jogos", "gols", "assist", "chutes", "no_alvo", "amarelos", "vermelhos", "defesas", "faltas", "faltas_sofridas", "impedimentos"]
+        if not ps.empty:
+            agg = ps.groupby("player_name", dropna=True).agg(
+                jogos=("appearances", "sum"), gols=("goals", "sum"), assist=("assists", "sum"),
+                chutes=("shots", "sum"), no_alvo=("shots_on_target", "sum"),
+                amarelos=("yellow_cards", "sum"), vermelhos=("red_cards", "sum"),
+                defesas=("saves", "sum"),
+                faltas=("fouls_committed", "sum"), faltas_sofridas=("fouls_drawn", "sum"),
+                impedimentos=("offsides", "sum"),
+            ).reset_index()
+        else:
+            agg = pd.DataFrame(columns=["player_name", *stat_cols])
+        if not roster_team.empty and "player_name" in roster_team.columns:
+            present = set(agg["player_name"].map(_name_key)) if not agg.empty else set()
+            roster_missing = roster_team[
+                roster_team["player_name"].notna()
+                & ~roster_team["player_name"].map(_name_key).isin(present)
+            ][["player_name"]].drop_duplicates()
+            if not roster_missing.empty:
+                for col in stat_cols:
+                    roster_missing[col] = 0
+                agg = pd.concat([agg, roster_missing], ignore_index=True)
         # ordena: gols, assistências, jogos
         agg = agg.sort_values(["gols", "assist", "jogos"], ascending=False)
         for _, p in agg.iterrows():
             pkey = _name_key(p["player_name"])
             pos_raw = pos_by_name.get(pkey)
             pos_group = _position_group(pos_raw)
+            rating_media = None
+            rating_jogos = 0
+            if not p365_team.empty and "rating" in p365_team.columns:
+                r365 = _find_365_player_rows(p365_team, p["player_name"])
+                ratings = pd.to_numeric(r365.get("rating"), errors="coerce").dropna() if not r365.empty else pd.Series(dtype=float)
+                if len(ratings):
+                    rating_media = round(float(ratings.mean()), 1)
+                    rating_jogos = int(len(ratings))
             players.append({
                 "name": p["player_name"],
                 "num": num_by_name.get(pkey),
                 "pos": _position_label(pos_raw),
                 "pos_group": pos_group,
                 "pos_order": _POS_GROUP_ORDER.get(pos_group, 99),
+                "rating_media": rating_media,
+                "rating_jogos": rating_jogos,
                 "jogos": _num(p["jogos"]), "gols": _num(p["gols"]), "assist": _num(p["assist"]),
                 "chutes": _num(p["chutes"]), "no_alvo": _num(p["no_alvo"]),
                 "amarelos": _num(p["amarelos"]), "vermelhos": _num(p["vermelhos"]),
@@ -1380,6 +1455,7 @@ input[type=range] {{
   --dot: clamp(7px, 0.5vw, 12px);
   --dot-gap: clamp(3px, 0.28vw, 7px);
   --phase-gap: clamp(8px, 0.8vw, 20px);
+  --team-dot-label-w: 170px;
 }}
 .dots-wrap {{
   display: flex;
@@ -1396,7 +1472,6 @@ input[type=range] {{
 .dots-wrap::-webkit-scrollbar {{ height: 6px; }}
 .dots-wrap::-webkit-scrollbar-thumb {{ background: #30363d; border-radius: 3px; }}
 .dots-wrap::-webkit-scrollbar-thumb:hover {{ background: #484f58; }}
-
 /* réguas por time (quando há 2+ cards abertos) */
 #teamDotRows {{ display: flex; flex-direction: column; }}
 .team-dot-row {{
@@ -1410,7 +1485,8 @@ input[type=range] {{
   padding-right: 10px; margin-right: 6px;
   border-right: 1px solid #21262d;
   position: sticky; left: 0; background: #0d1117;
-  flex-shrink: 0; min-width: 120px;
+  flex-shrink: 0; width: var(--team-dot-label-w); min-width: var(--team-dot-label-w);
+  overflow: hidden; text-overflow: ellipsis;
 }}
 .team-label-row {{ border-bottom: 1px solid #21262d; padding-top: 2px; padding-bottom: 0; }}
 .team-label-row .phase-group {{ padding-top: 2px; padding-bottom: 0; }}
@@ -1434,6 +1510,11 @@ input[type=range] {{
   white-space: nowrap;
   opacity: 0.8;
   text-align: center;         /* texto centralizado no container da fase */
+}}
+.phase-label-spacer {{
+  visibility: hidden;         /* reserva a largura do rótulo nas linhas dos times */
+  height: 0;
+  overflow: hidden;
 }}
 .phase-dots {{
   display: flex;
@@ -1735,6 +1816,40 @@ input[type=range] {{
 .tt-rank.rk1 {{ color: #1b1b1b; background: #f5c542; border-color: #f5c542; }}
 .tt-rank.rk2 {{ color: #1b1b1b; background: #c0c0c0; border-color: #c0c0c0; }}
 .tt-rank.rk3 {{ color: #1b1b1b; background: #cd7f32; border-color: #cd7f32; }}
+.tt-empty {{
+  padding: 18px 18px 20px;
+  min-height: 132px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 10px;
+  color: #8b949e;
+  background: linear-gradient(135deg, rgba(13,17,23,0.96), rgba(17,23,32,0.96));
+}}
+.tt-empty-title {{
+  color: #e6edf3;
+  font-size: 0.92rem;
+  font-weight: 800;
+}}
+.tt-empty-copy {{
+  font-size: 0.76rem;
+  line-height: 1.45;
+  max-width: 560px;
+}}
+.tt-empty-actions {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 2px; }}
+.tt-empty-btn {{
+  border: 1px solid #1f6feb88;
+  background: #0d419d55;
+  color: #79c0ff;
+  border-radius: 6px;
+  padding: 6px 9px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  cursor: pointer;
+}}
+.tt-empty-btn:hover {{ background: #0d419d88; color: #c9e6ff; }}
+.tt-empty-hint {{ font-size: 0.68rem; color: #6b7280; }}
 
 /* ── MODAL FIXO ── */
 .modal-card {{
@@ -1915,6 +2030,11 @@ input[type=range] {{
   padding: 22px 24px; cursor: pointer;
   transition: border-color 0.15s, transform 0.1s, background 0.15s, box-shadow 0.15s;
 }}
+/* card do time em FOCO (busca/destacar compartilhado) */
+.team-card.tc-focus {{
+  border-color: #58a6ff; background: #11161f;
+  box-shadow: 0 0 0 1px #58a6ff66, 0 8px 26px rgba(31,111,235,0.18);
+}}
 .team-card:hover {{
   border-color: #1f6feb; background: #11161f; transform: translateY(-2px);
   box-shadow: 0 8px 26px rgba(31,111,235,0.14);
@@ -1928,6 +2048,7 @@ input[type=range] {{
   font-size: 1.3rem; font-weight: 900; color: #58a6ff;
   background: #1f6feb18; border-radius: 9px; padding: 7px 13px; flex-shrink: 0;
 }}
+.team-card .tc-rank.muted {{ color: #6b7280; background: #161b22; }}
 /* destaque da métrica ativa */
 .tc-metric {{
   display: flex; align-items: baseline; gap: 12px;
@@ -2121,17 +2242,6 @@ input[type=range] {{
   font-size: 0.78rem; color: #c9a227; margin-top: 14px; padding: 10px 13px;
   background: #c9a22712; border: 1px solid #c9a22733; border-radius: 8px; line-height: 1.5;
 }}
-/* dropdown "ver o time como estilo X" + bloco de detalhe do arquétipo */
-.es-arq-picker {{ display: flex; align-items: center; gap: 10px; margin: 14px 2px 0; flex-wrap: wrap; }}
-.es-arq-label {{ font-size: 0.8rem; color: #8b949e; }}
-.es-arq-select {{
-  background: #161b22; color: #e6edf3; border: 1px solid #30363d; border-radius: 8px;
-  padding: 6px 30px 6px 11px; font-size: 0.86rem; font-weight: 600; cursor: pointer;
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%238b949e' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
-  background-repeat: no-repeat; background-position: right 11px center;
-}}
-.es-arq-select:focus {{ border-color: #58a6ff; outline: none; }}
 .es-arq-detail {{
   margin-top: 12px; padding: 14px 16px; background: #0d111788;
   border: 1px solid #21262d; border-radius: 12px;
@@ -2179,8 +2289,11 @@ input[type=range] {{
 }}
 .es-perfil {{ display: flex; flex-direction: column; gap: 5px; }}
 .es-perfil-row {{
-  display: grid; grid-template-columns: 170px 1fr 44px; align-items: center; gap: 10px;
+  display: grid; grid-template-columns: minmax(235px, 0.36fr) minmax(120px, 0.64fr) 44px; align-items: center; gap: 10px;
   padding: 4px 8px; border-radius: 7px; cursor: pointer; transition: background 0.15s;
+}}
+@media (max-width: 620px) {{
+  .es-perfil-row {{ grid-template-columns: minmax(185px, 0.5fr) minmax(90px, 0.5fr) 40px; }}
 }}
 .es-perfil-row:hover {{ background: #161b22; }}
 .es-perfil-row.flag {{ background: #1f6feb1a; }}
@@ -2289,7 +2402,7 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
   color: #e6edf3; font-size: 0.84rem; font-weight: 800; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }}
-.el-pos-label {{ color: #8b949e; font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; }}
+.el-pos-label {{ color: #8b949e; font-size: 0.66rem; font-weight: 700; letter-spacing: 0.2px; }}
 .el-marks {{ display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }}
 .el-mark {{
   min-width: 22px; height: 20px; border-radius: 999px; padding: 0 6px;
@@ -2336,7 +2449,7 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 }}
 .pcard.el-pop .pc-head {{ cursor: move; touch-action: none; }}
 .pcard.el-pop .pc-num {{ background: #1f6feb; }}
-.pcard.el-pop .pc-meta {{ grid-template-columns: 1fr; min-height: 0; padding: 9px 12px 0; }}
+.pcard.el-pop .pc-meta {{ grid-template-columns: 50px 1fr; min-height: 46px; padding: 9px 12px 0; }}
 .pcard.el-pop .pc-meta-side {{ gap: 7px; }}
 @media (max-width: 760px) {{
   .el-leaders {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
@@ -2641,7 +2754,7 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 }}
 .pc-id {{ flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }}
 .pc-name {{ font-size: 0.92rem; font-weight: 800; color: #e6edf3; line-height: 1.1; }}
-.pc-pos {{ font-size: 0.66rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.4px; }}
+.pc-pos {{ font-size: 0.66rem; color: #8b949e; letter-spacing: 0.2px; }}
 .pc-close {{
   background: transparent; border: none; color: #8b949e; cursor: pointer;
   font-size: 0.95rem; padding: 2px 4px; border-radius: 5px; flex-shrink: 0;
@@ -2668,6 +2781,7 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 .pc-ctx.empty {{ visibility: hidden; }}
 .pc-tag {{ font-size: 0.68rem; font-weight: 700; border-radius: 6px; padding: 2px 7px; }}
 .pc-tag.goal {{ background: #1f6feb22; color: #79b8ff; }}
+.pc-tag.neutral {{ background: #21262d; color: #c9d1d9; }}
 .pc-tag.amarelo {{ background: #f5c54222; color: #f5c542; }}
 .pc-tag.vermelho {{ background: #ef444422; color: #ef4444; }}
 .pc-tag.out {{ background: #ef444418; color: #f0867d; }}
@@ -2709,6 +2823,22 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
   background: #ef4444; border-radius: 8px; padding: 0 4px; white-space: nowrap;
   border: 1px solid #0d1117;
 }}
+.sub-in-field {{
+  position: absolute; bottom: -5px; right: -10px;
+  font-size: 0.52rem; font-weight: 800; color: #fff;
+  background: #22c55e; border-radius: 8px; padding: 0 4px; white-space: nowrap;
+  border: 1px solid #0d1117;
+}}
+.pitch-sub-toggle {{
+  position: absolute; right: -15px; top: 13px;
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1px solid #58a6ff99; background: #0d419dcc; color: #c9e6ff;
+  font-size: 0.72rem; line-height: 16px; font-weight: 900;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; z-index: 5;
+  box-shadow: 0 1px 5px rgba(0,0,0,0.55);
+}}
+.pitch-sub-toggle:hover {{ background: #1f6feb; color: #fff; transform: scale(1.06); }}
 .md-xi .pl.used {{ border-color: #22c55e66; background: #14241a; opacity: 1; }}
 .sub-in {{ color: #22c55e; font-weight: 700; }}
 /* cartão no jogador do campo (cantinho da camisa) */
@@ -2769,27 +2899,35 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
   </div>
 </header>
 
-<!-- ══ VIEW: Ranking Race (original) ══ -->
-<div id="viewRace">
-
-<div class="controls">
-  <span style="font-size:0.72rem;color:#6b7280;white-space:nowrap">Métrica:</span>
-  <select id="metricSelect" onchange="changeMetric(this.value)"></select>
+<!-- ══ BARRA DE FILTROS ÚNICA — idêntica e compartilhada pelas duas abas ══ -->
+<div class="controls" id="sharedControls">
+  <input type="text" id="teamSearch" class="teams-search" placeholder="Buscar/destacar seleção…" oninput="onFocusInput()">
+  <label class="tb-field">Métrica
+    <select id="metricSelect" onchange="changeMetric(this.value)"></select>
+  </label>
   <button class="btn" id="btnDir" onclick="toggleDir()">↓ Maior primeiro</button>
   <div style="width:1px;height:18px;background:#30363d;margin:0 4px"></div>
-  <span style="font-size:0.72rem;color:#6b7280;white-space:nowrap">Destacar:</span>
-  <select id="teamSelect" onchange="selectTeam(this.value)">
-    <option value="">— time —</option>
-  </select>
-  <button class="btn" onclick="selectTeam('')" title="Limpar">✕</button>
+  <label class="tb-field">Grupo
+    <select id="filterGroup" onchange="applyTeamFilters()"><option value="">Todos</option></select>
+  </label>
+  <label class="tb-field">Confederação
+    <select id="filterConfed" onchange="applyTeamFilters()"><option value="">Todas</option></select>
+  </label>
+  <label class="tb-field">Fase
+    <select id="filterStage" onchange="applyTeamFilters()"><option value="">Todas</option></select>
+  </label>
+  <label class="tb-check"><input type="checkbox" id="filterPlayed" onchange="applyTeamFilters()"> Só com jogos</label>
   <div style="flex:1"></div>
-  <span class="lb-tag" id="metricLabelTag" style="font-size:0.72rem">Geral</span>
-  <span id="metricDirTag" style="color:#6b7280;font-size:0.7rem"></span>
+  <button class="btn" onclick="resetAllFilters()" title="Limpar filtros">✕ Limpar</button>
+  <span class="teams-count" id="teamsCount"></span>
 </div>
 
+<!-- ══ BARRA DE BOLINHAS (navegação no tempo) — compartilhada ══ -->
 <div class="dots-wrap" id="progressDots"></div>
 <div id="teamDotRows"></div>
 
+<!-- ══ VIEW: Ranking Race ══ -->
+<div id="viewRace">
 <div class="main">
   <div class="chart-area">
     <div class="chart-header">
@@ -2813,34 +2951,10 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
     </div>
   </div>
 </div>
-
 </div><!-- /viewRace -->
 
 <!-- ══ VIEW: Seleções (grade de países) ══ -->
 <div id="viewTeams" style="display:none">
-  <div class="teams-toolbar">
-    <input type="text" id="teamSearch" class="teams-search" placeholder="Buscar seleção…" oninput="applyTeamFilters()">
-
-    <label class="tb-field">Ordenar
-      <select id="teamSort" onchange="applyTeamFilters()"></select>
-    </label>
-    <button class="btn tb-dir" id="teamSortDir" onclick="toggleTeamSortDir()" title="Inverter ordem">↓</button>
-
-    <label class="tb-field">Grupo
-      <select id="filterGroup" onchange="applyTeamFilters()"><option value="">Todos</option></select>
-    </label>
-    <label class="tb-field">Confederação
-      <select id="filterConfed" onchange="applyTeamFilters()"><option value="">Todas</option></select>
-    </label>
-    <label class="tb-field">Fase
-      <select id="filterStage" onchange="applyTeamFilters()"><option value="">Todas</option></select>
-    </label>
-    <label class="tb-check"><input type="checkbox" id="filterPlayed" onchange="applyTeamFilters()"> Só com jogos</label>
-
-    <div style="flex:1"></div>
-    <button class="btn" onclick="resetTeamFilters()" title="Limpar filtros">✕ Limpar</button>
-    <span class="teams-count" id="teamsCount"></span>
-  </div>
   <div class="teams-grid" id="teamsGrid"></div>
   <div class="teams-pager" id="teamsPager"></div>
 </div>
@@ -2871,6 +2985,76 @@ const LOWER_IS_BETTER = new Set({lower_is_better_json});
 const jogos = Object.keys(DATA).map(Number).sort((a,b)=>a-b);
 const N = jogos.length;
 const ROW_H = 44;
+
+// — Metadados ESTÁTICOS por time (grupo/confederação/fase): não mudam com o
+// tempo, vêm do TEAMS_DETAIL. Usados pelos filtros nas DUAS abas.
+const TEAM_META = {{}};
+Object.entries(TEAMS_DETAIL).forEach(([t, d]) => {{
+  TEAM_META[t] = {{ group: d.group || null, confed: d.confed || null, stage: d.stage_now || null }};
+}});
+
+// — Índice [jogo][time] → linha de números daquele snapshot, para lookup O(1).
+// Também pré-calcula a posição no ranking geral (score_geral) de cada snapshot,
+// já que o timeline não traz o rank pronto.
+const SNAP_BY_TEAM = {{}};
+const SNAP_RANK = {{}};
+Object.entries(DATA).forEach(([n, frame]) => {{
+  const byTeam = {{}};
+  (frame.teams || []).forEach(row => {{ byTeam[row.team] = row; }});
+  SNAP_BY_TEAM[n] = byTeam;
+  // ranking por score_geral (maior = 1º), empate = mesma posição
+  const ranked = (frame.teams || [])
+    .filter(r => r.score_geral != null)
+    .sort((a, b) => b.score_geral - a.score_geral);
+  const rk = {{}};
+  ranked.forEach((r, i) => {{
+    rk[r.team] = (i > 0 && r.score_geral === ranked[i - 1].score_geral) ? rk[ranked[i - 1].team] : i + 1;
+  }});
+  SNAP_RANK[n] = rk;
+}});
+
+// Estado de FILTRO global, compartilhado entre Ranking Race e Seleções.
+const teamFilters = {{ group: '', confed: '', stage: '' }};
+
+// Um time passa nos filtros globais (grupo/confederação/fase)?
+function passesGlobalFilters(team) {{
+  const meta = TEAM_META[team] || {{}};
+  if (teamFilters.group && meta.group !== teamFilters.group) return false;
+  if (teamFilters.confed && meta.confed !== teamFilters.confed) return false;
+  if (teamFilters.stage && meta.stage !== teamFilters.stage) return false;
+  return true;
+}}
+
+// "Detalhe" do time NO MOMENTO selecionado (jogo n): mescla metadados estáticos
+// (TEAMS_DETAIL) com os números daquele snapshot (DATA[n]) — assim a grade
+// Seleções reflete o jogo selecionado, não só o estado final.
+function teamDetailAt(team, n = currentJogo) {{
+  const base = TEAMS_DETAIL[team] || {{}};
+  const snap = (SNAP_BY_TEAM[n] || {{}})[team];
+  if (!snap) {{
+    // time ainda não entrou no ranking nesse momento: zera números, mantém metadados
+    return Object.assign({{}}, base, {{
+      n_jogos: 0, rank: null,
+      scores: {{}}, campanha: {{}}, estilo: base.estilo,
+    }});
+  }}
+  // posição no ranking geral daquele snapshot (pré-calculada em SNAP_RANK)
+  return Object.assign({{}}, base, {{
+    n_jogos: snap.jogos,
+    rank: (SNAP_RANK[n] || {{}})[team] != null ? SNAP_RANK[n][team] : base.rank,
+    scores: {{
+      score_geral: snap.score_geral, score_resultado: snap.score_resultado,
+      score_ataque: snap.score_ataque, score_defesa: snap.score_defesa,
+      score_eficiencia: snap.score_eficiencia, score_controle: snap.score_controle,
+      score_forca_relativa: snap.score_forca_relativa, score_disciplina: snap.score_disciplina,
+    }},
+    campanha: {{
+      pontos: snap.pontos, gols_pro: snap.gols_pro, gols_contra: snap.gols_contra,
+      saldo_gols: snap.saldo_gols, elo_rating: snap.elo_rating, aproveitamento: snap.aproveitamento,
+    }},
+    estilo: Object.assign({{}}, base.estilo || {{}}, {{ flag: snap.estilo_jogo }}),
+  }});
+}}
 
 let currentJogo = jogos[jogos.length - 1];
 let selectedTeam = '';
@@ -2934,6 +3118,7 @@ slider.max = N;
 const SNAPSHOT_META = {snapshot_meta_json_var};
 const dotRefs = {{}};  // n → dot element (só jogos processados/navegáveis)
 const allDots = [];   // todos os dots: {{ el, meta }} — p/ filtrar por seleção
+let dotPhaseFilter = '';
 
 const dotsEl = document.getElementById('progressDots');
 
@@ -3016,9 +3201,13 @@ function buildTeamDotRow(team) {{
   const firstO = playedOrders.length ? playedOrders[0] : null;
   const lastO  = playedOrders.length ? playedOrders[playedOrders.length - 1] : null;
 
-  phaseGroups.forEach(pg => {{
+  visiblePhaseGroups().forEach(pg => {{
     const grp = document.createElement('div');
     grp.className = 'phase-group';
+    const lblSpacer = document.createElement('div');
+    lblSpacer.className = 'phase-label phase-label-spacer';
+    lblSpacer.textContent = pg.label;
+    grp.appendChild(lblSpacer);
     const dotsRow = document.createElement('div');
     dotsRow.className = 'phase-dots';
     pg.items.forEach(m => {{
@@ -3052,7 +3241,7 @@ function buildPhaseLabelRow() {{
   spacer.textContent = '';
   wrap.appendChild(spacer);
 
-  phaseGroups.forEach(pg => {{
+  visiblePhaseGroups().forEach(pg => {{
     const grp = document.createElement('div');
     grp.className = 'phase-group';
     const lbl = document.createElement('div');
@@ -3075,6 +3264,27 @@ function buildPhaseLabelRow() {{
   return wrap;
 }}
 
+function measureTeamDotLabelWidth(teams) {{
+  if (!teams.length) return 170;
+  const probe = document.createElement('div');
+  probe.className = 'team-dot-flag';
+  probe.style.position = 'absolute';
+  probe.style.visibility = 'hidden';
+  probe.style.left = '-9999px';
+  probe.style.width = 'auto';
+  probe.style.minWidth = '0';
+  probe.style.maxWidth = 'none';
+  probe.style.overflow = 'visible';
+  document.body.appendChild(probe);
+  let maxW = 0;
+  teams.forEach(team => {{
+    probe.textContent = (TEAM_FLAGS[team] || '🏳️') + ' ' + team;
+    maxW = Math.max(maxW, probe.scrollWidth);
+  }});
+  probe.remove();
+  return Math.ceil(Math.max(170, Math.min(maxW + 4, 260)));
+}}
+
 // Sincroniza as réguas conforme os cards/seleção:
 //  • 0-1 time em foco → só a régua principal (filtrada)
 //  • 2+ cards abertos → ESCONDE a principal; cabeçalho de fases + 1 régua por time
@@ -3086,10 +3296,12 @@ function syncDotRows() {{
 
   if (cards.length >= 2) {{
     mainRow.style.display = 'none';           // esconde a régua principal
+    teamRows.style.setProperty('--team-dot-label-w', measureTeamDotLabelWidth(cards) + 'px');
     teamRows.appendChild(buildPhaseLabelRow());
     cards.forEach(t => teamRows.appendChild(buildTeamDotRow(t)));
   }} else {{
     mainRow.style.display = '';               // mostra a principal
+    teamRows.style.removeProperty('--team-dot-label-w');
     const focus = cards.length === 1 ? cards[0] : (selectedTeam || null);
     applyDotTeamFilter(focus);
   }}
@@ -3105,46 +3317,53 @@ SNAPSHOT_META.forEach(m => {{
   phaseGroups[phaseGroups.length - 1].items.push(m);
 }});
 
-phaseGroups.forEach(pg => {{
-  const grp = document.createElement('div');
-  grp.className = 'phase-group';
+function visiblePhaseGroups() {{
+  return dotPhaseFilter ? phaseGroups.filter(pg => pg.label === dotPhaseFilter) : phaseGroups;
+}}
 
-  const lbl = document.createElement('div');
-  lbl.className = 'phase-label';
-  lbl.textContent = pg.label;
-  lbl.style.color = pg.color;
-  grp.appendChild(lbl);
+function renderMainDots() {{
+  dotsEl.innerHTML = '';
+  Object.keys(dotRefs).forEach(k => delete dotRefs[k]);
+  allDots.length = 0;
 
-  const dotsRow = document.createElement('div');
-  dotsRow.className = 'phase-dots';
+  visiblePhaseGroups().forEach(pg => {{
+    const grp = document.createElement('div');
+    grp.className = 'phase-group';
 
-  pg.items.forEach(m => {{
-    const d = document.createElement('div');
-    d.className = 'dot';   // classe base (tamanho/forma); paintDot adiciona o status
-    const id = m.match_id.replace('copa_2026_jogo_', 'Jogo ');
-    d.title = m.status === 'live' ? `${{id}} — AO VIVO`
-            : m.status === 'done' ? `${{id}} — clique para ver`
-            : `${{id}} — ainda não disputado`;
-    // só navega para jogos já processados (têm snapshot n)
-    if (m.n != null) d.onclick = () => goToJogo(m.n);
-    else d.style.cursor = 'default';
-    dotsRow.appendChild(d);
-    if (m.n != null) dotRefs[m.n] = {{ el: d, color: pg.color }};
-    allDots.push({{ el: d, color: pg.color, meta: m }});
-    paintDot(d, m, pg.color, null);   // estado base (sem filtro de time)
+    const lbl = document.createElement('div');
+    lbl.className = 'phase-label';
+    lbl.textContent = pg.label;
+    lbl.style.color = pg.color;
+    grp.appendChild(lbl);
+
+    const dotsRow = document.createElement('div');
+    dotsRow.className = 'phase-dots';
+
+    pg.items.forEach(m => {{
+      const d = document.createElement('div');
+      d.className = 'dot';   // classe base (tamanho/forma); paintDot adiciona o status
+      const id = m.match_id.replace('copa_2026_jogo_', 'Jogo ');
+      d.title = m.status === 'live' ? `${{id}} — AO VIVO`
+              : m.status === 'done' ? `${{id}} — clique para ver`
+              : `${{id}} — ainda não disputado`;
+      // só navega para jogos já processados (têm snapshot n)
+      if (m.n != null) d.onclick = () => goToJogo(m.n);
+      else d.style.cursor = 'default';
+      dotsRow.appendChild(d);
+      if (m.n != null) dotRefs[m.n] = {{ el: d, color: pg.color }};
+      allDots.push({{ el: d, color: pg.color, meta: m }});
+      paintDot(d, m, pg.color, null);   // estado base (sem filtro de time)
+    }});
+
+    grp.appendChild(dotsRow);
+    dotsEl.appendChild(grp);
   }});
+}}
 
-  grp.appendChild(dotsRow);
-  dotsEl.appendChild(grp);
-}});
+renderMainDots();
 
-// ── team select
-const teamSel = document.getElementById('teamSelect');
-ALL_TEAMS.forEach(t => {{
-  const o = document.createElement('option');
-  o.value = t; o.textContent = `${{TEAM_FLAGS[t] || '🏳️'}} ${{t}}`;
-  teamSel.appendChild(o);
-}});
+// O "destacar time" da Race agora é controlado pela busca compartilhada
+// (onFocusInput): digitar um nome exato destaca a barra correspondente.
 
 // ── bar DOM pool
 // Armazena referências diretas ao DOM — sem IDs com acentos que quebram getElementById
@@ -3192,9 +3411,11 @@ function getRow(team) {{
 
 // ── sort teams: sortDir controla a direção manual do usuário
 function sortedTeams(frameTeams) {{
+  // Aplica os filtros GLOBAIS (grupo/confederação/fase) também às barras da Race.
+  const filtered = frameTeams.filter(t => passesGlobalFilters(t.team));
   // Ordena pela QUANTIDADE bruta: 'desc' = maior primeiro, 'asc' = menor primeiro.
   const asc = sortDir === 'asc';
-  return [...frameTeams].sort((a, b) => {{
+  return filtered.sort((a, b) => {{
     const va = a[currentMetric] ?? (asc ? Infinity : -Infinity);
     const vb = b[currentMetric] ?? (asc ? Infinity : -Infinity);
     return asc ? va - vb : vb - va;
@@ -3205,9 +3426,7 @@ function toggleDir() {{
   sortDir = sortDir === 'desc' ? 'asc' : 'desc';
   const btn = document.getElementById('btnDir');
   btn.textContent = sortDir === 'desc' ? '↓ Maior primeiro' : '↑ Menor primeiro';
-  document.getElementById('metricDirTag').textContent =
-    sortDir === 'desc' ? '↓ maior → menor' : '↑ menor → maior';
-  renderJogo(currentJogo);
+  renderBothViews();  // direção é compartilhada: vale na corrida E na grade
 }}
 
 // aproveitamento e clean_sheet_rate estão em fração (0–1); posse_media já é %
@@ -3252,6 +3471,9 @@ function formatVal(v, metric) {{
   if (Number.isInteger(v) || Math.abs(v - Math.round(v)) < 0.005) return String(Math.round(v));
   return v.toFixed(1);
 }}
+
+// formatador da métrica para a grade Seleções (reusa formatVal da corrida)
+function _metricFmt(metric) {{ return v => formatVal(v, metric); }}
 
 function renderJogo(n) {{
   const frame = DATA[n];
@@ -3434,20 +3656,33 @@ function renderSidebar(n) {{
   if (cur) cur.scrollIntoView({{block: 'nearest'}});
 }}
 
+// Métrica COMPARTILHADA: anima a corrida E ordena a grade Seleções. Atualiza
+// as duas views ao trocar.
 function changeMetric(metric) {{
   currentMetric = metric;
-  const label = METRIC_LABELS[metric] || metric;
-  document.getElementById('metricLabelTag').textContent = label.replace(' ↓','');
-  document.getElementById('metricDirTag').textContent =
-    sortDir === 'desc' ? '↓ maior → menor' : '↑ menor → maior';
-  renderJogo(currentJogo);
+  renderBothViews();
 }}
 
 function selectTeam(t) {{
   selectedTeam = t;
-  teamSel.value = t;
   syncDotRows();
   renderJogo(currentJogo);
+}}
+
+// Re-renderiza a view ativa (e a grade Seleções é sempre time-aware).
+function renderBothViews() {{
+  renderJogo(currentJogo);
+  if (activeTab === 'teams') renderTeamsGrid();
+}}
+
+// Busca/foco compartilhado: na grade filtra por nome; na corrida, se o texto
+// casar EXATAMENTE com um time, destaca a barra dele.
+function onFocusInput() {{
+  const raw = document.getElementById('teamSearch').value.trim();
+  const exact = TEAMS_GRID.find(t => _norm(t) === _norm(raw));
+  selectedTeam = exact || '';
+  syncDotRows();
+  renderBothViews();
 }}
 
 // ── Cards flutuantes arrastáveis (N times) ──
@@ -3477,12 +3712,49 @@ function rankClass(rank) {{
   return '';
 }}
 
+function teamEntryAt(team, n = currentJogo) {{
+  const frame = DATA[n];
+  return frame ? frame.teams.find(x => x.team === team) : null;
+}}
+
+function teamAvailableJogos(team) {{
+  return jogos.filter(j => teamEntryAt(team, j));
+}}
+
+function firstTeamJogo(team) {{
+  const js = teamAvailableJogos(team);
+  return js.length ? js[0] : null;
+}}
+
+function buildNoDataCardBody(team) {{
+  const first = firstTeamJogo(team);
+  const d = TEAMS_DETAIL[team] || {{}};
+  const firstMatch = first ? DATA[first] : null;
+  const firstLabel = firstMatch
+    ? `Jogo ${{first}} · ${{firstMatch.home}} ${{firstMatch.home_flag}} ${{firstMatch.score}} ${{firstMatch.away_flag}} ${{firstMatch.away}}`
+    : '';
+  const action = first
+    ? `<button class="tt-empty-btn" onclick="event.stopPropagation(); goToJogo(${{first}})">Ir para o primeiro dado</button>
+       <span class="tt-empty-hint">${{firstLabel}}</span>`
+    : '<span class="tt-empty-hint">Essa seleção ainda não tem snapshot processado.</span>';
+  const group = d.group ? ` no Grupo ${{d.group}}` : '';
+  return `<div class="tt-empty">
+    <div class="tt-empty-title">Sem dados para este período</div>
+    <div class="tt-empty-copy">${{team}} ainda não tinha entrado no ranking após o Jogo ${{currentJogo}}${{group}}. O card fica aberto para você continuar comparando a trajetória sem perder a seleção.</div>
+    <div class="tt-empty-actions">${{action}}</div>
+  </div>`;
+}}
+
 function buildCardBody(team) {{
   const frame = DATA[currentJogo];
-  const t = frame.teams.find(x => x.team === team);
-  if (!t) return '';
-  const allTeams = frame.teams;
-  // "#N no ranking" = posição no ranking GERAL (score_geral, maior=melhor),
+  const t = teamEntryAt(team);
+  if (!t) return buildNoDataCardBody(team);
+  // universo de comparação = times do snapshot que passam nos filtros ativos
+  // (Grupo/Confed/Fase) — assim os ranks do painel ("33º") ficam DENTRO do
+  // filtro. Sem filtro, é o universo inteiro, como antes.
+  let allTeams = frame.teams.filter(x => passesGlobalFilters(x.team));
+  if (!allTeams.some(x => x.team === team)) allTeams = frame.teams;
+  // "#N no ranking" = posição no ranking (score_geral, maior=melhor),
   // independente da métrica/direção selecionada na tela.
   const gr = metricRank('score_geral', allTeams, team, 'desc');
   const rank = gr ? gr.rank : '?';
@@ -3529,8 +3801,15 @@ function buildCardBody(team) {{
 // Cabeçalho do card (bandeira + nome + posição), exibido na barra de arrastar.
 function buildCardHeader(team) {{
   const frame = DATA[currentJogo];
-  const t = frame.teams.find(x => x.team === team);
-  if (!t) return '';
+  const t = teamEntryAt(team);
+  if (!t) {{
+    const d = TEAMS_DETAIL[team] || {{}};
+    const first = firstTeamJogo(team);
+    const firstTxt = first ? ` · entra no Jogo ${{first}}` : '';
+    return `<span class="drag-flag">${{d.flag || TEAM_FLAGS[team] || ''}}</span>
+      <span class="drag-name">${{team}}</span>
+      <span class="drag-sub">sem dados neste período${{firstTxt}}</span>`;
+  }}
   const gr = metricRank('score_geral', frame.teams, team, 'desc');
   const rank = gr ? gr.rank : '?';
   const rankTie = gr && gr.tied ? '=' : '';
@@ -3636,6 +3915,8 @@ document.addEventListener('keydown', e => {{
 function goToJogo(n) {{
   currentJogo = n;
   renderJogo(n);
+  // a grade Seleções reflete o momento selecionado — re-renderiza se estiver ativa
+  if (activeTab === 'teams') renderTeamsGrid();
 }}
 
 function updateSpeed() {{
@@ -3717,12 +3998,12 @@ function switchTab(tab) {{
     t.classList.toggle('active', t.dataset.tab === tab));
   document.getElementById('viewRace').style.display = tab === 'race' ? '' : 'none';
   document.getElementById('viewTeams').style.display = tab === 'teams' ? 'flex' : 'none';
-  // o player só faz sentido na race
-  document.querySelector('.header-player').style.visibility = tab === 'race' ? 'visible' : 'hidden';
+  // a barra de tempo (Play/slider) agora é COMPARTILHADA — visível nas duas abas,
+  // já que a grade Seleções também reflete o jogo selecionado.
+  document.querySelector('.header-player').style.visibility = 'visible';
   if (tab === 'teams') {{
-    if (playing) togglePlay();
     if (!_teamsInit) {{ initTeamsControls(); _teamsInit = true; }}
-    applyTeamFilters();
+    renderTeamsGrid();
   }}
 }}
 let _teamsInit = false;
@@ -3736,67 +4017,79 @@ const STAGE_LABELS_TEAMS = {{
   'Semifinais': 'Semifinais', 'Disputa 3º Lugar': 'Disputa 3º Lugar', 'Final': 'Final',
 }};
 
-// formatadores reutilizáveis para o destaque da métrica
+// formatadores reutilizáveis
 const _f1 = v => v == null ? '—' : v.toFixed(1);                    // 1 casa (scores)
 const _fi = v => v == null ? '—' : Math.round(v);                   // inteiro
+const _fe = v => v == null ? '—' : v.toFixed(1);                    // Elo com 1 casa
 const _fs = v => v == null ? '—' : (v > 0 ? '+' + v : '' + v);     // saldo com sinal
-const _fp = v => v == null ? '—' : Math.round(v * 100) + '%';      // fração → %
-
-// opções de ordenação: k, label (dropdown), short (rótulo do destaque), get (acessor),
-// fmt (formatação do destaque), asc (direção default). Sem fmt → score 1 casa.
-const TEAM_SORTS = [
-  {{ k: 'rank',       label: 'Ranking (#)',      short: 'Geral',        get: d => d.rank, asc: true }},
-  {{ k: 'alpha',      label: 'Alfabética (A–Z)', short: 'Geral',        get: d => null,  asc: true }},
-  {{ k: 'score_geral',        label: 'Score Geral',     short: 'Geral',         get: d => (d.scores||{{}}).score_geral,         fmt: _f1 }},
-  {{ k: 'score_resultado',    label: 'Score Resultado', short: 'Resultado',     get: d => (d.scores||{{}}).score_resultado,     fmt: _f1 }},
-  {{ k: 'score_ataque',       label: 'Score Ataque',    short: 'Ataque',        get: d => (d.scores||{{}}).score_ataque,        fmt: _f1 }},
-  {{ k: 'score_defesa',       label: 'Score Defesa',    short: 'Defesa',        get: d => (d.scores||{{}}).score_defesa,        fmt: _f1 }},
-  {{ k: 'score_eficiencia',   label: 'Score Eficiência',short: 'Eficiência',    get: d => (d.scores||{{}}).score_eficiencia,    fmt: _f1 }},
-  {{ k: 'score_controle',     label: 'Score Controle',  short: 'Controle',      get: d => (d.scores||{{}}).score_controle,      fmt: _f1 }},
-  {{ k: 'score_forca_relativa',label:'Score Força Rel.', short: 'Força Rel.',    get: d => (d.scores||{{}}).score_forca_relativa,fmt: _f1 }},
-  {{ k: 'score_disciplina',   label: 'Score Disciplina',short: 'Disciplina',    get: d => (d.scores||{{}}).score_disciplina,    fmt: _f1 }},
-  {{ k: 'pontos',     label: 'Pontos',          short: 'Pontos',       get: d => (d.campanha||{{}}).pontos,        fmt: _fi }},
-  {{ k: 'gols_pro',   label: 'Gols Marcados',   short: 'Gols',         get: d => (d.campanha||{{}}).gols_pro,      fmt: _fi }},
-  {{ k: 'saldo_gols', label: 'Saldo de Gols',   short: 'Saldo',        get: d => (d.campanha||{{}}).saldo_gols,    fmt: _fs }},
-  {{ k: 'elo_rating', label: 'Rating Elo',      short: 'Elo',          get: d => (d.campanha||{{}}).elo_rating,    fmt: _fi }},
-  {{ k: 'n_jogos',    label: 'Jogos disputados',short: 'Jogos',        get: d => d.n_jogos,                        fmt: _fi }},
-];
-
-// qual métrica destacar no card: para rank/alpha usa o Score Geral
-function _highlightSort(sortKey) {{
-  if (sortKey === 'rank' || sortKey === 'alpha') {{
-    return TEAM_SORTS.find(s => s.k === 'score_geral');
-  }}
-  return TEAM_SORTS.find(s => s.k === sortKey) || TEAM_SORTS.find(s => s.k === 'score_geral');
-}}
-
-let teamSortDir = null;  // null = usa o default da opção; senão 'asc'/'desc'
 
 function initTeamsControls() {{
-  // ordenação
-  const sortSel = document.getElementById('teamSort');
-  sortSel.innerHTML = TEAM_SORTS.map(s => `<option value="${{s.k}}">${{s.label}}</option>`).join('');
-  // grupos
-  const groups = [...new Set(Object.values(TEAMS_DETAIL).map(d => d.group).filter(Boolean))].sort();
-  document.getElementById('filterGroup').innerHTML =
-    '<option value="">Todos</option>' + groups.map(g => `<option value="${{g}}">Grupo ${{g}}</option>`).join('');
-  // confederações
-  const confeds = [...new Set(Object.values(TEAMS_DETAIL).map(d => d.confed).filter(Boolean))].sort();
-  document.getElementById('filterConfed').innerHTML =
-    '<option value="">Todas</option>' + confeds.map(c => `<option value="${{c}}">${{c}}</option>`).join('');
-  // fases
-  const stages = [...new Set(Object.values(TEAMS_DETAIL).map(d => d.stage_now).filter(Boolean))];
-  document.getElementById('filterStage').innerHTML =
-    '<option value="">Todas</option>' + stages.map(s => `<option value="${{s}}">${{s}}</option>`).join('');
+  refreshFilterOptions();
+}}
+
+// Preenche um <select> de filtro com as opções válidas + preserva o valor atual
+// se ainda for válido (senão volta para "todas").
+function _fillFilterSelect(id, values, allLabel, fmt) {{
+  const sel = document.getElementById(id);
+  if (!sel) return;
+  const cur = sel.value;
+  const opts = values.slice().sort();
+  const still = opts.includes(cur) ? cur : '';
+  sel.innerHTML = `<option value="">${{allLabel}}</option>` +
+    opts.map(v => `<option value="${{v}}"${{v === still ? ' selected' : ''}}>${{fmt(v)}}</option>`).join('');
+  sel.value = still;
+}}
+
+// CROSS-FILTER: cada dropdown mostra só opções compatíveis com os OUTROS
+// filtros ativos. Ex: com Grupo C selecionado, Confederação lista só as
+// confederações presentes no Grupo C; com UEFA, Grupo lista só grupos com
+// times UEFA. O próprio filtro não se restringe (senão você não poderia
+// trocar o valor dele). Sincroniza o estado global se algum valor caiu fora.
+function refreshFilterOptions() {{
+  const metas = Object.values(TEAM_META);
+  // candidatos a cada eixo, dado o estado dos OUTROS dois eixos
+  const valid = (axis) => {{
+    const out = new Set();
+    metas.forEach(m => {{
+      if (axis !== 'group'  && teamFilters.group  && m.group  !== teamFilters.group)  return;
+      if (axis !== 'confed' && teamFilters.confed && m.confed !== teamFilters.confed) return;
+      if (axis !== 'stage'  && teamFilters.stage  && m.stage  !== teamFilters.stage)  return;
+      const v = m[axis];
+      if (v) out.add(v);
+    }});
+    return [...out];
+  }};
+  _fillFilterSelect('filterGroup',  valid('group'),  'Todos',  g => 'Grupo ' + g);
+  _fillFilterSelect('filterConfed', valid('confed'), 'Todas',  c => c);
+  _fillFilterSelect('filterStage',  valid('stage'),  'Todas',  s => s);
+  // se algum valor saiu da lista (ficou inválido), atualiza o estado global
+  teamFilters.group  = document.getElementById('filterGroup').value;
+  teamFilters.confed = document.getElementById('filterConfed').value;
+  teamFilters.stage  = document.getElementById('filterStage').value;
 }}
 
 const TEAMS_PER_PAGE = 24;
 let teamPage = 1;
 
-// mudou filtro/ordenação → volta pra página 1 e re-renderiza
+// mudou filtro/ordenação na aba Seleções → sincroniza o estado GLOBAL de
+// filtros (grupo/confed/fase), volta pra página 1 e re-renderiza AS DUAS abas.
 function applyTeamFilters() {{
+  syncFiltersFromTeamsUI();
+  refreshFilterOptions();   // dropdowns se cruzam: só opções compatíveis
   teamPage = 1;
   renderTeamsGrid();
+  renderJogo(currentJogo);  // reflete os filtros nas barras da Race também
+}}
+
+// lê os selects da aba Seleções → grava no estado global teamFilters.
+// (O phaseSelect da Race é NAVEGAÇÃO de bolinhas, conceito distinto — não mexe aqui.)
+function syncFiltersFromTeamsUI() {{
+  const g = document.getElementById('filterGroup');
+  const c = document.getElementById('filterConfed');
+  const s = document.getElementById('filterStage');
+  if (g) teamFilters.group = g.value;
+  if (c) teamFilters.confed = c.value;
+  if (s) teamFilters.stage = s.value;
 }}
 
 function goTeamPage(p) {{
@@ -3805,27 +4098,20 @@ function goTeamPage(p) {{
   document.getElementById('teamsGrid').scrollTop = 0;
 }}
 
-function toggleTeamSortDir() {{
-  const cur = _effectiveSortDir();
-  teamSortDir = cur === 'asc' ? 'desc' : 'asc';
-  applyTeamFilters();
-}}
-
-function _effectiveSortDir() {{
-  if (teamSortDir) return teamSortDir;
-  const s = TEAM_SORTS.find(x => x.k === document.getElementById('teamSort').value) || TEAM_SORTS[0];
-  return s.asc ? 'asc' : 'desc';  // default: ranking/alpha ascendente, scores descendente
-}}
-
-function resetTeamFilters() {{
+// Limpa TODOS os filtros compartilhados (busca, grupo, confed, fase, só com
+// jogos) e o foco de time. Métrica/direção são preservados (foco da análise).
+function resetAllFilters() {{
   document.getElementById('teamSearch').value = '';
-  document.getElementById('teamSort').value = 'rank';
   document.getElementById('filterGroup').value = '';
   document.getElementById('filterConfed').value = '';
   document.getElementById('filterStage').value = '';
   document.getElementById('filterPlayed').checked = false;
-  teamSortDir = null;
-  applyTeamFilters();
+  teamFilters.group = ''; teamFilters.confed = ''; teamFilters.stage = '';
+  selectedTeam = '';
+  teamPage = 1;
+  refreshFilterOptions();   // volta os dropdowns à lista completa
+  syncDotRows();
+  renderBothViews();
 }}
 
 function renderTeamsPager(totalPages) {{
@@ -3842,35 +4128,34 @@ function renderTeamsPager(totalPages) {{
 function renderTeamsGrid() {{
   const grid = document.getElementById('teamsGrid');
   const q = _norm(document.getElementById('teamSearch').value.trim());
-  const sortKey = document.getElementById('teamSort').value || 'rank';
+  // ordenação/destaque pela MÉTRICA COMPARTILHADA (a mesma da corrida).
+  const sortKey = currentMetric;
   const fGroup = document.getElementById('filterGroup').value;
   const fConfed = document.getElementById('filterConfed').value;
   const fStage = document.getElementById('filterStage').value;
   const fPlayed = document.getElementById('filterPlayed').checked;
-  const sortDef = TEAM_SORTS.find(s => s.k === sortKey) || TEAM_SORTS[0];
-  const dir = _effectiveSortDir();
-  document.getElementById('teamSortDir').textContent = dir === 'asc' ? '↑' : '↓';
+  const dir = sortDir;  // direção COMPARTILHADA com a corrida
 
-  // filtra — usa TODAS as seleções da Copa (inclui as que ainda não jogaram)
+  // — DETALHE NO MOMENTO selecionado: a grade reflete o jogo da barra de tempo.
+  const detAt = {{}};
+  TEAMS_GRID.forEach(t => {{ detAt[t] = teamDetailAt(t, currentJogo); }});
+  // valor da métrica compartilhada por time, lido direto do snapshot atual.
+  const snap = SNAP_BY_TEAM[currentJogo] || {{}};
+  const mval = t => {{ const r = snap[t]; return r ? r[currentMetric] : null; }};
+
+  // filtra — usa TODAS as seleções da Copa (inclui as que ainda não jogaram).
+  // Grupo/Confed/Fase vêm do estado GLOBAL (compartilhado com a Race).
   let teams = TEAMS_GRID.filter(t => {{
-    const d = TEAMS_DETAIL[t] || {{}};
+    const d = detAt[t];
     if (q && !_norm(t).includes(q)) return false;
-    if (fGroup && d.group !== fGroup) return false;
-    if (fConfed && d.confed !== fConfed) return false;
-    if (fStage && d.stage_now !== fStage) return false;
+    if (!passesGlobalFilters(t)) return false;
     if (fPlayed && (d.n_jogos || 0) === 0) return false;
     return true;
   }});
 
-  // ordena
+  // ordena pela métrica compartilhada (ausentes sempre no fim)
   teams.sort((a, b) => {{
-    const da = TEAMS_DETAIL[a] || {{}}, db = TEAMS_DETAIL[b] || {{}};
-    if (sortKey === 'alpha') {{
-      const c = a.localeCompare(b, 'pt-BR');
-      return dir === 'asc' ? c : -c;
-    }}
-    let va = sortDef.get(da), vb = sortDef.get(db);
-    // valores ausentes sempre no fim, independentemente da direção
+    let va = mval(a), vb = mval(b);
     const na = (va == null), nb = (vb == null);
     if (na && nb) return a.localeCompare(b, 'pt-BR');
     if (na) return 1;
@@ -3882,15 +4167,15 @@ function renderTeamsGrid() {{
   document.getElementById('teamsCount').textContent =
     teams.length + ' de ' + TEAMS_GRID.length + ' seleções';
 
-  // — destaque da métrica ativa: valor + posição entre TODAS as seleções que têm a métrica
-  const hl = _highlightSort(sortKey);
-  const hlFmt = hl.fmt || _f1;
-  // ranking da métrica destacada sobre todas as seleções (maior = melhor, salvo saldo já tratado)
-  // empate = mesma posição (standard competition ranking: 1, 2, 2, 4…)
-  const ranked = TEAMS_GRID
-    .map(t => ({{ t, v: hl.get(TEAMS_DETAIL[t] || {{}}) }}))
+  // — destaque: valor + posição na métrica compartilhada DENTRO DO FILTRO ativo
+  // (não entre todas as 46). Com Grupo C filtrado, o rank é "Xº de 4".
+  const hlFmt = _metricFmt(currentMetric);
+  const hlShort = METRIC_LABELS[currentMetric] || currentMetric;
+  // ranking da métrica entre os times FILTRADOS; empate = mesma posição
+  const ranked = teams
+    .map(t => ({{ t, v: mval(t) }}))
     .filter(x => x.v != null)
-    .sort((a, b) => b.v - a.v);
+    .sort((a, b) => dir === 'asc' ? a.v - b.v : b.v - a.v);
   const hlPos = {{}};
   ranked.forEach((x, i) => {{
     hlPos[x.t] = (i > 0 && x.v === ranked[i - 1].v) ? hlPos[ranked[i - 1].t] : i + 1;
@@ -3905,34 +4190,34 @@ function renderTeamsGrid() {{
   renderTeamsPager(totalPages);
 
   grid.innerHTML = pageTeams.map(t => {{
-    const d = TEAMS_DETAIL[t] || {{}};
+    const d = detAt[t];
     const flag = d.flag || TEAM_FLAGS[t] || '🏳️';
     const nj = d.n_jogos || 0;
     const empty = nj === 0;
-    // o badge # reflete a POSIÇÃO na métrica escolhida (não o ranking geral fixo)
-    const rankBadge = (!empty && hlPos[t]) ? `<span class="tc-rank">#${{hlPos[t]}}</span>` : '';
+    // o badge # reflete a POSIÇÃO na métrica escolhida; vazio reserva o mesmo espaço.
+    const rankBadge = (!empty && hlPos[t]) ? `<span class="tc-rank">#${{hlPos[t]}}</span>` : '<span class="tc-rank muted">#—</span>';
     const sub = empty ? 'sem jogos ainda · ' + (d.group ? 'Grupo ' + d.group : '')
       : nj + (nj === 1 ? ' jogo' : ' jogos') + ' · ' + (d.players ? d.players.length : 0) + ' jogadores';
 
     const cp = d.campanha || {{}};
 
-    // destaque: reflete a métrica escolhida na ordenação
-    const hlVal = hl.get(d);
-    const hlColor = (hl.k.startsWith('score_') && hlVal != null) ? _scoreColor(hlVal) : '#e6edf3';
-    const posBadge = (!empty && hlPos[t]) ? `<span class="m-rank">${{hlPos[t]}}º de ${{hlTotal}}</span>` : '';
-    const metric = empty ? '' : `<div class="tc-metric">
-      <span class="m-val" style="color:${{hlColor}}">${{hlFmt(hlVal)}}</span>
-      <span class="m-lbl">${{hl.short}}</span>
+    // destaque: a MÉTRICA COMPARTILHADA (mesma da corrida)
+    const hlVal = mval(t);
+    const hlColor = (currentMetric.startsWith('score_') && hlVal != null) ? _scoreColor(hlVal) : '#e6edf3';
+    const posBadge = (!empty && hlPos[t]) ? `<span class="m-rank">${{hlPos[t]}}º de ${{hlTotal}}</span>` : '<span class="m-rank">—</span>';
+    const metric = `<div class="tc-metric">
+      <span class="m-val" style="color:${{empty ? '#6b7280' : hlColor}}">${{empty ? '—' : hlFmt(hlVal)}}</span>
+      <span class="m-lbl">${{hlShort}}</span>
       ${{posBadge}}
     </div>`;
 
     // mini-stats secundárias: campanha resumida (sempre visível, contexto)
     const fmt = v => v == null ? '—' : v;
-    const stats = empty ? '' : `<div class="tc-stats">
-      <div class="tc-stat"><div class="v">${{fmt(cp.pontos)}}</div><div class="l">Pts</div></div>
-      <div class="tc-stat"><div class="v">${{fmt(cp.gols_pro)}}</div><div class="l">Gols</div></div>
-      <div class="tc-stat"><div class="v">${{cp.saldo_gols != null ? (cp.saldo_gols > 0 ? '+' + cp.saldo_gols : cp.saldo_gols) : '—'}}</div><div class="l">Saldo</div></div>
-      <div class="tc-stat"><div class="v">${{fmt(cp.elo_rating)}}</div><div class="l">Elo</div></div>
+    const stats = `<div class="tc-stats">
+      <div class="tc-stat"><div class="v">${{empty ? 0 : fmt(cp.pontos)}}</div><div class="l">Pts</div></div>
+      <div class="tc-stat"><div class="v">${{empty ? 0 : fmt(cp.gols_pro)}}</div><div class="l">Gols</div></div>
+      <div class="tc-stat"><div class="v">${{empty ? 0 : (cp.saldo_gols != null ? (cp.saldo_gols > 0 ? '+' + cp.saldo_gols : cp.saldo_gols) : '—')}}</div><div class="l">Saldo</div></div>
+      <div class="tc-stat"><div class="v">${{empty ? '—' : _fe(cp.elo_rating)}}</div><div class="l">Elo</div></div>
     </div>`;
 
     const badges = [
@@ -3941,7 +4226,8 @@ function renderTeamsGrid() {{
       d.stage_now ? `<span class="tc-badge">${{d.stage_now}}</span>` : '',
     ].join('');
 
-    return `<div class="team-card${{empty ? ' tc-empty' : ''}}" ${{empty ? '' : `onclick="openTeamModal('${{t.replace(/'/g, "\\\\'")}}')"`}}>
+    const focusCls = (selectedTeam && t === selectedTeam) ? ' tc-focus' : '';
+    return `<div class="team-card${{empty ? ' tc-empty' : ''}}${{focusCls}}" ${{empty ? '' : `onclick="openTeamModal('${{t.replace(/'/g, "\\\\'")}}')"`}}>
       <div class="tc-head">
         <span class="tc-flag">${{flag}}</span>
         <div class="tc-info">
@@ -4013,6 +4299,7 @@ const openPlayerCards = new Set(); // jogadores com card de dados aberto
 const openRosterCards = new Set(); // cards acumulados abertos na aba Elenco
 const rosterCardAnchors = {{}};
 const fieldCardAnchors = {{}};
+const fieldSubOverrides = {{}};     // jogo/par -> jogador que aparece na vaga
 const playerCardOffsets = {{}};      // chave jogador/jogo -> deslocamento arrastado
 let playerCardDrag = null;
 
@@ -4022,6 +4309,10 @@ function _playerCardKey(name) {{
 
 function _rosterCardKey(name) {{
   return `${{modalTeam || ''}}|elenco|${{name || ''}}`;
+}}
+
+function _subPairKey(a, b) {{
+  return `${{modalTeam || ''}}|${{expandedGame ?? ''}}|sub|${{[a || '', b || ''].sort().join('|')}}`;
 }}
 
 function startPlayerCardDrag(ev, key) {{
@@ -4079,7 +4370,24 @@ function switchGameTab(t) {{
   renderModalBody();
 }}
 
-// clica num jogador no campo → alterna o card dele, sem fechar os outros
+function anchorPlayerCard(name, anchorEl = null, index = 0) {{
+  if (!anchorEl) return;
+  const key = _playerCardKey(name);
+  const rect = anchorEl.getBoundingClientRect();
+  const margin = 8;
+  const w = Math.min(248, window.innerWidth - margin * 2);
+  const estimatedH = 286;
+  let left = rect.right + 12 + index * 28;
+  if (left + w > window.innerWidth - margin) left = rect.left - w - 12 - index * 28;
+  if (left < margin) left = rect.left + rect.width / 2 - w / 2 + index * 28;
+  left = Math.max(margin, Math.min(left, window.innerWidth - margin - w));
+  let top = rect.top + rect.height / 2 - estimatedH / 2 + index * 24;
+  top = Math.max(margin, Math.min(top, window.innerHeight - margin - 120));
+  fieldCardAnchors[key] = {{ left: Math.round(left), top: Math.round(top) }};
+  playerCardOffsets[key] = {{ x: 0, y: 0 }};
+}}
+
+// clica num jogador → alterna o card dele, sem fechar os outros
 function showPlayerCard(name, anchorEl = null) {{
   const key = _playerCardKey(name);
   if (openPlayerCards.has(name)) {{
@@ -4090,21 +4398,40 @@ function showPlayerCard(name, anchorEl = null) {{
   }} else {{
     openPlayerCards.add(name);
     highlightedPlayer = name;
-    if (anchorEl) {{
-      const rect = anchorEl.getBoundingClientRect();
-      const margin = 8;
-      const w = Math.min(248, window.innerWidth - margin * 2);
-      const estimatedH = 286;
-      let left = rect.right + 12;
-      if (left + w > window.innerWidth - margin) left = rect.left - w - 12;
-      if (left < margin) left = rect.left + rect.width / 2 - w / 2;
-      left = Math.max(margin, Math.min(left, window.innerWidth - margin - w));
-      let top = rect.top + rect.height / 2 - estimatedH / 2;
-      top = Math.max(margin, Math.min(top, window.innerHeight - margin - 120));
-      fieldCardAnchors[key] = {{ left: Math.round(left), top: Math.round(top) }};
-      playerCardOffsets[key] = {{ x: 0, y: 0 }};
-    }}
+    anchorPlayerCard(name, anchorEl, 0);
   }}
+  renderModalBody();
+}}
+
+// usado na timeline de substituição: abre os dois envolvidos lado a lado.
+function showPlayerCards(names, anchorEl = null) {{
+  const clean = [...new Set((names || []).filter(Boolean))];
+  if (!clean.length) return;
+  const allOpen = clean.every(n => openPlayerCards.has(n));
+  if (allOpen) {{
+    clean.forEach(n => openPlayerCards.delete(n));
+    highlightedPlayer = Array.from(openPlayerCards).pop() || null;
+  }} else {{
+    clean.forEach((n, i) => {{
+      openPlayerCards.add(n);
+      anchorPlayerCard(n, anchorEl, i);
+    }});
+    highlightedPlayer = clean[0];
+  }}
+  renderModalBody();
+}}
+
+function togglePitchSub(a, b, anchorEl = null) {{
+  if (!a || !b) return;
+  const key = _subPairKey(a, b);
+  const current = fieldSubOverrides[key] || a;
+  const next = current === a ? b : a;
+  fieldSubOverrides[key] = next;
+
+  openPlayerCards.delete(current);
+  openPlayerCards.add(next);
+  highlightedPlayer = next;
+  anchorPlayerCard(next, anchorEl, 0);
   renderModalBody();
 }}
 
@@ -4230,13 +4557,22 @@ function _rosterPlayerCardHtml(p) {{
   const ctxHtml = ctx.length
     ? `<div class="pc-ctx">${{ctx.join('')}}</div>`
     : '<div class="pc-ctx empty"><span class="pc-tag">placeholder</span></div>';
+  const ratingHtml = p.rating_media != null
+    ? `<span class="pc-rating">${{(+p.rating_media).toFixed(1)}}<small>média</small></span>`
+    : '<span class="pc-rating empty">0.0<small>média</small></span>';
+  const gameCount = n('jogos');
+  const ratingCount = n('rating_jogos');
+  const ratingCtx = gameCount > 0 && ratingCount !== gameCount
+    ? `<span class="pc-chip">${{ratingCount}} nota${{ratingCount === 1 ? '' : 's'}}</span>`
+    : '';
+  const gamesCtx = `<span class="pc-tag neutral">${{gameCount}} jogo${{gameCount === 1 ? '' : 's'}}</span>`;
   return `<div class="pcard el-pop" style="--el-pop-left:${{anchor.left}}px;--el-pop-top:${{anchor.top}}px;--pc-x:${{off.x || 0}}px;--pc-y:${{off.y || 0}}px" onclick="event.stopPropagation()">
     <div class="pc-head" onpointerdown="startPlayerCardDrag(event, '${{keyEsc}}')">
       <span class="pc-num">${{p.num ?? ''}}</span>
       <div class="pc-id"><span class="pc-name">${{escName}}</span><span class="pc-pos">${{_esc(p.pos || '—')}} · ${{_esc(p.pos_group || 'Sem posição')}}</span></div>
       <button class="pc-close" onclick="event.stopPropagation();showRosterPlayer('${{closeName}}')">✕</button>
     </div>
-    <div class="pc-meta"><div class="pc-meta-side"><span class="pc-chip">${{n('jogos')}} jogo${{n('jogos') === 1 ? '' : 's'}} na Copa</span>${{ctxHtml}}</div></div>
+    <div class="pc-meta">${{ratingHtml}}<div class="pc-meta-side"><div class="pc-ctx">${{gamesCtx}}${{ratingCtx}}</div>${{ctxHtml}}</div></div>
     ${{group('Ataque', [
       ['Gols', n('gols')], ['Assistências', n('assist')],
       ['Finalizações', n('chutes')], ['No alvo', n('no_alvo')],
@@ -4379,9 +4715,11 @@ function _timelineHtml(g) {{
   if (!g.timeline || !g.timeline.length) return '<div class="md-empty">Sem eventos.</div>';
   const escEv = (s) => (s || '').replace(/'/g, "\\\\'");
   return g.timeline.map(e => {{
-    const clickable = !!e.hl_name;               // qualquer evento com jogador (os 2 times)
+    const names = e.hl_names || (e.hl_name ? [e.hl_name] : []);
+    const clickable = names.length > 0;          // qualquer evento com jogador (os 2 times)
+    const payload = JSON.stringify(names).replace(/"/g, '&quot;');
     const cls = `gd-ev ${{e.mine ? 'mine' : 'opp'}}${{clickable ? ' clickable' : ''}}`;
-    const oc = clickable ? ` onclick="focusPlayer('${{escEv(e.hl_name)}}')"` : '';
+    const oc = clickable ? ` onclick="showPlayerCards(${{payload}}, this)"` : '';
     return `<div class="${{cls}}"${{oc}}>
       <span class="gd-min">${{e.minute}}'</span><span class="gd-sym">${{e.sym}}</span>
       <span class="gd-evp">${{e.player || ''}}${{e.team ? ` <span class="md-game-meta">(${{e.team}})</span>` : ''}}</span>
@@ -4403,8 +4741,8 @@ function _subsListHtml(subs, isHi) {{
   const esc = (s) => (s || '').replace(/'/g, "\\\\'");
   if (!subs || !subs.length) return '<div class="md-empty">—</div>';
   return `<div class="md-xi subs">${{subs.map(p => {{
-    const cls = `pl${{p.entered ? ' used' : ''}}${{isHi(p.name) ? ' hi' : ''}}${{p.sub_with ? ' clickable' : ''}}`;
-    const oc = p.sub_with ? ` onclick="highlightSub('${{esc(p.name)}}')"` : '';
+    const cls = `pl${{p.entered ? ' used' : ''}}${{isHi(p.name) ? ' hi' : ''}} clickable`;
+    const oc = ` onclick="showPlayerCard('${{esc(p.name)}}', this)"`;
     const goal = p.goals ? ` ⚽${{p.goals > 1 ? p.goals : ''}}` : '';
     return `<span class="${{cls}}"${{oc}}><span class="pn">${{p.num ?? ''}}</span>${{p.name}}${{goal}}${{p.entered ? ` <span class="sub-in">↑${{p.entered}}'</span>` : ''}}</span>`;
   }}).join('')}}</div>`;
@@ -4416,13 +4754,17 @@ function renderLineupView(g) {{
   const allPlayers = (g.pitch || []).concat(g.subs || [], g.opp_pitch || [], g.opp_subs || []);
   const isHi = _mkIsHi(allPlayers);
   const homeFlag = (TEAMS_DETAIL[modalTeam] || {{}}).flag || '';
+  const cards = allPlayers
+    .filter(p => openPlayerCards.has(p.name))
+    .map(p => _playerCardHtml(p, 'above', 'c'))
+    .join('');
   return `<div class="lv1">
     <div class="lv1-center">
       <div class="lv1-head">
         <span class="lv1-home">${{homeFlag}} <b>${{modalTeam}}</b> ${{g.formation ? `<span class="pitch-form-inline">${{g.formation}}</span>` : ''}}</span>
         <span class="lv1-away">${{g.opp_formation ? `<span class="pitch-form-inline">${{g.opp_formation}}</span>` : ''}} <b>${{g.opp}}</b> ${{g.opp_flag}}</span>
       </div>
-      ${{renderPitch(g.pitch, g.opp_pitch, isHi)}}
+      ${{renderPitch(g.pitch, g.opp_pitch, isHi, allPlayers)}}
     </div>
     <div class="lv1-bottom">
       <div class="lv1-subs">
@@ -4435,13 +4777,14 @@ function renderLineupView(g) {{
         ${{_subsListHtml(g.opp_subs, isHi)}}
       </div>
     </div>
+    ${{cards}}
   </div>`;
 }}
 
 // UM campo HORIZONTAL com os dois times. Time visto na metade esquerda (gol à esq,
 // ataca p/ centro); adversário na metade direita, espelhado (gol à dir).
 // coords originais por jogador: x=lado (0..100), y=profundidade (8=gol..92=ataque).
-function renderPitch(homePitch, awayPitch, isHi) {{
+function renderPitch(homePitch, awayPitch, isHi, allPlayers = []) {{
   const splitName = (full) => {{
     const parts = (full || '').trim().split(/\\s+/);
     if (parts.length <= 1) return parts[0] || '';
@@ -4451,27 +4794,36 @@ function renderPitch(homePitch, awayPitch, isHi) {{
   const esc = (s) => (s || '').replace(/'/g, "\\\\'");
   const cardMark = (p) => p.card ? `<span class="pl-card ${{p.card}}"></span>` : '';
   const goalMark = (p) => p.goals ? `<span class="pl-goal-mark">⚽${{p.goals > 1 ? `<b>${{p.goals}}</b>` : ''}}</span>` : '';
+  const playerByName = Object.fromEntries((allPlayers || []).filter(p => p && p.name).map(p => [p.name, p]));
 
   // horizontal: profundidade (y) → eixo X; lado (x) → eixo Y (top).
   // home: metade esquerda (left 2..48%); away: metade direita espelhada (98..52%).
   const dot = (p, who) => {{
+    const partner = p.sub_with ? playerByName[p.sub_with] : null;
+    const pairKey = partner ? _subPairKey(p.name, partner.name) : '';
+    const activeName = partner ? (fieldSubOverrides[pairKey] || p.name) : p.name;
+    const visible = partner && activeName === partner.name ? {{ ...partner, x: p.x, y: p.y, sub_slot_from: p.name }} : p;
     const half = (p.y / 100) * 46;
     const left = who === 'home' ? (2 + half) : (98 - half);
     const top = p.x;
+    const visibleEsc = esc(visible.name);
+    const aEsc = esc(p.name);
+    const bEsc = partner ? esc(partner.name) : '';
+    const toggle = partner
+      ? `<button class="pitch-sub-toggle" title="Alternar substituição" onclick="event.stopPropagation();togglePitchSub('${{aEsc}}','${{bEsc}}', this.closest('.pitch-player'))">↔</button>`
+      : '';
+    const minuteBadge = visible.exited
+      ? `<span class="sub-out">↓${{visible.exited}}'</span>`
+      : visible.entered ? `<span class="sub-in-field">↑${{visible.entered}}'</span>` : '';
     // todo jogador é clicável → abre o card de dados (e destaca a troca, se houver)
-    const cls = `pitch-player ${{who}} clickable${{p.exited ? ' subbed-out' : ''}}${{isHi(p.name) ? ' hi' : ''}}`;
-    return `<div class="${{cls}}" style="left:${{left}}%;top:${{top}}%" onclick="showPlayerCard('${{esc(p.name)}}', this)">
-      <div class="pitch-shirt">${{p.num ?? ''}}${{cardMark(p)}}${{goalMark(p)}}${{p.exited ? `<span class="sub-out">↓${{p.exited}}'</span>` : ''}}</div>
-      <div class="pitch-name">${{splitName(p.name)}}</div>
+    const cls = `pitch-player ${{who}} clickable${{visible.exited ? ' subbed-out' : ''}}${{isHi(visible.name) ? ' hi' : ''}}`;
+    return `<div class="${{cls}}" style="left:${{left}}%;top:${{top}}%" onclick="showPlayerCard('${{visibleEsc}}', this)">
+      <div class="pitch-shirt">${{visible.num ?? ''}}${{cardMark(visible)}}${{goalMark(visible)}}${{minuteBadge}}${{toggle}}</div>
+      <div class="pitch-name">${{splitName(visible.name)}}</div>
     </div>`;
   }};
-  const allPitchPlayers = (homePitch || []).concat(awayPitch || []);
   const dots = (homePitch || []).map(p => dot(p, 'home')).join('')
     + (awayPitch || []).map(p => dot(p, 'away')).join('');
-  const cards = allPitchPlayers
-    .filter(p => openPlayerCards.has(p.name))
-    .map(p => _playerCardHtml(p, 'above', 'c'))
-    .join('');
   // marcações horizontais: meio (vertical), círculo, áreas/gols nas laterais
   const lines = `<div class="pitch-lines">
     <div class="pl-line plh-half"></div>
@@ -4481,7 +4833,7 @@ function renderPitch(homePitch, awayPitch, isHi) {{
     <div class="pl-line plh-box right"></div><div class="pl-line plh-box-s right"></div><div class="pl-goal-h right"></div>
   </div>`;
   const hasCard = openPlayerCards.size ? ' has-card' : '';
-  return `<div class="pitch-h pitch-vs${{dimmed}}${{hasCard}}">${{lines}}${{dots}}${{cards}}</div>`;
+  return `<div class="pitch-h pitch-vs${{dimmed}}${{hasCard}}">${{lines}}${{dots}}</div>`;
 }}
 
 function _scoreColor(v) {{
@@ -4593,14 +4945,9 @@ function renderEstiloSection(e, nJogos) {{
     ? `<div class="es-aviso">⏳ Assinatura provisória — baseada em ${{nJogos}} jogo${{nJogos !== 1 ? 's' : ''}}. Reflete o que o time FEZ até agora, não a fama; se firma conforme o torneio avança.</div>`
     : '';
 
-  // dropdown: arquétipos ordenados por afinidade. Default = a flag.
+  // Arquétipos ordenados por afinidade. Default = a flag; clique nas barras troca o detalhe.
   estiloArqSel = e.flag;
   const ordenados = ARCHETYPE_ORDER.slice().sort((a, b) => (af[b] || 0) - (af[a] || 0));
-  const opts = ordenados.map(arq => {{
-    const pct = af[arq] !== undefined ? ` (${{af[arq].toFixed(0)}}%)` : '';
-    const sel = arq === e.flag ? ' selected' : '';
-    return `<option value="${{arq}}"${{sel}}>${{arq}}${{pct}}</option>`;
-  }}).join('');
 
   // gráfico de afinidade aos 7 arquétipos (substitui os antigos 4 eixos):
   // mostra o perfil completo de uma vez, o estilo do time em destaque.
@@ -4611,7 +4958,7 @@ function renderEstiloSection(e, nJogos) {{
     // a barra começa selecionada no estilo do time (= o que o detalhe mostra).
     const isSel = arq === estiloArqSel;
     const cor = isFlag ? '#58a6ff' : '#3a4a63';
-    return `<div class="es-perfil-row${{isFlag ? ' flag' : ''}}${{isSel ? ' sel' : ''}}" data-arq="${{arq}}" onclick="selectArquetipoDropdown('${{arq.replace(/'/g, "\\\\'")}}')">
+    return `<div class="es-perfil-row${{isFlag ? ' flag' : ''}}${{isSel ? ' sel' : ''}}" data-arq="${{arq}}" onclick="selectArquetipo('${{arq.replace(/'/g, "\\\\'")}}')">
       <span class="es-perfil-nome">${{arq}}${{isFlag ? ' <span class="es-perfil-tag">estilo do time</span>' : ''}}</span>
       <div class="es-perfil-bar"><span class="es-perfil-fill" style="width:${{v}}%;background:${{cor}}"></span></div>
       <span class="es-perfil-val">${{v.toFixed(0)}}%</span>
@@ -4629,19 +4976,13 @@ function renderEstiloSection(e, nJogos) {{
     <div class="es-help">A flag é o <b>arquétipo de estilo</b> que mais combina com as estatísticas do time. O perfil abaixo mostra o quanto o time se encaixa em <b>cada um dos estilos</b>.</div>
     <div class="es-perfil-title">Perfil de estilo — encaixe em cada arquétipo</div>
     <div class="es-perfil">${{perfilHtml}}</div>
-    <div class="es-arq-picker">
-      <label class="es-arq-label">Detalhar estilo:</label>
-      <select class="es-arq-select" onchange="selectArquetipo(this.value)">${{opts}}</select>
-    </div>
     <div id="esArqDetail">${{renderArchetypeDetail(e)}}</div>
     ${{aviso}}
   </div>`;
 }}
 
-// clicar numa barra do perfil sincroniza o dropdown e detalha aquele estilo.
+// Compat antigo: clicar numa barra detalha aquele estilo.
 function selectArquetipoDropdown(arq) {{
-  const sel = document.querySelector('.es-arq-select');
-  if (sel) sel.value = arq;
   selectArquetipo(arq);
 }}
 
@@ -4846,6 +5187,10 @@ function renderModalBody() {{
 
 }}
 
+// popula os selects de filtro compartilhados já no boot (a barra é visível nas
+// duas abas, então não dá para esperar entrar na aba Seleções).
+initTeamsControls();
+_teamsInit = true;
 goToJogo(jogos[jogos.length - 1]);
 </script>
 </body>
