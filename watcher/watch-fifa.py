@@ -245,7 +245,10 @@ def _load_live() -> list[str]:
             continue
         hs, as_ = row.get("home_score"), row.get("away_score")
         score = f"{int(hs)}–{int(as_)}" if pd.notna(hs) and pd.notna(as_) else "0–0"
-        labels.append(f"{home} {flag(home)} {score} {flag(away)} {away}")
+        raw_date = row.get("date", "")
+        date_str = str(raw_date)[:10] if pd.notna(raw_date) else ""
+        prefix = f"{date_str} · " if date_str else ""
+        labels.append(f"{prefix}{home} {flag(home)} {score} {flag(away)} {away}")
     return labels
 
 
@@ -293,6 +296,34 @@ def _publish_state():
     return pending, agendados
 
 
+def _refresh_match_index(start_pct: int | None, label_prefix: str = "") -> bool:
+    """Atualiza só o necessário para o watcher enxergar ao vivo/finalizados."""
+    prefix = f"{label_prefix} · " if label_prefix else ""
+    ui.progress_update(start_pct, f"{prefix}Atualizando jogos ao vivo…")
+    log("atualizando fonte operacional")
+    code, out = _run(
+        [str(FIFA_CLI), "worldcup2026"],
+        timeout=UPDATE_TIMEOUT,
+        heartbeat=(start_pct, f"{prefix}Atualizando jogos ao vivo…"),
+    )
+    if code != 0:
+        log(f"fonte operacional falhou (code={code}):\n{out[-500:]}")
+        return False
+
+    reconcile_pct = None if start_pct is None else min(95, start_pct + 45)
+    ui.progress_update(reconcile_pct, f"{prefix}Reconciliando calendário…")
+    log("reconciliando índice canônico")
+    code, out = _run(
+        [str(FIFA_CLI), "indice-canonico"],
+        timeout=SNAPSHOT_TIMEOUT,
+        heartbeat=(reconcile_pct, f"{prefix}Reconciliando calendário…"),
+    )
+    if code != 0:
+        log(f"índice canônico falhou (code={code}):\n{out[-500:]}")
+        return False
+    return True
+
+
 def _process(ns: list[int] | None) -> None:
     """Ciclo completo disparado pelo clique. Etapas por jogo, todas visíveis na
     janela: coleta → snapshot → narrativa (Claude) → HTML.
@@ -303,11 +334,12 @@ def _process(ns: list[int] | None) -> None:
     Claude falhar, o relatório continua válido com o texto template."""
     # ── Etapa 1/N · coleta as fontes (lenta, instável) — não bloqueante ──
     if not SKIP_UPDATE:
-        ui.progress_update(2, "Etapa 1 · Coletando dados das fontes…")
-        log("coletando fontes (atualizar)")
+        _refresh_match_index(2, "Etapa 1")
+        ui.progress_update(8, "Etapa 1 · Coletando detalhes das fontes…")
+        log("coletando detalhes (atualizar)")
         code, out = _run(
-            [str(FIFA_CLI), "atualizar"], timeout=UPDATE_TIMEOUT,
-            heartbeat=(2, "Etapa 1 · Coletando dados das fontes…"),
+            [str(FIFA_CLI), "atualizar", "--sem-worldcup2026"], timeout=UPDATE_TIMEOUT,
+            heartbeat=(8, "Etapa 1 · Coletando detalhes das fontes…"),
         )
         if code != 0:
             log(f"coleta falhou (code={code}) — seguindo com dados em disco:\n{out[-500:]}")
@@ -380,12 +412,9 @@ def _refresh() -> None:
     """Só coleta as fontes e republica o estado (atualiza a lista de prontos/ao
     vivo/agendados), sem processar. Acionado pelo botão 'Atualizar'."""
     if not SKIP_UPDATE:
-        ui.progress_update(None, "Atualizando dados das fontes…")
-        log("atualizando fontes (refresh)")
-        code, out = _run([str(FIFA_CLI), "atualizar"], timeout=UPDATE_TIMEOUT)
-        if code != 0:
-            log(f"refresh: coleta falhou (code={code}):\n{out[-500:]}")
+        _refresh_match_index(5)
     _publish_state()
+    ui.progress_idle("Atualizado")
 
 
 # Concorrência: um worker por vez (processo OU refresh). _working evita disparar

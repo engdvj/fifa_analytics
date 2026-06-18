@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -44,6 +45,49 @@ def _shorten(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max(1, max_chars - 1)] + "…"
+
+
+def _fmt_br_date(date_text: str) -> str:
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", (date_text or "").strip())
+    if not m:
+        return date_text or ""
+    return f"{m.group(3)}/{m.group(2)}/{m.group(1)}"
+
+
+def _split_match_label(label: str) -> dict[str, str]:
+    """Separa labels legados em data, mandante, placar e visitante para a UI."""
+    text = str(label or "").strip()
+    date = ""
+    if " · " in text:
+        first, rest = text.split(" · ", 1)
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", first):
+            date, text = _fmt_br_date(first), rest
+        elif re.match(r"^Jogo\s+\d+", first):
+            text = rest
+
+    m = re.match(r"^(.*?)\s+((?:\d+\s*[–-]\s*\d+)|×|x|X)\s+(.*?)$", text)
+    if not m:
+        return {"home": text, "score": "", "away": "", "date": date}
+
+    score = m.group(2).replace("-", "–").replace("x", "×").replace("X", "×")
+    score = re.sub(r"\s+", "", score)
+    return {
+        "home": m.group(1).strip(),
+        "score": score,
+        "away": m.group(3).strip(),
+        "date": date,
+    }
+
+
+_FLAG_RE = re.compile(
+    r"[\U0001F1E6-\U0001F1FF]{2}|"
+    r"\U0001F3F4[\U000E0030-\U000E0039\U000E0061-\U000E007A\U000E007F]+"
+)
+
+
+def _flag_only(team_text: str, fallback: str = "🏳️") -> str:
+    flags = _FLAG_RE.findall(team_text or "")
+    return flags[0] if flags else fallback
 
 
 def _open_html():
@@ -275,6 +319,12 @@ QLabel#kicker { color: #637084; font-size: 10px; font-weight: 800; }
 QLabel#queue, QLabel#meta { color: #718096; font-size: 11px; }
 QLabel#active { font-size: 15px; font-weight: 700; color: #151b24; }
 QLabel#status { font-size: 12px; font-weight: 700; }
+QLabel#matchHint {
+    color: #475569;
+    font-size: 11px;
+    font-weight: 750;
+    padding: 0 2px;
+}
 QLabel#dot {
     min-width: 9px; max-width: 9px; min-height: 9px; max-height: 9px;
     border-radius: 4px; background: #8c96a6;
@@ -462,6 +512,12 @@ def _run_window():
             self.progress.setValue(0)
             body.addWidget(self.progress)
 
+            self.match_hint = QLabel("", objectName="matchHint")
+            self.match_hint.setFixedHeight(18)
+            self.match_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.match_hint.setWordWrap(False)
+            body.addWidget(self.match_hint)
+
             # lista de jogos (scroll) — os títulos de seção são criados em _render_jobs
             self.scroll = QScrollArea()
             self.scroll.setWidgetResizable(True)
@@ -500,6 +556,13 @@ def _run_window():
 
         # ── drag (titlebar) e resize (handle) ──
         def eventFilter(self, obj, event):
+            match_hint = obj.property("matchHint") if hasattr(obj, "property") else None
+            if match_hint:
+                if event.type() in (QEvent.Type.Enter, QEvent.Type.HoverEnter, QEvent.Type.MouseMove):
+                    self.match_hint.setText(str(match_hint))
+                elif event.type() in (QEvent.Type.Leave, QEvent.Type.HoverLeave):
+                    self.match_hint.setText("")
+
             if obj is getattr(self, "resize_handle", None):
                 if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
                     self.resizing = True
@@ -589,35 +652,83 @@ def _run_window():
                 hdr.setStyleSheet(f"color:{color}; font-size:10px; font-weight:800; padding-top:4px;")
                 self.jobs_layout.insertWidget(self.jobs_layout.count() - 1, hdr)
 
+            def _match_row(object_name, label, icon, color, icon_color=None, action_btn=None):
+                parts = _split_match_label(label)
+                tooltip = f"{parts['home']} {parts['score'] or '×'} {parts['away']}"
+                if parts["date"]:
+                    tooltip += f" · {parts['date']}"
+                row = QFrame(objectName=object_name)
+                row.setToolTip(tooltip)
+                row.setProperty("matchHint", tooltip)
+                row.installEventFilter(self)
+                row.setMouseTracking(True)
+                rl = QHBoxLayout(row)
+                rl.setContentsMargins(10, 6, 8, 6)
+                rl.setSpacing(7)
+
+                num = QLabel(icon)
+                num.setFixedWidth(14)
+                num.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                num.setStyleSheet(f"color:{icon_color or color}; font-weight:800;")
+
+                match = QFrame()
+                ml = QHBoxLayout(match)
+                ml.setContentsMargins(0, 0, 0, 0)
+                ml.setSpacing(6)
+
+                home = QLabel(_flag_only(parts["home"]))
+                home.setToolTip(tooltip)
+                home.setFixedWidth(28)
+                home.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                home.setStyleSheet("font-size:15px;")
+                home.setWordWrap(False)
+
+                score = QLabel(parts["score"] or "×")
+                score.setToolTip(tooltip)
+                score.setFixedWidth(48)
+                score.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                score.setStyleSheet(f"color:{color}; font-weight:900;")
+
+                away = QLabel(_flag_only(parts["away"]))
+                away.setToolTip(tooltip)
+                away.setFixedWidth(28)
+                away.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                away.setStyleSheet("font-size:15px;")
+                away.setWordWrap(False)
+
+                ml.addStretch(1)
+                ml.addWidget(home)
+                ml.addWidget(score)
+                ml.addWidget(away)
+                ml.addStretch(1)
+
+                date = QLabel(parts["date"])
+                date.setFixedWidth(72 if parts["date"] else 0)
+                date.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                date.setStyleSheet("color:#7b8797; font-weight:700; font-size:11px;")
+
+                rl.addWidget(num)
+                rl.addWidget(match, 1)
+                rl.addWidget(date)
+                if action_btn is not None:
+                    rl.addWidget(action_btn)
+                for wdg in (num, match, home, score, away, date):
+                    wdg.setProperty("matchHint", tooltip)
+                    wdg.installEventFilter(self)
+                    wdg.setMouseTracking(True)
+                return row
+
             # ── ao vivo (vermelho) ──
             if live:
                 _section("● AO VIVO", "#d23a4b")
                 for label in live:
-                    row = QFrame(objectName="rowLive")
-                    rl = QHBoxLayout(row)
-                    rl.setContentsMargins(10, 6, 8, 6)
-                    rl.setSpacing(6)
-                    num = QLabel("🔴")
-                    lbl = QLabel(label)
-                    lbl.setWordWrap(True)
-                    lbl.setStyleSheet("color:#3a1216; font-weight:800;")
-                    rl.addWidget(num)
-                    rl.addWidget(lbl, 1)
+                    row = _match_row("rowLive", label, "●", "#3a1216", "#f04438")
                     self.jobs_layout.insertWidget(self.jobs_layout.count() - 1, row)
 
             # ── prontos a processar (verde) ──
             if ready:
                 _section("PRONTOS PARA PROCESSAR", "#1f9d55")
                 for job in ready:
-                    row = QFrame(objectName="rowReady")
-                    rl = QHBoxLayout(row)
-                    rl.setContentsMargins(10, 6, 8, 6)
-                    rl.setSpacing(6)
-                    num = QLabel("●")
-                    num.setStyleSheet("color:#1f9d55; font-weight:800;")
-                    lbl = QLabel(job.get("label", ""))
-                    lbl.setWordWrap(True)
-                    lbl.setStyleSheet("color:#17331f; font-weight:700;")
                     btn = QPushButton("Processar", objectName="processBtn")
                     btn.setFixedHeight(24)
                     btn.clicked.connect(lambda _=False, n=job.get("n"): self._process_one(n))
@@ -625,26 +736,14 @@ def _run_window():
                         btn.setEnabled(False)
                         btn.setText("…")
                     self._item_buttons.append(btn)
-                    rl.addWidget(num)
-                    rl.addWidget(lbl, 1)
-                    rl.addWidget(btn)
+                    row = _match_row("rowReady", job.get("label", ""), "●", "#17331f", "#1f9d55", btn)
                     self.jobs_layout.insertWidget(self.jobs_layout.count() - 1, row)
 
             # ── próximos jogos agendados (cinza) ──
             if scheduled:
                 _section("PRÓXIMOS JOGOS", "#637084")
                 for label in scheduled:
-                    row = QFrame(objectName="row")
-                    rl = QHBoxLayout(row)
-                    rl.setContentsMargins(10, 6, 8, 6)
-                    rl.setSpacing(6)
-                    num = QLabel("◷")
-                    num.setStyleSheet("color:#6b8bbf; font-weight:800;")
-                    lbl = QLabel(label)
-                    lbl.setWordWrap(True)
-                    lbl.setStyleSheet("color:#48515e; font-weight:600;")
-                    rl.addWidget(num)
-                    rl.addWidget(lbl, 1)
+                    row = _match_row("row", label, "◷", "#48515e", "#6b8bbf")
                     self.jobs_layout.insertWidget(self.jobs_layout.count() - 1, row)
 
             if not live and not ready and not scheduled:
@@ -703,14 +802,10 @@ def _run_window():
                 self.refresh_btn.setEnabled(True)
 
             # resumo do canto da titlebar
-            if live:
-                self.queue.setText(f"{len(live)} ao vivo")
-            elif n_ready:
+            if n_ready:
                 self.queue.setText(f"{n_ready} pronto(s)")
-            elif scheduled:
-                self.queue.setText(f"{len(scheduled)} agendados")
             else:
-                self.queue.setText("sem jogos")
+                self.queue.setText("monitorando")
 
             if processing:
                 # realmente processando (clicou em Processar)
@@ -744,23 +839,23 @@ def _run_window():
             # ── ocioso: o foco é mostrar o que está rolando, não "processando" ──
             self.progress.setValue(0)
             if live:
-                self.active.setText("Jogo ao vivo agora")
-                self.status.setText("AO VIVO")
-                self.status.setStyleSheet("color:#d23a4b; font-weight:800;")
+                self.active.setText("Acompanhamento da Copa")
+                self.status.setText("Monitorando")
+                self.status.setStyleSheet("color:#718096;")
                 self.dot.setStyleSheet(f"background:{DOT_COLORS['err']};")
-                self.meta.setText(f"{len(scheduled)} agendados" if scheduled else "")
+                self.meta.setText("")
             elif n_ready:
                 self.active.setText(f"{n_ready} jogo(s) pronto(s) para processar")
                 self.status.setText("Pronto")
                 self.status.setStyleSheet("color:#1f9d55;")
                 self.dot.setStyleSheet(f"background:{DOT_COLORS['done']};")
-                self.meta.setText(f"{len(scheduled)} agendados" if scheduled else "")
+                self.meta.setText("")
             else:
                 self.active.setText("Aguardando próximos jogos")
                 self.status.setText("Aguardando")
                 self.status.setStyleSheet("color:#718096;")
                 self.dot.setStyleSheet(f"background:{DOT_COLORS['idle']};")
-                self.meta.setText(f"{len(scheduled)} agendados" if scheduled else "sem atividade")
+                self.meta.setText("")
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     panel = Panel()
