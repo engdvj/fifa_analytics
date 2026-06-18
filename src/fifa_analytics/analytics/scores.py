@@ -657,31 +657,54 @@ def build_team_scores(
     _ataque_raw = _ataque_gol * 0.70 + _ataque_vol * 0.30
     scores["score_ataque"] = _apply_confidence(_ataque_raw, _amostra_conf)
 
-    # score_defesa: solidez defensiva. Três termos ORTOGONAIS — cada um mede um
-    # aspecto diferente, pra não colapsar tudo no binário "tomou gol ou não"
-    # (problema com 1 jogo: quem zerou ia pro topo e quem sofreu 1 caía pra metade
-    # da tabela, independentemente do volume/qualidade da defesa).
+    # score_defesa: o GOLS SOFRIDOS/jogo é o eixo dominante e MONOTÔNICO — um time
+    # que sofreu mais gols nunca pode ter defesa melhor que um que sofreu menos
+    # (era o bug: Argélia 3 gols > EUA 1 gol porque os termos de "mérito sob
+    # pressão" invertiam o placar). O contexto (volume segurado + força do
+    # adversário) só AJUSTA dentro da faixa de cada nível de gols, sem cruzá-la.
     #
-    # 1) RESULTADO (peso 40%): gols sofridos/jogo, contextualizado. O placar
-    #    importa, mas não pode dominar sozinho.
-    # 2) SOLIDEZ SOB PRESSÃO (35%): gols sofridos por chute no alvo sofrido —
-    #    taxa de "defesas". Segurar 7 no alvo a 0 (Cabo Verde vs Espanha) prova
-    #    mais qualidade defensiva do que sofrer 1 no alvo a 0; quem apanha e
-    #    segura é premiado, em vez de punido por ter apanhado.
-    # 3) POUCO VAZADA (25%): volume de chutes no alvo sofridos/jogo — defesa bem
-    #    posiciona-da concede pouca finalização limpa.
+    # Estrutura em bandas: gols sofridos define a banda-base (0 gol = banda alta,
+    # 1 gol = média, etc.); dentro da banda, um ajuste contextual de ±meia-banda
+    # premia quem segurou mais volume contra adversário mais forte. Como o ajuste
+    # é menor que o espaçamento entre bandas, a ordem por gols é preservada.
+
+    # força do adversário (Elo médio dos rivais, não-circular) — segurar pressão
+    # de um time forte vale mais que de um fraco (Cabo Verde/Espanha vs Austrália/Turquia)
+    _opp_elo_avg = (
+        opponent_elo.groupby("team")["opponent_elo_pre_match"].mean()
+        if not opponent_elo.empty else pd.Series(dtype=float)
+    )
+    _elo_strength = scores["team"].map(_opp_elo_avg).fillna(ELO_INITIAL_RATING)
+    _elo_mean = _elo_strength.mean() or ELO_INITIAL_RATING
+    _opp_strength_mult = (1.0 + (_elo_strength - _elo_mean) / 200.0).clip(0.7, 1.3)
+    _defesa_ctx_q = (scores["defesa_ctx"] * _opp_strength_mult).clip(0.5, 1.6)
+
     _alvo_sofridos = scores["chutes_no_alvo_sofridos_por_jogo"].clip(lower=0)
-    # gols por chute no alvo sofrido: 0 = segurou tudo; alto = vazada com facilidade.
-    # Sem chute no alvo sofrido (defesa não testada) → neutro via fillna na média.
-    _gols_por_alvo_sofrido = _safe_divide(scores["gols_contra_por_jogo"], _alvo_sofridos)
-    # "exposição custosa": volume de finalizações limpas que de fato viraram gol.
-    # Quem zerou o placar tem exposição 0 aqui (volume não conta contra), então
-    # segurar 7 no alvo a 0 NÃO é punido como sofrer 7 no alvo e levar gols.
-    _vazamento = _alvo_sofridos * _gols_por_alvo_sofrido  # = gols no alvo sofridos
-    _t_resultado = _zscore_to_100(scores["gols_contra_por_jogo"] / scores["defesa_ctx"], lower_is_better=True)
-    _t_solidez = _zscore_to_100(_gols_por_alvo_sofrido, lower_is_better=True)
-    _t_exposicao = _zscore_to_100(_vazamento / scores["defesa_ctx"], lower_is_better=True)
-    _defesa_raw = _t_resultado * 0.40 + _t_solidez * 0.35 + _t_exposicao * 0.25
+    _neutralizados = (_alvo_sofridos - scores["gols_contra_por_jogo"]).clip(lower=0)
+
+    # banda-base por gols sofridos/jogo: decai com cada gol (assintótico).
+    # 0 gol→85, 1→54.8, 2→40.5, 3→32.1, ... — os gaps encolhem conforme sobe o nº
+    # de gols, então o ajuste contextual precisa ser proporcional ao gap LOCAL.
+    def _band(gc):
+        return 85.0 / (1.0 + gc * 0.55)
+    _gc = scores["gols_contra_por_jogo"].clip(lower=0)
+    _banda_base = _band(_gc)
+
+    # gap adjacente à banda do time — limita o ajuste pra NUNCA cruzar de banda
+    # (garante monotonicidade: + gols ⇒ nunca + defesa). No nível 0 não há banda
+    # "acima", então usa só o gap abaixo (não o min, que seria 0 e zeraria o
+    # ajuste, reamontoando os clean sheets).
+    _gap_abaixo = (_banda_base - _band(_gc + 1.0)).clip(lower=0)
+    _gap_acima = (_band((_gc - 1.0).clip(lower=0)) - _banda_base)
+    # onde há banda acima (gc>=1), usa o menor dos dois; senão só o de baixo.
+    _gap_local = pd.concat([_gap_abaixo, _gap_acima.where(_gc >= 1.0, _gap_abaixo)], axis=1).min(axis=1)
+
+    # mérito contextual ∈ [-1,+1]: segurar volume sob pressão de adversário forte.
+    # Escalado a ±40% do gap local — o ajuste fica sempre menor que meia-banda.
+    _merito = _zscore_to_100(_neutralizados * _defesa_ctx_q)  # 0..100, média ~50
+    _ajuste = ((_merito - 50.0) / 50.0).clip(-1, 1) * _gap_local * 0.40
+
+    _defesa_raw = (_banda_base + _ajuste).clip(0, 100)
     # Defesa pouco testada (adversário criou pouco volume — defesa_ctx baixo)
     # não é o mesmo que defesa sólida sob pressão: sem ser testada, não há
     # evidência suficiente do mérito defensivo, então o score é atraído para
