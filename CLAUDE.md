@@ -121,7 +121,7 @@ pytest tests/test_update_pipeline.py::test_run_update_pipeline_orchestrates_full
 
 ## Schemas
 
-`schemas/*.yaml` definem as colunas esperadas por tipo de dado. Ainda não são carregados automaticamente pelo código — servem como referência para implementar validação real via `validation/schemas.py`.
+`schemas/*.yaml` definem as colunas esperadas por tipo de dado. A validação real fica em `validation/schemas.py`: use `validate_required_columns(df, schema="matches.yaml")` para carregar o YAML via `load_schema()` e conferir colunas obrigatórias.
 
 ## Watcher (`watcher/`)
 
@@ -137,7 +137,7 @@ Ao clicar "Processar", o daemon roda por jogo: **coleta** (`fifa-analytics atual
 
 Gera `reports/tournament/ranking_race.html` — um arquivo único e autossuficiente (dados embutidos como JSON, sem servidor) com duas abas: **Ranking Race** (corrida de barras jogo a jogo) e **Seleções** (grade das 48 seleções → modal por seleção com Resumo/Jogos/Elenco). É o passo final do watcher e roda standalone (`python scripts/bar_chart_race.py`). Ao editar:
 - Quase tudo é CSS+JS dentro de um `f-string` Python gigante — `{{`/`}}` escapam chaves literais, e barras em regex JS precisam ser `\\` (ex: `split(/\\s+/)`) senão dão SyntaxWarning.
-- Sempre valide o JS gerado: extraia o `<script>` e rode `node --check`. Para testar lógica, stube o DOM fazendo `getElementById` retornar `null` para ids inexistentes (imita o navegador — captura referências a elementos removidos, que travam o modal).
+- Sempre valide o JS gerado: `tests/test_dashboard_js.py` extrai o `<script>`, roda `node --check` e executa com um DOM mínimo stubado. Se mexer pesado no dashboard, rode esse teste isolado antes da suíte inteira.
 - Itens flex que rolam precisam de `min-height: 0` no pai, senão crescem além da viewport em vez de scrollar (causa recorrente de "scroll não funciona").
 - Jogadores são casados **por nome** entre lineup/eventos/commentary/365scores. Os nomes vêm com lixo (espaço extra: "Gavi "; abreviação: "C. Larin"; acento divergente no 365scores). Normalize na raiz (`_strip_name_cols`, `_name_key`) — senão gols/cartões/substituições não casam.
 - Substituições vêm de `fact_commentary` (ESPN, `play_type='substitution'`, texto "X replaces Y"), não dos eventos. Stats por jogador/partida: canonical (ESPN, por match_id) + 365scores (rating/xA/passes, casado por nome).
@@ -145,13 +145,4 @@ Gera `reports/tournament/ranking_race.html` — um arquivo único e autossuficie
 ## Problemas conhecidos e pendências
 
 Ver `planejamento_pipeline_copa_2026.md` seção "Checklist de melhorias" para o backlog atualizado.
-
-Problemas ativos principais:
-- `analytics/standings.py` é re-export inútil de `transforms/standings.py`
-- `slugify()` duplicada em `analytics/scores.py` e `canonical_reports.py` — deveria estar em `utils/`
-- URLs de fontes hardcoded nos módulos — deveriam vir de `config/sources.yaml`
-- `config/pipeline.yaml` não é carregado pelo código, apenas documentário
-- `schemas/*.yaml` não são usados para validação — `load_schema()` existe mas nunca é chamado
-- `reports/players/`, `reports/teams/`, `reports/rankings/` não estão no `.gitignore`
-- `manifests/tournament_status.parquet` deveria estar em `data/gold/`, não em `manifests/`
-- Sources não implementadas (`fifa.py`, `football_data.py`, `balldontlie.py`) geram confusão — remover ou marcar claramente como stub
+No momento, as pendências técnicas ativas daquele bloco foram resolvidas ou reclassificadas; novas pendências devem ser registradas lá com evidência e data.

@@ -1984,15 +1984,21 @@ Levantado em 2026-06-16 após revisão completa do repositório. Organizado por 
 
 ### Critico (bloqueia qualidade ou corretude)
 
-- [ ] **`.gitignore` incompleto** — `reports/players/`, `reports/teams/*.md`, `reports/rankings/` não estão ignorados; centenas de arquivos gerados sendo commitados sem intenção
-- [ ] **`manifests/tournament_status.parquet` no lugar errado** — arquivo gerado automaticamente deveria ficar em `data/gold/`, não em `manifests/`; atualizar `.gitignore` e `tournament_status.py`
+- [x] **`.gitignore` incompleto** — `reports/players/`, `reports/teams/*.md`, `reports/rankings/` não estão ignorados; centenas de arquivos gerados sendo commitados sem intenção
+  - Corrigido: `.gitignore` ignora `reports/fragments/`, `reports/final/`, `reports/tournament/`, `reports/players/`, `reports/teams/*.md`, `reports/rankings/**`, preservando `.gitkeep`.
+- [x] **`manifests/tournament_status.parquet` no lugar errado** — arquivo gerado automaticamente deveria ficar em `data/gold/`, não em `manifests/`; atualizar `.gitignore` e `tournament_status.py`
+  - Corrigido: `run_tournament_status()` grava em `data/gold/tournament_status/tournament_status.parquet`; `manifests/*.parquet` segue ignorado.
 
 ### Arquitetura (confusao de responsabilidades)
 
-- [ ] **`analytics/standings.py` é re-export inútil** — apenas reexporta `calculate_group_standings` de `transforms/standings.py`; remover o arquivo e ajustar imports nos workflows que o usam
-- [ ] **`slugify()` duplicada** — definida em `analytics/scores.py` e reimportada em `canonical_reports.py`; mover para `utils/` e atualizar todos os imports
-- [ ] **URLs hardcoded nos módulos de fontes** — `worldcup2026.py` e `espn.py` têm `BASE_URL` hardcoded; deveriam ler de `config/sources.yaml` via `load_config()`
+- [x] **`analytics/standings.py` é re-export inútil** — apenas reexporta `calculate_group_standings` de `transforms/standings.py`; remover o arquivo e ajustar imports nos workflows que o usam
+  - Corrigido: o arquivo não existe mais e os imports usam `transforms.standings`.
+- [x] **`slugify()` duplicada** — definida em `analytics/scores.py` e reimportada em `canonical_reports.py`; mover para `utils/` e atualizar todos os imports
+  - Corrigido: `slugify()` vive em `utils/text.py` e é importada pelos consumidores.
+- [x] **URLs hardcoded nos módulos de fontes** — `worldcup2026.py` e `espn.py` têm `BASE_URL` hardcoded; deveriam ler de `config/sources.yaml` via `load_config()`
+  - Corrigido: `worldcup2026`, `espn`, `wikipedia` e `scores365` leem `config/sources.yaml`, mantendo fallbacks internos para robustez.
 - [x] **`config/pipeline.yaml` não é carregado** — arquivo bem estruturado mas ignorado pelo código; usar em `cli.py` para defaults globais (status válidos, run_scope, timezone)
+  - Corrigido: `cli.build_parser()` carrega `defaults.source` e `defaults.match_status_filter`; coberto por teste de parser com config monkeypatchado.
 - [x] **`efficiency.py` trivial** — `goals_per_shot()` é uma linha de fórmula; mover para `utils/` ou absorver em `analytics/scores.py` e remover o arquivo
 
 ### Validação e schemas (falta de contrato real)
@@ -2002,7 +2008,8 @@ Levantado em 2026-06-16 após revisão completa do repositório. Organizado por 
 
 ### Sources stubs (confusão de leitura)
 
-- [ ] **Remover ou isolar stubs não implementados** — `sources/fifa.py`, `sources/football_data.py`, `sources/balldontlie.py` lançam `NotImplementedError`; criar pasta `sources/stubs/` ou adicionar comentário `# not implemented` claro no topo e excluir da discovery automática
+- [x] **Remover ou isolar stubs não implementados** — `sources/fifa.py`, `sources/football_data.py`, `sources/balldontlie.py` lançam `NotImplementedError`; criar pasta `sources/stubs/` ou adicionar comentário `# not implemented` claro no topo e excluir da discovery automática
+  - Corrigido: esses módulos não existem mais em `src/fifa_analytics/sources/`; fontes desabilitadas ficam apenas em `config/sources.yaml`.
 
 ### Testes (gaps de cobertura)
 
@@ -2024,7 +2031,8 @@ Levantado em 2026-06-16 após revisão completa do repositório. Organizado por 
 
 ### Melhorias de qualidade (quando der)
 
-- [ ] **TLS bypass global em `worldcup2026.py`** — `urllib3.disable_warnings()` afeta toda a sessão; usar `verify=False` inline em `requests.get()` sem desabilitar warnings globalmente
+- [x] **TLS bypass global em `worldcup2026.py`** — `urllib3.disable_warnings()` afeta toda a sessão; usar `verify=False` inline em `requests.get()` sem desabilitar warnings globalmente
+  - Corrigido: `fetch_endpoint()` usa `warnings.catch_warnings()` local e `session.get(..., verify=verify_tls)`, sem desabilitar warnings globalmente.
 - [x] **Type hints imprecisos em workflows** — varios retornam `dict[str, object]`; tipar com `dict[str, Path | str | int]` onde o retorno é conhecido
 
 ---

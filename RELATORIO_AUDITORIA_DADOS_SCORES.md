@@ -80,16 +80,17 @@ final_third_possession_won(84), minutes(30).
 
 ## 3. Furos do modelo de score (estado atual)
 
-### 3.1 Jogador — CORRIGIDO nesta sessão (mas parcial)
+### 3.1 Jogador — CORRIGIDO nesta sessão
 - **Era:** rating de atuação (9.8 do Messi) não entrava no score; produção via
   z-score saturava (3 gols ≈ 1 gol). Resultado absurdo: Gyökeres (1 gol, nota 8.6)
   > Messi (3 gols, nota 9.8).
 - **Agora:** rating = 50% do score_geral em todos os perfis; produção ofensiva
   (atacante/meia) em **escala absoluta** proporcional; `_wavg` NaN-aware
   (redistribui peso sem nota). Messi voltou ao topo dos atacantes.
-- **Pendência:** defensor/goleiro continuam em z-score sobre métricas pobres —
-  só ficam bons DE VERDADE após §2.2 (coletar desarmes/xGP). Hoje o rating 50% é
-  a melhor aproximação possível para eles.
+- **Atualização:** o parser 365Scores foi ampliado, as métricas novas foram
+  propagadas até `canonical_player_stats`/`player_match_features`, e o score de
+  defensor/goleiro passou a usar desarmes, interceptações, cortes, duelos,
+  recuperações, bloqueios e xGP quando disponíveis.
 
 ### 3.2 Time — pontos a revisar na refatoração
 - `score_defesa` usa bandas + gol contra 1.5x + Elo do adversário (recente, ok),
@@ -123,36 +124,69 @@ final_third_possession_won(84), minutes(30).
 ## 5. Checklist da refatoração de raiz (futuro)
 
 ### Fase A — Aquisição (365Scores)
-- [ ] Revisar `_STAT_TYPE_MAP` inteiro contra o raw (corrigir ids stale).
-- [ ] Adicionar as 16 stats faltantes (§2.2), tratando ratios de forma consistente.
-- [ ] Propagar novas colunas: `sources/scores365.py` → silver → `scores365_pipeline`
+- [x] Revisar `_STAT_TYPE_MAP` inteiro contra o raw (corrigir ids stale).
+- [x] Adicionar as 16 stats faltantes (§2.2), tratando ratios de forma consistente.
+- [x] Propagar novas colunas: `sources/scores365.py` → silver → `scores365_pipeline`
       → `canonical_player_stats` (gold).
-- [ ] Garantir casamento por `player_id` (não por nome) onde possível.
-- [ ] Decidir armazenamento do `heatMap` (guardar? agregar? ignorar por ora).
-- [ ] (Opcional) ESPN `keyEvents` → tabela de chutes com coordenadas (mapa de chute).
+- [x] Garantir casamento por `player_id` (não por nome) onde possível.
+- [x] Decidir armazenamento do `heatMap` (guardar? agregar? ignorar por ora).
+      - Decisao: ignorar por ora no silver/gold. O raw permanece preservado; nao ha consumo atual no score/relatorios.
+- [x] (Opcional) ESPN `keyEvents` → tabela de chutes com coordenadas (mapa de chute).
+      - Implementado via `fact_shots`/`canonical_shots`, com `location_x/location_y` extraidos de `fieldPositionX/Y`.
 
 ### Fase B — Modelo de score (jogador)
-- [ ] **Defensor:** redesenhar com Tackles Won, Interceptions, Clearances,
+- [x] **Defensor:** redesenhar com Tackles Won, Interceptions, Clearances,
       Duels Won, Ball Recovery, Shots Blocked, goals_conceded — escala/normalização
       apropriada; rating como componente, não como muleta.
-- [ ] **Goleiro:** usar xGP (Expected Goals Prevented) como eixo principal +
+- [x] **Goleiro:** usar xGP (Expected Goals Prevented) como eixo principal +
       save%, saves/jogo, goals_conceded.
-- [ ] **Atacante/Meia:** incorporar xG/xA como complemento de gols/assists.
-- [ ] Revalidar pesos por perfil (PLAYER_RATING_WEIGHT, PLAYER_PRODUCTION_REFS).
-- [ ] Definir refs absolutas por métrica defensiva (ex.: desarmes/jogo de elite).
+- [x] **Atacante/Meia:** incorporar xG/xA como complemento de gols/assists.
+- [x] Revalidar pesos por perfil (PLAYER_RATING_WEIGHT, PLAYER_PRODUCTION_REFS).
+- [x] Definir refs absolutas por métrica defensiva (ex.: desarmes/jogo de elite).
 
 ### Fase C — Consistência geral
-- [ ] Unificar casamento de nomes por `player_id` (aposentar aliases por nome).
-- [ ] Carregar `schemas/*.yaml` de fato (validação real via `validation/schemas.py`).
-- [ ] Mover `manifests/tournament_status.parquet` para `data/gold/`.
-- [ ] Resolver pendências do CLAUDE.md (§"Problemas conhecidos").
-- [ ] Após qualquer mudança de fórmula: reprocessar snapshots + regenerar HTML.
+- [x] Unificar casamento de nomes por `player_id` (aposentar aliases por nome).
+      - Implementado onde ha chave comum: `build_player_match_features()` prefere `player_id` ao anexar lineup ESPN aos stats ESPN. Limite documentado: `365scores` usa `player_id_365`, namespace diferente do `player_id` ESPN; o casamento ESPN↔365 ainda precisa de nome/alias ate existir crosswalk curado.
+      - Normalizacao de fallback por nome centralizada em `utils/text.py`: espacos invisiveis/NBSP, sufixo `null`, hifens Unicode e `Al - Harbi`/`Al-Harbi`/`Al Harbi` passam pela mesma chave. Colisoes como `Ederson`/`Éderson` continuam separadas pela chave exata.
+- [x] Carregar `schemas/*.yaml` de fato (validação real via `validation/schemas.py`).
+- [x] Mover `manifests/tournament_status.parquet` para `data/gold/`.
+      - `run_tournament_status()` grava em `data/gold/tournament_status/tournament_status.parquet`.
+- [x] Resolver pendências do CLAUDE.md (§"Problemas conhecidos").
+      - Atualizadas pendencias ja resolvidas: schemas, `tournament_status`, `slugify` centralizado, reports gerados e dashboard testado.
+- [x] Após qualquer mudança de fórmula: reprocessar snapshots + regenerar HTML.
 
 ### Fase D — Validação
-- [ ] Testes para o parser estendido (cada stat nova, ratios, valores ausentes).
-- [ ] Casos de sanidade do score (ex.: melhor goleiro por xGP, melhor zagueiro
+- [x] Testes para o parser estendido (cada stat nova, ratios, valores ausentes).
+- [x] Casos de sanidade do score (ex.: melhor goleiro por xGP, melhor zagueiro
       por desarmes+interceptações) revisados manualmente.
-- [ ] `node --check` no JS do dashboard + teste stub-DOM.
+- [x] `node --check` no JS do dashboard + teste stub-DOM.
+      - Coberto por `tests/test_dashboard_js.py`: extrai o `<script>` de `reports/tournament/ranking_race.html`, roda `node --check` e executa com DOM minimo stubado.
+
+### Fase E — Fechamento operacional
+- [x] Atualizar elencos ESPN.
+      - `espn-elencos`: `1246` jogadores, `48` selecoes.
+- [x] Atualizar fontes e gold do inicio ao fim.
+      - `worldcup26.ir` falhou em 2026-06-18 por erro TLS tambem via `curl -k`; mantido o ultimo gold dessa fonte.
+      - ESPN atualizada via `atualizar --sem-worldcup2026`; 365Scores reprocessado com os `24` `source_game_id` ja mapeados.
+      - Gold canonico regenerado: `104` partidas, `132` eventos, `1289` lineups/player stats, `618` chutes.
+- [x] Regenerar relatorios, status e scores.
+      - Relatorios finais: `24` jogos finalizados; status do torneio: `24` completos, `80` nao iniciados.
+      - Scores: `48` selecoes ranqueadas e `1258` relatorios de jogadores.
+- [x] Reprocessar snapshots do inicio ao fim.
+      - Snapshots `snapshot_jogo_001.parquet` a `snapshot_jogo_024.parquet` regenerados.
+- [x] Regenerar HTML limpo e atualizado.
+      - `reports/tournament/ranking_race.html` regenerado sem `SyntaxWarning`; contem o snapshot final.
+      - Validacao final: suite completa fechou em `167 passed`.
+- [x] Expor metricas avancadas no dashboard, nao apenas no score interno.
+      - Cards de elenco agora mostram lideres e blocos avancados por perfil: xG, xA, xGOT, passes-chave, desarmes, interceptacoes, recuperacoes, duelos, xGP e defesas.
+      - Aba Jogadores recebeu opcoes de ordenacao por metricas avancadas por jogo e totais; colunas por posicao passaram a destacar metricas adequadas ao perfil.
+      - `player_snapshot_timeline.parquet` reprocessado com `63` colunas, incluindo metricas avancadas e taxas por jogo; HTML regenerado a partir desse snapshot.
+- [x] Alinhar notas de jogadores entre tabela, elenco e jogos.
+      - O modal de selecao agora respeita o `currentJogo`: aba Jogos esconde partidas finalizadas futuras e aba Elenco usa o mesmo `PLAYER_DATA[currentJogo]` da tabela.
+      - `player_snapshot_timeline.parquet` passou a carregar tambem `shots`, `fouls_committed` e `fouls_drawn` para evitar perda de detalhes ao usar uma unica fonte.
+      - Corrigido caso Raphinha: o canonical tinha `player_name = "Raphinha "` (espaco final); o snapshot recalculava rating por nome cru e perdia a nota. Agora usa `rating_medio` de `build_player_scores()`, ja sobre nomes normalizados.
+      - Correcao ampliada: o gold canonico tambem foi reescrito com nomes limpos. Checagem em `canonical_player_stats`, `canonical_lineups`, `player_match_features` e `player_snapshot_timeline`: `0` nomes com espaco nas pontas, espaco duplicado, NBSP ou hifen Unicode.
+      - Checagem final: `0` jogadores com rating canonico ausente na tabela e `0` ratings na tabela sem fonte canonica.
 
 ---
 
