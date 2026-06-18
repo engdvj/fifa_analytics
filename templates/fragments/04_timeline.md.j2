@@ -1,0 +1,7 @@
+{% if events %}
+{% for event in events -%}
+- {{ event.minute_label }} - {{ event.description }}
+{% endfor -%}
+{% else %}
+Sem eventos registrados.
+{% endif %}

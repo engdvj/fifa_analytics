@@ -28,6 +28,26 @@ def test_parser_relatorios_basicos_defaults():
     assert args.status == "finalizado"
 
 
+def test_parser_uses_pipeline_yaml_defaults(monkeypatch):
+    import fifa_analytics.cli as cli
+
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda _name: {"defaults": {"source": "wikipedia", "match_status_filter": "todos"}},
+    )
+
+    parser = cli.build_parser()
+    reports = parser.parse_args(["relatorios-basicos"])
+    status = parser.parse_args(["status-torneio"])
+    update = parser.parse_args(["atualizar"])
+
+    assert reports.fonte == "wikipedia"
+    assert reports.status == "todos"
+    assert status.source == "wikipedia"
+    assert update.status == "todos"
+
+
 def test_parser_relatorios_basicos_custom_status():
     parser = build_parser()
     args = parser.parse_args(["relatorios-basicos", "--status", "todos"])
