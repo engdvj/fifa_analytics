@@ -212,6 +212,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Gera features, scores e relatorios acumulados por selecao e jogador.",
     )
 
+    subparsers.add_parser(
+        "verificar-nomes",
+        help="Lista inconsistencias de nome de jogador entre stats e roster (provavel truncamento) para curar em config/player_aliases.yaml.",
+    )
+
     calibrar_pesos = subparsers.add_parser(
         "calibrar-pesos",
         help="Valida cada componente do score contra sua metrica natural e sugere pesos via regressao (RidgeCV). Nao altera os pesos automaticamente.",
@@ -300,6 +305,8 @@ def main() -> None:
     elif args.command == "scores":
         result = run_scores_pipeline()
         _print_result(result)
+    elif args.command == "verificar-nomes":
+        _print_name_mismatches()
     elif args.command == "calibrar-pesos":
         result = run_calibration_report(force=args.forcar)
         if result["status"] == "pulado":
@@ -325,3 +332,27 @@ def main() -> None:
 def _print_result(result: dict) -> None:
     for key, value in result.items():
         print(f"{LABELS.get(key, key)}: {value}")
+
+
+def _print_name_mismatches() -> None:
+    """Recalcula e imprime as inconsistencias de nome stats x roster do gold atual."""
+    from fifa_analytics.analytics.name_reconciliation import (
+        apply_player_aliases,
+        detect_name_mismatches,
+    )
+    from fifa_analytics.paths import GOLD_DIR
+    from fifa_analytics.utils.io import read_dataframe
+
+    ps_path = GOLD_DIR / "fact_player_match_stats" / "canonical_player_stats.parquet"
+    ro_path = GOLD_DIR / "rosters" / "espn_rosters.parquet"
+    if not ps_path.exists() or not ro_path.exists():
+        print("Sem dados de jogador/roster no gold ainda. Rode 'indice-canonico' antes.")
+        return
+    player_stats = apply_player_aliases(read_dataframe(ps_path))
+    report = detect_name_mismatches(player_stats, read_dataframe(ro_path), persist=False)
+    if report.empty:
+        print("Nenhuma inconsistencia de nome pendente. (Casos curados ficam em config/player_aliases.yaml.)")
+        return
+    print(f"{len(report)} inconsistencia(s) de nome a curar em config/player_aliases.yaml:\n")
+    for _, r in report.iterrows():
+        print(f"  {r['team']}: stats='{r['stats_name']}'  ~  roster='{r['roster_name']}'")
