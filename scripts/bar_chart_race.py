@@ -171,6 +171,7 @@ _pstats = _read_optional(Path("data/gold/fact_player_match_stats/canonical_playe
 _events = _read_optional(Path("data/gold/fact_events/canonical_events.parquet"))
 _tstats = _read_optional(Path("data/gold/fact_team_match_stats/canonical_team_stats.parquet"))
 _commentary = _read_optional(Path("data/gold/fact_commentary/canonical_commentary.parquet"))
+_rosters = _read_optional(Path("data/gold/rosters/espn_rosters.parquet"))
 
 
 def _strip_name_cols(df: pd.DataFrame, cols: tuple[str, ...]) -> pd.DataFrame:
@@ -194,6 +195,7 @@ _pstats = _strip_name_cols(_pstats, ("player_name",))
 _events = _strip_name_cols(_events, ("player", "related_player"))
 _commentary = _strip_name_cols(_commentary, ("player", "participants"))
 _p365 = _strip_name_cols(_p365, ("player_name",))
+_rosters = _strip_name_cols(_rosters, ("player_name",))
 
 import re as _re
 import unicodedata as _ud
@@ -206,6 +208,37 @@ def _name_key(s) -> str:
     return _ud.normalize("NFKD", s).encode("ASCII", "ignore").decode().lower().strip()
 
 
+def _surname_key(s) -> str:
+    parts = _name_key(s).split()
+    return parts[-1] if parts else ""
+
+
+def _find_365_player_row(rows: pd.DataFrame, player_name: str):
+    """Casa jogador da 365Scores com o canônico.
+
+    A 365 às vezes traz só o sobrenome no lineup (ex.: "Touré"), enquanto o
+    canônico/ESPN vem com nome completo ("Mohamed Toure"). Primeiro tentamos o
+    nome completo; se falhar, aceitamos sobrenome apenas quando for inequívoco
+    dentro do mesmo time/jogo.
+    """
+    if rows.empty:
+        return None
+
+    key = _name_key(player_name)
+    exact = rows[rows["player_name"].map(_name_key) == key]
+    if len(exact) == 1:
+        return exact.iloc[0]
+
+    surname = _surname_key(player_name)
+    if not surname:
+        return None
+    source_keys = rows["player_name"].map(_name_key)
+    surname_only = rows[source_keys == surname]
+    if len(surname_only) == 1:
+        return surname_only.iloc[0]
+    return None
+
+
 def _num0(v):
     try:
         return None if v is None or pd.isna(v) else (int(v) if float(v) == int(float(v)) else round(float(v), 2))
@@ -213,7 +246,7 @@ def _num0(v):
         return None
 
 
-def _player_stats_for(mid: str, team: str, date: str) -> dict:
+def _player_stats_for(mid: str, team: str, date: str, opponent: str = "") -> dict:
     """Stats por jogador deste jogo: canonical (ESPN, por match_id) + 365scores
     (rating/xA/passes, casado por nome normalizado). Retorna {nome → dict de stats}."""
     out = {}
@@ -234,9 +267,15 @@ def _player_stats_for(mid: str, team: str, date: str) -> dict:
     # enriquecimento 365scores (rating, minutos, xA, key passes, % passes) por nome+time
     if not _p365.empty:
         s365 = _p365[(_p365["team"] == team)]
-        by_key = {_name_key(r.get("player_name")): r for _, r in s365.iterrows()}
+        if opponent and "opponent" in s365.columns:
+            s365 = s365[s365["opponent"] == opponent]
+        if date and "match_date" in s365.columns:
+            d365 = pd.to_datetime(s365["match_date"], errors="coerce")
+            dcan = pd.to_datetime(str(date)[:10], errors="coerce")
+            if not pd.isna(dcan):
+                s365 = s365[(d365 - dcan).abs().dt.days <= 1]
         for nm, st in out.items():
-            r = by_key.get(_name_key(nm))
+            r = _find_365_player_row(s365, nm)
             if r is None:
                 continue
             st["rating"] = _num0(r.get("rating"))
@@ -404,6 +443,65 @@ _POS_DEPTH = {
     "LF": 6, "RF": 6, "CF-L": 6, "CF-R": 6, "F": 6,
 }
 
+_POS_GROUP_ORDER = {
+    "Goleiros": 0,
+    "Defensores": 1,
+    "Meias": 2,
+    "Atacantes": 3,
+    "Sem posição": 4,
+}
+
+
+def _clean_pos(v) -> str:
+    if v is None or pd.isna(v):
+        return ""
+    return str(v).strip()
+
+
+def _position_group(pos: str | None) -> str:
+    p = _clean_pos(pos).upper()
+    if not p or p == "SUB":
+        return "Sem posição"
+    if p in {"G", "GK", "GOALKEEPER"}:
+        return "Goleiros"
+    if p in {"D", "DEFENDER", "SW", "CD", "CD-L", "CD-R", "LB", "RB"} or "BACK" in p:
+        return "Defensores"
+    if p in {"M", "MIDFIELDER", "DM", "CM", "CM-L", "CM-R", "LM", "RM", "AM", "AM-L", "AM-R"} or "MIDFIELD" in p:
+        return "Meias"
+    if p in {"F", "FW", "FORWARD", "ATTACKER", "LF", "RF", "CF", "CF-L", "CF-R", "RCF"} or "FORWARD" in p:
+        return "Atacantes"
+    return "Sem posição"
+
+
+def _position_label(pos: str | None) -> str:
+    p = _clean_pos(pos)
+    if not p or p.upper() == "SUB":
+        return "—"
+    norm = p.upper().replace("_", " ").replace("-", " ")
+    mapped = {
+        "GOALKEEPER": "G",
+        "DEFENDER": "D",
+        "MIDFIELDER": "M",
+        "ATTACKER": "F",
+        "FORWARD": "F",
+        "CENTRE BACK": "CD",
+        "CENTER BACK": "CD",
+        "LEFT BACK": "LB",
+        "RIGHT BACK": "RB",
+        "CENTRAL MIDFIELD": "CM",
+        "CENTRE MIDFIELD": "CM",
+        "CENTER MIDFIELD": "CM",
+        "DEFENSIVE MIDFIELD": "DM",
+        "ATTACKING MIDFIELD": "AM",
+        "LEFT MIDFIELD": "LM",
+        "RIGHT MIDFIELD": "RM",
+        "CENTRE FORWARD": "CF",
+        "CENTER FORWARD": "CF",
+        "LEFT FORWARD": "LF",
+        "RIGHT FORWARD": "RF",
+    }
+    return mapped.get(norm, p.upper())
+
 
 def _build_pitch(starters: list[dict], formation: str | None) -> list[dict]:
     """Deriva coordenadas (x,y) de cada titular para desenhar o campo.
@@ -449,7 +547,7 @@ def _build_pitch(starters: list[dict], formation: str | None) -> list[dict]:
     return pitch
 
 
-def _build_team_lineup(mid: str, team: str) -> dict:
+def _build_team_lineup(mid: str, team: str, date: str = "", opponent: str = "") -> dict:
     """Monta a escalação completa de um time num jogo: titulares + reservas (com
     marcações de gol/cartão/substituição) + coordenadas do campo. Reutilizável
     para os DOIS times do confronto."""
@@ -505,7 +603,7 @@ def _build_team_lineup(mid: str, team: str) -> dict:
             elif et in ("gol", "gol_penalti"):
                 goals_of[ply] = goals_of.get(ply, 0) + 1
 
-    pstats_map = _player_stats_for(mid, team, "")
+    pstats_map = _player_stats_for(mid, team, date, opponent)
     for it in starters + subs:
         nm = it.get("name")
         if nm in entrou_min:
@@ -600,9 +698,10 @@ for _team in _all_cup_teams:
             res = "E"
 
         # escalação dos DOIS times (campo + reservas com marcações)
-        lineup = _build_team_lineup(mid, _team)
+        match_date = str(m.get("date", ""))[:10]
+        lineup = _build_team_lineup(mid, _team, match_date, opp)
         formation, starters, subs = lineup["formation"], lineup["starters"], lineup["subs"]
-        opp_lineup = _build_team_lineup(mid, opp)
+        opp_lineup = _build_team_lineup(mid, opp, match_date, _team)
 
         # linha do tempo do jogo (eventos de ambos; mine=True nos do time visto)
         timeline = _timeline_for(mid, _team, lineup["game_subs"])
@@ -674,27 +773,82 @@ for _team in _all_cup_teams:
     ps = _pstats[_pstats["team"] == _team]
     players = []
     if not ps.empty:
+        pos_by_name: dict[str, str] = {}
+        num_by_name: dict[str, int] = {}
+
+        def _mode_pos(df: pd.DataFrame, col: str) -> dict[str, str]:
+            out = {}
+            if df.empty or col not in df.columns:
+                return out
+            for nm, grp in df.groupby("player_name", dropna=True):
+                vals = [
+                    _clean_pos(v) for v in grp[col].tolist()
+                    if _clean_pos(v) and _clean_pos(v).upper() != "SUB"
+                ]
+                if vals:
+                    out[_name_key(nm)] = pd.Series(vals).value_counts().index[0]
+            return out
+
+        def _mode_num(df: pd.DataFrame, col: str) -> dict[str, int]:
+            out = {}
+            if df.empty or col not in df.columns:
+                return out
+            for nm, grp in df.groupby("player_name", dropna=True):
+                vals = [_num(v) for v in grp[col].tolist()]
+                vals = [v for v in vals if v is not None]
+                if vals:
+                    out[_name_key(nm)] = int(pd.Series(vals).value_counts().index[0])
+            return out
+
+        if not _lineups.empty:
+            lineup_team = _lineups[_lineups["team"] == _team]
+            pos_by_name.update(_mode_pos(lineup_team, "position"))
+            num_by_name.update(_mode_num(lineup_team, "shirt_number"))
+        if not _rosters.empty and "squad_position" in _rosters.columns:
+            roster_team = _rosters[_rosters["team"] == _team]
+            for key, pos in _mode_pos(roster_team, "squad_position").items():
+                pos_by_name.setdefault(key, pos)
+            for key, num in _mode_num(roster_team, "shirt_number").items():
+                num_by_name.setdefault(key, num)
+        if not _p365.empty:
+            p365_team = _p365[_p365["team"] == _team]
+            for col in ("formation_position", "position"):
+                for key, pos in _mode_pos(p365_team, col).items():
+                    pos_by_name.setdefault(key, pos)
+
         agg = ps.groupby("player_name", dropna=True).agg(
             jogos=("appearances", "sum"), gols=("goals", "sum"), assist=("assists", "sum"),
             chutes=("shots", "sum"), no_alvo=("shots_on_target", "sum"),
             amarelos=("yellow_cards", "sum"), vermelhos=("red_cards", "sum"),
             defesas=("saves", "sum"),
+            faltas=("fouls_committed", "sum"), faltas_sofridas=("fouls_drawn", "sum"),
+            impedimentos=("offsides", "sum"),
         ).reset_index()
         # ordena: gols, assistências, jogos
         agg = agg.sort_values(["gols", "assist", "jogos"], ascending=False)
         for _, p in agg.iterrows():
+            pkey = _name_key(p["player_name"])
+            pos_raw = pos_by_name.get(pkey)
+            pos_group = _position_group(pos_raw)
             players.append({
                 "name": p["player_name"],
+                "num": num_by_name.get(pkey),
+                "pos": _position_label(pos_raw),
+                "pos_group": pos_group,
+                "pos_order": _POS_GROUP_ORDER.get(pos_group, 99),
                 "jogos": _num(p["jogos"]), "gols": _num(p["gols"]), "assist": _num(p["assist"]),
                 "chutes": _num(p["chutes"]), "no_alvo": _num(p["no_alvo"]),
                 "amarelos": _num(p["amarelos"]), "vermelhos": _num(p["vermelhos"]),
                 "defesas": _num(p["defesas"]),
+                "faltas": _num(p["faltas"]), "faltas_sofridas": _num(p["faltas_sofridas"]),
+                "impedimentos": _num(p["impedimentos"]),
             })
 
     # — resumo de scores + campanha (snapshot mais recente)
     scores = {}
     rank = None
     campanha = {}
+    estilo = {}
     if _team in _latest_by_team.index:
         srow = _latest_by_team.loc[_team]
         for key, _lbl in _SCORE_KEYS:
@@ -708,9 +862,47 @@ for _team in _all_cup_teams:
             "aproveitamento": _num(srow.get("aproveitamento"), 2),
             "elo_rating": _num(srow.get("elo_rating")),
         }
+        # — estilo de jogo: flag + 4 eixos (0-100, 50=média) + stats brutas que
+        # justificam cada eixo (mostradas na aba Resumo do modal do time).
+        _j = max(srow.get("jogos", 1) or 1, 1)
+        def _pg(col):  # média por jogo de uma coluna acumulada
+            v = srow.get(col)
+            return _num(v / _j, 1) if v is not None and not pd.isna(v) else None
+        _afin = srow.get("estilo_afinidades")
+        try:
+            afinidades = json.loads(_afin) if _afin is not None and not pd.isna(_afin) else {}
+        except (TypeError, ValueError):
+            afinidades = {}
+        _det = srow.get("estilo_detalhe")
+        try:
+            detalhe = json.loads(_det) if _det is not None and not pd.isna(_det) else {}
+        except (TypeError, ValueError):
+            detalhe = {}
+        estilo = {
+            "flag": str(srow.get("estilo_jogo")) if srow.get("estilo_jogo") is not None and not pd.isna(srow.get("estilo_jogo")) else None,
+            "afinidades": afinidades,  # {arquétipo: 0-100}
+            "detalhe": detalhe,        # {arquétipo: [{metrica,valor,meta,score,direcao}]}
+            "posse": _num(srow.get("estilo_posse"), 1),
+            "pressao": _num(srow.get("estilo_pressao"), 1),
+            "verticalidade": _num(srow.get("estilo_verticalidade"), 1),
+            "largura": _num(srow.get("estilo_largura"), 1),
+            # stats brutas por jogo que alimentam os eixos / arquétipos
+            "posse_media": _num(srow.get("posse_media"), 1),
+            "passes_pj": _pg("passes"),
+            "precisao": _num((srow.get("precisao_passes_media") or 0) * 100, 0),
+            "dribles_pj": _pg("dribbles_won"),
+            "key_passes_pj": _pg("key_passes"),
+            "cruzamentos_pj": _pg("accurate_crosses"),
+            "chutes_pj": _pg("chutes"),
+            "no_alvo_pj": _pg("chutes_no_alvo"),
+            "gols_pj": _pg("gols_pro"),
+            "clearances_pj": _pg("clearances"),
+            "chutes_sofridos_pj": _pg("chutes_sofridos"),
+        }
 
     # — fase atual (do último jogo) e flag de eliminada
     stage_now = jogos_list[-1]["stage"] if jogos_list else None
+    jogos_finalizados = sum(1 for j in jogos_list if j.get("finalizado"))
 
     # — infos curadas (YAML); confederação do YAML tem prioridade sobre o mapa local
     info = TEAMS_INFO.get(_team, {}) or {}
@@ -727,12 +919,13 @@ for _team in _all_cup_teams:
         "team": _team,
         "flag": FLAGS.get(_team, "🏳️"),
         "rank": rank,
-        "n_jogos": len(jogos_list),
+        "n_jogos": jogos_finalizados,
         "group": TEAM_GROUP.get(_team),
         "confed": confed,
         "stage_now": stage_now,
         "scores": scores,
         "campanha": campanha,
+        "estilo": estilo,
         "artilheiro": artilheiro,
         "info": {
             "apelido": info.get("apelido"),
@@ -865,15 +1058,10 @@ METRIC_GROUPS = [
         ("amarelos_por_jogo", "Amarelos"),
         ("vermelhos_por_jogo", "Vermelhos"),
     ]),
-    # Estilo de jogo: eixos descritivos 0-100 (50 = média do torneio). Não é
-    # qualidade — caracteriza COMO o time joga. O rótulo textual (estilo_jogo)
-    # aparece à parte, no cabeçalho do modal; aqui ficam só os eixos numéricos.
-    ("Estilo de jogo · onde o time pende em cada eixo (centro = média do torneio)", "tt-col-estilo", [
-        ("estilo_posse", "Construção"),
-        ("estilo_pressao", "Recuperação"),
-        ("estilo_verticalidade", "Chegada ao ataque"),
-        ("estilo_largura", "Largura"),
-    ]),
+    # Estilo de jogo NÃO entra no painel de métricas do card — virava sopa
+    # visual no espaço estreito. A flag (estilo_jogo) + o "porquê" aparecem só
+    # no cabeçalho do modal (ver buildCardHeader / styleWhy); os 4 eixos
+    # detalhados ficam nos relatórios Markdown da seleção.
 ]
 
 # Métricas onde menor = melhor (barra mais comprida = mais destaque negativo)
@@ -1493,36 +1681,6 @@ input[type=range] {{
 .tt-col-disciplina {{ grid-column: span 2; border-right: none; }}
 /* Estilo ocupa uma 3ª linha inteira (6 colunas): os 4 eixos viram um grid
    horizontal dentro do bloco, para não esticar uma única coluna estreita. */
-.tt-col-estilo {{ grid-column: 1 / -1; border-right: none; border-bottom: none; }}
-/* Estilo: 4 eixos bipolares lado a lado (25% cada), cada um com polos + barra. */
-.tt-style-row {{
-  display: inline-block; width: 24.5%; vertical-align: top;
-  padding: 6px 12px 8px; box-sizing: border-box;
-}}
-.tt-style-row.related      {{ background: rgba(74,222,128,0.10); }}
-.tt-style-row.related-indirect {{ background: rgba(240,192,64,0.10); }}
-.tt-style-poles {{
-  display: flex; justify-content: space-between;
-  font-size: 0.6rem; color: #8b949e; margin-bottom: 3px;
-}}
-.tt-style-bar {{
-  position: relative; height: 5px; background: #21262d;
-  border-radius: 3px; margin: 2px 0 5px;
-}}
-.tt-style-mid {{
-  position: absolute; left: 50%; top: -1px; width: 1px; height: 7px;
-  background: #484f58;  /* marca o centro = média do torneio */
-}}
-.tt-style-dot {{
-  position: absolute; top: 50%; width: 9px; height: 9px;
-  background: #58a6ff; border-radius: 50%;
-  transform: translate(-50%, -50%); box-shadow: 0 0 0 2px #0d1117;
-}}
-.tt-style-foot {{
-  display: flex; justify-content: space-between; align-items: baseline;
-  font-size: 0.66rem;
-}}
-.tt-style-name {{ color: #c9d1d9; }}
 .tt-col-title {{
   font-size: 0.63rem;
   font-weight: 700;
@@ -1907,6 +2065,145 @@ input[type=range] {{
   font-size: 0.86rem; color: #c9d1d9; margin-top: 16px; padding: 13px 16px;
   background: #1f6feb10; border: 1px solid #1f6feb33; border-radius: 10px; line-height: 1.5;
 }}
+/* — Aba Estilo de jogo (modal do time) — */
+.es-tab {{ padding: 2px; }}
+.es-hero {{
+  display: flex; align-items: center; gap: 16px; padding: 16px 18px;
+  background: linear-gradient(135deg, #1f6feb22, #0d111700);
+  border: 1px solid #1f6feb44; border-radius: 12px;
+}}
+.es-hero-flag {{ font-size: 2.4rem; line-height: 1; flex-shrink: 0; }}
+.es-hero-nome {{ font-size: 1.5rem; font-weight: 900; color: #e6edf3; line-height: 1.1; }}
+.es-hero-glos {{ font-size: 0.9rem; color: #8b949e; margin-top: 4px; }}
+.es-help {{
+  font-size: 0.8rem; color: #8b949e; line-height: 1.5; margin: 14px 2px 4px;
+}}
+.es-help b {{ color: #c9d1d9; }}
+.es-axes {{
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px;
+}}
+@media (max-width: 620px) {{ .es-axes {{ grid-template-columns: 1fr; }} }}
+.es-axis {{
+  padding: 12px 14px; background: #0d111788;
+  border: 1px solid #21262d; border-radius: 10px;
+}}
+.es-axis-head {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }}
+.es-axis-nome {{ font-size: 0.92rem; font-weight: 700; color: #e6edf3; }}
+.es-axis-desc {{ display: block; font-size: 0.72rem; color: #6b7280; margin-top: 1px; }}
+.es-axis-lean {{
+  font-size: 0.74rem; color: #8b949e; white-space: nowrap; flex-shrink: 0;
+  background: #161b22; border: 1px solid #30363d; border-radius: 999px; padding: 3px 10px;
+}}
+.es-axis-lean b {{ color: #58a6ff; }}
+.es-bar {{ display: flex; align-items: center; gap: 8px; margin: 12px 0 10px; }}
+.es-bar-low, .es-bar-high {{ font-size: 0.66rem; color: #6b7280; white-space: nowrap; flex-shrink: 0; }}
+.es-bar-low {{ text-align: right; width: 72px; }}
+.es-bar-high {{ width: 72px; }}
+.es-bar-track {{
+  position: relative; flex: 1; height: 6px;
+  background: linear-gradient(90deg, #21262d, #2d333b, #21262d);
+  border-radius: 3px;
+}}
+.es-bar-mid {{ position: absolute; left: 50%; top: -2px; width: 1px; height: 10px; background: #484f58; }}
+.es-bar-dot {{
+  position: absolute; top: 50%; width: 12px; height: 12px; background: #58a6ff;
+  border-radius: 50%; transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 2px #0d1117, 0 0 8px #58a6ff66;
+}}
+.es-ings {{ display: flex; flex-wrap: wrap; gap: 5px; }}
+.es-ing {{
+  display: inline-flex; align-items: baseline; gap: 5px; font-size: 0.74rem; color: #8b949e;
+  background: #161b22; border-radius: 5px; padding: 2px 8px;
+}}
+.es-ing-l {{ color: #6b7280; }}
+.es-ing b {{ color: #c9d1d9; }}
+.es-aviso {{
+  font-size: 0.78rem; color: #c9a227; margin-top: 14px; padding: 10px 13px;
+  background: #c9a22712; border: 1px solid #c9a22733; border-radius: 8px; line-height: 1.5;
+}}
+/* dropdown "ver o time como estilo X" + bloco de detalhe do arquétipo */
+.es-arq-picker {{ display: flex; align-items: center; gap: 10px; margin: 14px 2px 0; flex-wrap: wrap; }}
+.es-arq-label {{ font-size: 0.8rem; color: #8b949e; }}
+.es-arq-select {{
+  background: #161b22; color: #e6edf3; border: 1px solid #30363d; border-radius: 8px;
+  padding: 6px 30px 6px 11px; font-size: 0.86rem; font-weight: 600; cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%238b949e' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 11px center;
+}}
+.es-arq-select:focus {{ border-color: #58a6ff; outline: none; }}
+.es-arq-detail {{
+  margin-top: 12px; padding: 14px 16px; background: #0d111788;
+  border: 1px solid #21262d; border-radius: 12px;
+}}
+.es-arq-bar-row {{ display: flex; justify-content: space-between; align-items: baseline; }}
+.es-arq-afin-lbl {{ font-size: 0.8rem; color: #8b949e; }}
+.es-arq-afin-val {{ font-size: 1.2rem; font-weight: 900; color: #58a6ff; }}
+.es-arq-bar {{ height: 8px; background: #21262d; border-radius: 4px; overflow: hidden; margin: 7px 0 6px; }}
+.es-arq-bar-fill {{
+  display: block; height: 100%; border-radius: 4px;
+  background: linear-gradient(90deg, #1f6feb, #58a6ff); transition: width 0.35s;
+}}
+.es-arq-gloss {{ font-size: 0.82rem; color: #8b949e; }}
+.es-arq-isflag {{ color: #4ade80; font-weight: 600; }}
+.es-am-title {{
+  font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px;
+  color: #8b949e; margin: 14px 0 8px;
+}}
+.es-am-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }}
+@media (max-width: 620px) {{ .es-am-grid {{ grid-template-columns: 1fr; }} }}
+.es-am-row {{
+  display: flex; justify-content: space-between; align-items: baseline;
+  background: #161b22; border-radius: 6px; padding: 6px 11px;
+}}
+.es-am-lbl {{ font-size: 0.8rem; color: #8b949e; }}
+.es-am-val {{ font-size: 0.92rem; font-weight: 700; color: #e6edf3; }}
+.es-na {{ font-size: 0.8rem; color: #6b7280; padding: 6px 0; }}
+/* métricas valor/meta com barra de progresso */
+.es-mm-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }}
+@media (max-width: 620px) {{ .es-mm-grid {{ grid-template-columns: 1fr; }} }}
+.es-mm {{ background: #161b22; border-radius: 7px; padding: 7px 11px; }}
+.es-mm-head {{ display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }}
+.es-mm-lbl {{ font-size: 0.78rem; color: #8b949e; }}
+.es-mm-vals {{ font-size: 0.82rem; color: #e6edf3; white-space: nowrap; }}
+.es-mm-vals b {{ color: #e6edf3; }}
+.es-mm-sep {{ color: #484f58; }}
+.es-mm-meta {{ color: #8b949e; }}
+.es-mm-bar {{ height: 5px; background: #0d1117; border-radius: 3px; overflow: hidden; margin-top: 6px; }}
+.es-mm-fill {{ display: block; height: 100%; border-radius: 3px; transition: width 0.3s; }}
+.es-mm-desc {{ font-size: 0.7rem; color: #6b7280; margin-top: 5px; line-height: 1.35; }}
+/* gráfico de perfil: afinidade do time aos 7 arquétipos (substitui os 4 eixos) */
+.es-perfil-title {{
+  font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px;
+  color: #8b949e; margin: 18px 2px 8px;
+}}
+.es-perfil {{ display: flex; flex-direction: column; gap: 5px; }}
+.es-perfil-row {{
+  display: grid; grid-template-columns: 170px 1fr 44px; align-items: center; gap: 10px;
+  padding: 4px 8px; border-radius: 7px; cursor: pointer; transition: background 0.15s;
+}}
+.es-perfil-row:hover {{ background: #161b22; }}
+.es-perfil-row.flag {{ background: #1f6feb1a; }}
+/* barra selecionada (a que está detalhada abaixo): contorno + leve realce */
+.es-perfil-row.sel {{
+  background: #1f6feb26;
+  box-shadow: inset 0 0 0 1px #58a6ff88;
+}}
+.es-perfil-row.sel .es-perfil-nome {{ color: #e6edf3; font-weight: 700; }}
+.es-perfil-nome {{ font-size: 0.82rem; color: #c9d1d9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+.es-perfil-row.flag .es-perfil-nome {{ color: #e6edf3; font-weight: 700; }}
+.es-perfil-tag {{
+  font-size: 0.62rem; color: #58a6ff; background: #1f6feb22; border-radius: 4px;
+  padding: 1px 5px; margin-left: 5px; font-weight: 600; vertical-align: middle;
+}}
+.es-perfil-bar {{ height: 8px; background: #161b22; border-radius: 4px; overflow: hidden; }}
+.es-perfil-fill {{ display: block; height: 100%; border-radius: 4px; transition: width 0.3s; }}
+.es-perfil-val {{ font-size: 0.8rem; font-weight: 700; color: #e6edf3; text-align: right; }}
+.es-axes-title {{
+  font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px;
+  color: #8b949e; margin: 18px 2px 4px;
+}}
+.es-axes-title span {{ text-transform: none; letter-spacing: 0; font-weight: 400; color: #6b7280; }}
 
 /* (mantido p/ compat — não usado mais na aba Resumo) */
 .md-scores {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(130px,1fr)); gap: 10px; }}
@@ -1948,6 +2245,105 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 .md-sub-label {{ font-size: 0.68rem; color: #6b7280; margin: 8px 0 4px; text-transform: uppercase; letter-spacing: 0.4px; }}
 .md-empty {{ color: #6b7280; font-size: 0.82rem; padding: 12px 0; }}
 
+/* ── aba Elenco ── */
+.el-board {{ display: flex; flex-direction: column; gap: 14px; }}
+.el-leaders {{
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;
+}}
+.el-leader {{
+  min-width: 0; border: 1px solid #263241; border-radius: 8px; padding: 10px 11px;
+  background: linear-gradient(180deg, rgba(22,27,34,0.88), rgba(13,17,23,0.88));
+}}
+.el-leader-label {{
+  color: #9aa4b2; font-size: 0.68rem; font-weight: 800; text-transform: uppercase;
+  letter-spacing: 0.4px; margin-bottom: 8px;
+}}
+.el-leader-main {{ display: flex; align-items: baseline; gap: 8px; min-width: 0; }}
+.el-leader-val {{ color: #58a6ff; font-size: 1.25rem; font-weight: 900; font-variant-numeric: tabular-nums; }}
+.el-leader-name {{
+  color: #e6edf3; font-size: 0.82rem; font-weight: 800; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}}
+.el-section-title {{
+  color: #9aa4b2; font-size: 0.7rem; font-weight: 800; text-transform: uppercase;
+  letter-spacing: 0.5px; margin: 2px 0 -4px;
+}}
+.el-player-grid {{
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 9px;
+}}
+.el-player {{
+  min-width: 0; border: 1px solid #222b38; border-radius: 8px; padding: 10px;
+  background: rgba(22,27,34,0.64); position: relative; cursor: pointer;
+}}
+.el-player:hover {{ border-color: #1f6feb55; background: rgba(31,111,235,0.09); }}
+.el-player.open {{ z-index: 30; border-color: #58a6ff88; }}
+.el-player-top {{ display: flex; align-items: center; gap: 9px; min-width: 0; margin-bottom: 9px; }}
+.el-avatar {{
+  width: 34px; height: 34px; border-radius: 50%; flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: #1f6feb22; border: 1px solid #1f6feb55; color: #79b8ff;
+  font-size: 0.78rem; font-weight: 900; font-variant-numeric: tabular-nums;
+}}
+.el-player-id {{ min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }}
+.el-name {{
+  color: #e6edf3; font-size: 0.84rem; font-weight: 800; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}}
+.el-pos-label {{ color: #8b949e; font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; }}
+.el-marks {{ display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }}
+.el-mark {{
+  min-width: 22px; height: 20px; border-radius: 999px; padding: 0 6px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  color: #e6edf3; font-size: 0.66rem; font-weight: 900; font-variant-numeric: tabular-nums;
+  border: 1px solid #263241; background: #0d1117;
+}}
+.el-mark.goal {{ border-color: #1f6feb55; background: #1f6feb18; color: #79b8ff; }}
+.el-card-dot {{ width: 8px; height: 11px; border-radius: 1px; display: inline-block; }}
+.el-card-dot.yellow {{ background: #f5c542; }}
+.el-card-dot.red {{ background: #ef4444; }}
+.el-pos-group {{ display: flex; flex-direction: column; gap: 9px; }}
+.el-pos-head {{
+  display: flex; align-items: center; gap: 8px; color: #c9d1d9;
+  font-size: 0.78rem; font-weight: 900; text-transform: uppercase; letter-spacing: 0.5px;
+}}
+.el-pos-count {{ color: #6b7280; font-size: 0.7rem; font-weight: 800; }}
+.el-stat-grid {{ display: flex; flex-wrap: wrap; gap: 5px; }}
+.el-stat {{
+  display: inline-flex; align-items: baseline; gap: 5px; min-width: 0;
+  border: 1px solid #263241; border-radius: 6px; padding: 3px 6px;
+  background: #0d1117; font-variant-numeric: tabular-nums;
+}}
+.el-stat b {{ color: #e6edf3; font-size: 0.78rem; }}
+.el-stat span {{ color: #8b949e; font-size: 0.66rem; font-weight: 700; }}
+.el-stat.hot {{ border-color: #1f6feb55; background: #1f6feb18; }}
+.el-stat.warn {{ border-color: #f5c54255; background: #f5c54214; }}
+.el-stat.danger {{ border-color: #ef444455; background: #ef444414; }}
+.el-unused {{
+  border-top: 1px solid #21262d; padding-top: 12px;
+}}
+.el-unused-group {{ margin-top: 9px; }}
+.el-unused-group:first-of-type {{ margin-top: 8px; }}
+.el-unused-head {{ color: #8b949e; font-size: 0.68rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.4px; }}
+.el-unused-list {{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }}
+.el-unused-chip {{
+  color: #8b949e; background: #161b22; border: 1px solid #222b38;
+  border-radius: 6px; padding: 4px 7px; font-size: 0.72rem; font-weight: 700;
+}}
+.pcard.el-pop {{
+  position: fixed; left: var(--el-pop-left, 16px); top: var(--el-pop-top, 16px);
+  right: auto; transform: translate(var(--pc-x, 0px), var(--pc-y, 0px));
+  z-index: 10000; width: 260px; max-height: calc(100vh - 16px); overflow: auto;
+}}
+.pcard.el-pop .pc-head {{ cursor: move; touch-action: none; }}
+.pcard.el-pop .pc-num {{ background: #1f6feb; }}
+.pcard.el-pop .pc-meta {{ grid-template-columns: 1fr; min-height: 0; padding: 9px 12px 0; }}
+.pcard.el-pop .pc-meta-side {{ gap: 7px; }}
+@media (max-width: 760px) {{
+  .el-leaders {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+  .el-player-grid {{ grid-template-columns: 1fr; }}
+  .pcard.el-pop {{ width: min(260px, calc(100vw - 16px)); }}
+}}
+
 /* ── aba Jogos: card de jogo (accordion) ── */
 .mg {{
   background: #161b22; border: 1px solid #21262d; border-radius: 10px;
@@ -1955,25 +2351,42 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 }}
 .mg.open {{ border-color: #1f6feb55; }}
 .mg-head {{
-  display: flex; align-items: center; gap: 12px; padding: 12px 16px; cursor: pointer;
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  padding: 12px 116px; cursor: pointer;
   transition: background 0.15s;
 }}
 .mg-head:hover {{ background: #1a212b; }}
-/* lados do confronto: mandante (esq) e visitante (dir), agrupados à esquerda */
-.mg-side {{ min-width: 0; color: #8b949e; white-space: nowrap; }}
+/* confronto centralizado: time 1 bandeira 5 x 1 bandeira time 2 */
+.mg-match {{
+  width: 100%; min-width: 0;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center; gap: 10px;
+}}
+.mg-side {{ min-width: 0; color: #8b949e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+.mg-side.left {{ text-align: right; }}
+.mg-side.right {{ text-align: left; }}
 .mg-side.me {{ color: #e6edf3; }}                 /* a seleção sendo vista, destacada */
 .mg-score {{
-  font-weight: 800; font-size: 1rem; flex-shrink: 0; padding: 3px 12px; border-radius: 6px;
+  justify-self: center;
+  font-weight: 800; font-size: 1rem; padding: 3px 12px; border-radius: 6px;
   background: #21262d; font-variant-numeric: tabular-nums; text-align: center; min-width: 64px;
 }}
 .mg-score.res-V {{ background: #22c55e22; color: #22c55e; }}
 .mg-score.res-E {{ background: #6b728022; color: #9ca3af; }}
 .mg-score.res-D {{ background: #ef444422; color: #ef4444; }}
 .mg-score.res-next {{ background: #21262d; color: #6b7280; }}
-.mg-meta {{ flex-shrink: 0; margin-left: auto; }}  /* empurra data + chevron pra direita */
-.mg-chevron {{ color: #6b7280; font-size: 0.7rem; flex-shrink: 0; }}
+.mg-date {{
+  position: absolute; right: 36px; top: 50%; transform: translateY(-50%);
+  color: #58a6ff; font-size: 0.76rem; font-weight: 700; font-variant-numeric: tabular-nums;
+  background: #1f6feb1a; border: 1px solid #1f6feb33; border-radius: 6px; padding: 3px 8px;
+}}
+.mg-chevron {{
+  position: absolute; right: 14px; top: 50%; transform: translateY(-50%);
+  color: #6b7280; font-size: 0.7rem;
+}}
 .mg-detail {{ padding: 4px 16px 16px; border-top: 1px solid #21262d; }}
-/* título de fase + jogos agendados (não clicáveis) */
+/* jogos agendados (não clicáveis) */
 .mg-phase {{
   font-size: 0.72rem; color: #58a6ff; text-transform: uppercase; letter-spacing: 0.6px;
   font-weight: 700; margin: 16px 0 8px;
@@ -2006,15 +2419,87 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 .gd-evp.clickable {{ cursor: pointer; }}
 .gd-evp.clickable:hover {{ color: #58a6ff; text-decoration: underline; }}
 
-.gd-stat {{ margin-bottom: 10px; }}
-.gd-stat-vals {{ display: flex; align-items: center; font-size: 0.82rem; color: #8b949e; }}
-.gd-stat-vals span:first-child {{ width: 56px; text-align: left; font-weight: 700; color: #c9d1d9; }}
-.gd-stat-vals span:last-child {{ width: 56px; text-align: right; font-weight: 700; color: #c9d1d9; }}
-.gd-stat-vals .gd-stat-lbl {{ flex: 1; text-align: center; font-weight: 400; color: #8b949e; }}
-.gd-stat-vals .hi {{ color: #58a6ff !important; }}
-.gd-bar {{ height: 5px; background: #ef444433; border-radius: 3px; margin-top: 4px; overflow: hidden; }}
-.gd-bar-mine {{ height: 100%; background: #58a6ff; border-radius: 3px; transition: width 0.3s; }}
-.gd-stat-head {{ display: flex; justify-content: space-between; font-size: 0.74rem; font-weight: 700; color: #8b949e; margin-bottom: 10px; }}
+.gd-stats-board {{
+  border: 1px solid #263241; border-radius: 8px; padding: 14px 16px 16px;
+  background:
+    linear-gradient(180deg, rgba(22,27,34,0.96), rgba(13,17,23,0.96)),
+    radial-gradient(circle at 50% 0%, rgba(88,166,255,0.12), transparent 48%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+}}
+.gd-stat-legend {{
+  display: grid; grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr);
+  align-items: center; gap: 10px; margin-bottom: 12px;
+}}
+.gd-side-key {{
+  min-width: 0; display: flex; align-items: center; gap: 7px;
+  font-size: 0.78rem; font-weight: 800; color: #c9d1d9;
+}}
+.gd-side-key.left {{ justify-content: flex-end; color: #79b8ff; }}
+.gd-side-key.right {{ justify-content: flex-start; color: #ff8b8b; }}
+.gd-side-key b {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.gd-axis-dot {{
+  justify-self: center; width: 5px; height: 5px; border-radius: 50%; background: #3b4452;
+  box-shadow: 0 0 0 4px rgba(48,56,70,0.22);
+}}
+.gd-spotlight {{
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px;
+}}
+.gd-spot {{
+  min-width: 0; border: 1px solid #263241; border-radius: 8px; padding: 10px 11px;
+  background: rgba(13,17,23,0.72);
+}}
+.gd-spot-top {{ display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }}
+.gd-spot-title {{ color: #9aa4b2; font-size: 0.72rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.4px; }}
+.gd-spot-edge {{
+  max-width: 58%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #e6edf3; font-size: 0.68rem; font-weight: 800;
+}}
+.gd-spot-edge.left {{ color: #79b8ff; }}
+.gd-spot-edge.right {{ color: #ff8b8b; }}
+.gd-spot-edge.even {{ color: #9aa4b2; }}
+.gd-spot-values {{
+  display: grid; grid-template-columns: minmax(0, 1fr) 18px minmax(0, 1fr);
+  align-items: baseline; gap: 6px; margin-bottom: 8px;
+}}
+.gd-spot-num {{
+  font-size: 1.08rem; font-weight: 900; font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}}
+.gd-spot-num.left {{ color: #79b8ff; text-align: right; }}
+.gd-spot-num.right {{ color: #ff8b8b; text-align: left; }}
+.gd-spot-x {{ color: #6b7280; text-align: center; font-size: 0.72rem; font-weight: 800; }}
+.gd-balance {{
+  position: relative; display: grid; grid-template-columns: 1fr 1fr; gap: 3px; height: 6px;
+}}
+.gd-balance::after {{
+  content: ''; position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px;
+  background: #3b4452; transform: translateX(-50%);
+}}
+.gd-bal-half {{ position: relative; overflow: hidden; border-radius: 999px; background: #202733; }}
+.gd-bal-fill {{ position: absolute; top: 0; bottom: 0; border-radius: 999px; }}
+.gd-bal-half.left .gd-bal-fill {{ right: 0; background: linear-gradient(90deg, #1f6feb, #58a6ff); }}
+.gd-bal-half.right .gd-bal-fill {{ left: 0; background: linear-gradient(90deg, #ef4444, #ff7b72); }}
+.gd-mini-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }}
+.gd-mini-stat {{
+  min-width: 0; border: 1px solid #222b38; border-radius: 8px; padding: 9px 10px;
+  background: rgba(22,27,34,0.64);
+}}
+.gd-mini-label {{
+  color: #9aa4b2; font-size: 0.7rem; font-weight: 700; margin-bottom: 7px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}}
+.gd-mini-values {{
+  display: grid; grid-template-columns: minmax(0, 1fr) 14px minmax(0, 1fr);
+  align-items: baseline; gap: 5px; font-variant-numeric: tabular-nums;
+}}
+.gd-mini-v {{ font-size: 0.92rem; font-weight: 900; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.gd-mini-v.left {{ color: #79b8ff; text-align: right; }}
+.gd-mini-v.right {{ color: #ff8b8b; text-align: left; }}
+.gd-mini-sep {{ color: #4b5563; text-align: center; font-size: 0.68rem; font-weight: 800; }}
+@media (max-width: 760px) {{
+  .gd-spotlight {{ grid-template-columns: 1fr; }}
+  .gd-mini-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+}}
 
 /* mini-abas dentro do jogo */
 .gd-tabs {{ display: flex; gap: 2px; margin: 12px 0 4px; border-bottom: 1px solid #21262d; }}
@@ -2103,6 +2588,8 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
   background: repeating-linear-gradient(90deg, #1f7a3a 0 11.11%, #1c6f35 11.11% 22.22%);
   border: 2px solid #ffffff40; border-radius: 8px; overflow: hidden;
 }}
+/* quando um card de jogador está aberto, deixa ele transbordar o campo */
+.pitch-h.pitch-vs.has-card {{ overflow: visible; }}
 .pitch-vs .pitch-player {{
   position: absolute; transform: translate(-50%, -50%);
   display: flex; flex-direction: column; align-items: center; width: 76px; z-index: 1;
@@ -2124,29 +2611,71 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 .pl-goal-h.left {{ left: -3px; }}
 .pl-goal-h.right {{ right: -3px; }}
 
-/* card flutuante de dados do jogador (popover ancorado no jogador) */
+/* ── card flutuante de dados do jogador (popover ancorado no jogador) ── */
 .pcard {{
-  position: absolute; bottom: 115%; left: 50%; transform: translateX(-50%);
-  z-index: 5; width: 190px; cursor: default;
-  background: #0d1117; border: 1px solid #30363d; border-radius: 10px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.7); padding: 10px 12px; text-align: left;
+  position: absolute; left: 50%; z-index: 6; width: 248px; cursor: default;
+  background: linear-gradient(180deg, #161b22, #0d1117);
+  border: 1px solid #30363d; border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.75); text-align: left; overflow: hidden;
 }}
-/* jogadores perto da borda: joga o card pra dentro */
-.pcard-away {{ left: auto; right: 50%; transform: translateX(50%); }}
-.pc-head {{ display: flex; align-items: center; gap: 7px; }}
+.pcard.v-above {{ bottom: 130%; transform: translate(calc(-50% + var(--pc-x, 0px)), var(--pc-y, 0px)); }}
+.pcard.v-below {{ top: 130%; transform: translate(calc(-50% + var(--pc-x, 0px)), var(--pc-y, 0px)); }}
+.pcard.h-l {{ left: auto; right: 50%; transform: translate(calc(40% + var(--pc-x, 0px)), var(--pc-y, 0px)); }}
+.pcard.h-r {{ left: 50%; transform: translate(calc(-40% + var(--pc-x, 0px)), var(--pc-y, 0px)); }}
+.pcard.dragging {{ user-select: none; box-shadow: 0 20px 48px rgba(0,0,0,0.85), 0 0 0 1px #58a6ff66; }}
+
+.pc-head {{
+  display: flex; align-items: center; gap: 10px; padding: 11px 12px;
+  background: #1c2330; border-bottom: 1px solid #21262d;
+  cursor: move; touch-action: none;
+}}
 .pc-num {{
-  background: #21262d; color: #c9d1d9; font-size: 0.66rem; font-weight: 800;
-  border-radius: 5px; padding: 1px 6px; flex-shrink: 0;
+  background: #d6342c; color: #fff; font-size: 0.8rem; font-weight: 900;
+  width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
 }}
-.pc-name {{ font-size: 0.84rem; font-weight: 800; color: #e6edf3; flex: 1; line-height: 1.1; }}
-.pc-close {{ background: transparent; border: none; color: #8b949e; cursor: pointer; font-size: 0.8rem; padding: 0 2px; }}
-.pc-close:hover {{ color: #e6edf3; }}
-.pc-pos {{ font-size: 0.66rem; color: #8b949e; margin-top: 2px; }}
-.pc-ctx {{ font-size: 0.72rem; color: #f5c542; margin: 7px 0; }}
-.pc-stats {{ display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; margin-top: 6px; }}
-.pc-row {{ display: flex; justify-content: space-between; font-size: 0.72rem; color: #8b949e; padding: 2px 0; }}
-.pc-row b {{ color: #e6edf3; font-variant-numeric: tabular-nums; }}
-.pc-empty {{ font-size: 0.72rem; color: #6b7280; grid-column: 1/-1; }}
+.pc-id {{ flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }}
+.pc-name {{ font-size: 0.92rem; font-weight: 800; color: #e6edf3; line-height: 1.1; }}
+.pc-pos {{ font-size: 0.66rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.4px; }}
+.pc-close {{
+  background: transparent; border: none; color: #8b949e; cursor: pointer;
+  font-size: 0.95rem; padding: 2px 4px; border-radius: 5px; flex-shrink: 0;
+}}
+.pc-close:hover {{ background: #30363d; color: #e6edf3; }}
+
+.pc-meta {{
+  display: grid; grid-template-columns: 50px 1fr; align-items: center; gap: 10px;
+  min-height: 46px; padding: 10px 12px 0;
+}}
+.pc-rating {{
+  display: flex; flex-direction: column; align-items: center; line-height: 1;
+  background: #1f6feb1f; border: 1px solid #1f6feb55; border-radius: 8px;
+  padding: 5px 10px; font-size: 1.15rem; font-weight: 900; color: #58a6ff;
+}}
+.pc-rating small {{ font-size: 0.54rem; font-weight: 600; color: #8b949e; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.4px; }}
+.pc-rating.empty {{ visibility: hidden; }}
+.pc-meta-side {{
+  min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 6px;
+}}
+.pc-chip {{ font-size: 0.72rem; color: #8b949e; }}
+
+.pc-ctx {{ display: flex; flex-wrap: wrap; gap: 5px; min-height: 18px; align-items: center; }}
+.pc-ctx.empty {{ visibility: hidden; }}
+.pc-tag {{ font-size: 0.68rem; font-weight: 700; border-radius: 6px; padding: 2px 7px; }}
+.pc-tag.goal {{ background: #1f6feb22; color: #79b8ff; }}
+.pc-tag.amarelo {{ background: #f5c54222; color: #f5c542; }}
+.pc-tag.vermelho {{ background: #ef444422; color: #ef4444; }}
+.pc-tag.out {{ background: #ef444418; color: #f0867d; }}
+.pc-tag.in {{ background: #22c55e22; color: #4ade80; }}
+
+.pc-group {{ padding: 10px 12px 0; }}
+.pc-group:last-child {{ padding-bottom: 12px; }}
+.pc-gt {{ font-size: 0.62rem; color: #58a6ff; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; margin-bottom: 6px; }}
+.pc-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 5px 14px; }}
+.pc-stat {{ display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }}
+.pc-sl {{ font-size: 0.72rem; color: #8b949e; }}
+.pc-sv {{ font-size: 0.82rem; font-weight: 800; color: #e6edf3; font-variant-numeric: tabular-nums; }}
+.pc-empty {{ font-size: 0.74rem; color: #6b7280; padding: 12px; }}
 
 /* campo ocupa toda a largura em cima */
 .lv1-center {{ width: 100%; min-width: 0; }}
@@ -2167,10 +2696,13 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 /* marcação de substituição no campo / reservas */
 .pitch-shirt {{ position: relative; }}
 .pitch-player.subbed-out .pitch-shirt {{ opacity: 0.6; }}
+/* minuto de saída: canto inferior-direito da camisa (cartão fica no topo-esq,
+   gol no topo-dir — assim os três marcadores não se sobrepõem) */
 .sub-out {{
-  position: absolute; top: -6px; right: -14px;
-  font-size: 0.56rem; font-weight: 800; color: #fff;
-  background: #ef4444; border-radius: 8px; padding: 1px 4px; white-space: nowrap;
+  position: absolute; bottom: -5px; right: -10px;
+  font-size: 0.52rem; font-weight: 800; color: #fff;
+  background: #ef4444; border-radius: 8px; padding: 0 4px; white-space: nowrap;
+  border: 1px solid #0d1117;
 }}
 .md-xi .pl.used {{ border-color: #22c55e66; background: #14241a; opacity: 1; }}
 .sub-in {{ color: #22c55e; font-weight: 700; }}
@@ -2955,37 +3487,6 @@ function buildCardBody(team) {{
   let colsHtml = '';
   METRIC_GROUPS.forEach(([groupLabel, colCls, metrics]) => {{
     colsHtml += `<div class="tt-col ${{colCls}}"><div class="tt-col-title">${{groupLabel}}</div>`;
-    // ── Estilo: layout BIPOLAR (polo baixo ◄─●─► polo alto + nota) ──
-    if (colCls === 'tt-col-estilo') {{
-      metrics.forEach(([key, label]) => {{
-        const val = t[key];
-        const pole = STYLE_POLES[key] || {{ low: '', high: '' }};
-        const isActive   = key === currentMetric;
-        const isRelated  = !isActive && related.has(key);
-        const isIndirect = !isActive && !isRelated && indirect.has(key);
-        const cls = isActive ? ' active' : isRelated ? ' related' : isIndirect ? ' related-indirect' : '';
-        // posição do marcador na barra: 0-100, 50 = centro (média do torneio)
-        const pos = val === null || val === undefined ? 50 : Math.max(0, Math.min(100, val));
-        const mr = metricRank(key, allTeams, team, sortDir);
-        const rkBadge = mr ? `<span class="tt-rank">${{mr.rank}}°${{mr.tied ? '=' : ''}}</span>` : '';
-        colsHtml += `<div class="tt-row tt-style-row${{cls}}" data-metric="${{key}}">
-          <div class="tt-style-poles">
-            <span class="tt-pole-low">${{pole.low}}</span>
-            <span class="tt-pole-high">${{pole.high}}</span>
-          </div>
-          <div class="tt-style-bar">
-            <span class="tt-style-mid"></span>
-            <span class="tt-style-dot" style="left:${{pos}}%"></span>
-          </div>
-          <div class="tt-style-foot">
-            <span class="tt-style-name">${{label}}</span>
-            <span class="tt-valwrap"><span class="tt-val">${{formatVal(val, key)}}</span>${{rkBadge}}</span>
-          </div>
-        </div>`;
-      }});
-      colsHtml += '</div>';
-      return;
-    }}
     metrics.forEach(([key, label]) => {{
       const val = t[key];
       const isActive   = key === currentMetric;
@@ -3461,8 +3962,10 @@ function openTeamModal(team) {{
   modalTeam = team;
   modalTab = 'scores';
   expandedGame = null;
+  openRosterPlayer = null;
   const tabs = [
     ['scores', 'Resumo'],
+    ['estilo', 'Estilo'],
     ['jogos', 'Jogos (' + (d.jogos ? d.jogos.length : 0) + ')'],
     ['elenco', 'Elenco (' + (d.players ? d.players.length : 0) + ')'],
   ];
@@ -3475,19 +3978,25 @@ function openTeamModal(team) {{
 
 function closeTeamModal() {{
   document.getElementById('teamModal').style.display = 'none';
+  openPlayerCards.clear();
+  openRosterPlayer = null;
+  highlightedPlayer = null;
   modalTeam = null;
 }}
 
 function switchModalTab(t) {{
   modalTab = t;
   expandedGame = null;  // ao trocar de aba, fecha qualquer jogo expandido
+  openPlayerCards.clear();
+  openRosterPlayer = null;
+  highlightedPlayer = null;
   document.querySelectorAll('.modal-tab').forEach(b =>
     b.classList.toggle('active', b.dataset.mt === t));
   renderModalBody();
 }}
 
 function toggleGame(i) {{
-  cardPlayer = null; highlightedPlayer = null;
+  openPlayerCards.clear(); highlightedPlayer = null;
   if (expandedGame === i) {{ expandedGame = null; }}
   else {{ expandedGame = i; gameDetailTab = 'historia'; }}  // abre na História
   renderModalBody();
@@ -3495,26 +4004,117 @@ function toggleGame(i) {{
 
 let gameDetailTab = 'historia';  // mini-aba ativa dentro do jogo expandido
 let highlightedPlayer = null;     // jogador destacado no campo (par da troca)
-let cardPlayer = null;            // jogador com o card de dados aberto (popover)
+const openPlayerCards = new Set(); // jogadores com card de dados aberto
+let openRosterPlayer = null;       // card acumulado aberto na aba Elenco
+const rosterCardAnchors = {{}};
+const playerCardOffsets = {{}};      // chave jogador/jogo -> deslocamento arrastado
+let playerCardDrag = null;
+
+function _playerCardKey(name) {{
+  return `${{modalTeam || ''}}|${{expandedGame ?? ''}}|${{name || ''}}`;
+}}
+
+function _rosterCardKey(name) {{
+  return `${{modalTeam || ''}}|elenco|${{name || ''}}`;
+}}
+
+function startPlayerCardDrag(ev, key) {{
+  if (ev.button != null && ev.button !== 0) return;
+  if (ev.target.closest('.pc-close')) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  const card = ev.currentTarget.closest('.pcard');
+  const off = playerCardOffsets[key] || {{ x: 0, y: 0 }};
+  playerCardDrag = {{
+    key, card,
+    startX: ev.clientX,
+    startY: ev.clientY,
+    baseX: off.x || 0,
+    baseY: off.y || 0,
+    fixed: card.classList.contains('el-pop'),
+    anchorLeft: parseFloat(getComputedStyle(card).left) || 0,
+    anchorTop: parseFloat(getComputedStyle(card).top) || 0,
+  }};
+  card.classList.add('dragging');
+  ev.currentTarget.setPointerCapture?.(ev.pointerId);
+}}
+
+function movePlayerCardDrag(ev) {{
+  if (!playerCardDrag) return;
+  ev.preventDefault();
+  let x = playerCardDrag.baseX + ev.clientX - playerCardDrag.startX;
+  let y = playerCardDrag.baseY + ev.clientY - playerCardDrag.startY;
+  if (playerCardDrag.fixed) {{
+    const margin = 8;
+    const w = playerCardDrag.card.offsetWidth || 260;
+    const h = playerCardDrag.card.offsetHeight || 260;
+    x = Math.max(margin - playerCardDrag.anchorLeft, Math.min(x, window.innerWidth - margin - w - playerCardDrag.anchorLeft));
+    y = Math.max(margin - playerCardDrag.anchorTop, Math.min(y, window.innerHeight - margin - h - playerCardDrag.anchorTop));
+  }}
+  playerCardOffsets[playerCardDrag.key] = {{ x, y }};
+  playerCardDrag.card.style.setProperty('--pc-x', `${{x}}px`);
+  playerCardDrag.card.style.setProperty('--pc-y', `${{y}}px`);
+}}
+
+function endPlayerCardDrag() {{
+  if (!playerCardDrag) return;
+  playerCardDrag.card.classList.remove('dragging');
+  playerCardDrag = null;
+}}
+
+document.addEventListener('pointermove', movePlayerCardDrag);
+document.addEventListener('pointerup', endPlayerCardDrag);
+document.addEventListener('pointercancel', endPlayerCardDrag);
 
 function switchGameTab(t) {{
   gameDetailTab = t;
   highlightedPlayer = null;
-  cardPlayer = null;
+  openPlayerCards.clear();
   renderModalBody();
 }}
 
-// clica num jogador no campo → abre o card de dados + destaca (e o par da troca)
+// clica num jogador no campo → alterna o card dele, sem fechar os outros
 function showPlayerCard(name) {{
-  if (cardPlayer === name) {{ cardPlayer = null; highlightedPlayer = null; }}
-  else {{ cardPlayer = name; highlightedPlayer = name; }}
+  if (openPlayerCards.has(name)) {{
+    openPlayerCards.delete(name);
+    highlightedPlayer = highlightedPlayer === name
+      ? (Array.from(openPlayerCards).pop() || null)
+      : highlightedPlayer;
+  }} else {{
+    openPlayerCards.add(name);
+    highlightedPlayer = name;
+  }}
+  renderModalBody();
+}}
+
+function showRosterPlayer(name, anchorEl = null) {{
+  const key = _rosterCardKey(name);
+  if (openRosterPlayer === name) {{
+    openRosterPlayer = null;
+    renderModalBody();
+    return;
+  }}
+  openRosterPlayer = name;
+  if (anchorEl) {{
+    const rect = anchorEl.getBoundingClientRect();
+    const margin = 8;
+    const w = Math.min(260, window.innerWidth - margin * 2);
+    const estimatedH = 286;
+    let left = rect.left + rect.width / 2 - w / 2;
+    left = Math.max(margin, Math.min(left, window.innerWidth - margin - w));
+    let top = rect.bottom + 8;
+    if (top + estimatedH > window.innerHeight - margin) top = rect.top - estimatedH - 8;
+    top = Math.max(margin, Math.min(top, window.innerHeight - margin - 120));
+    rosterCardAnchors[key] = {{ left: Math.round(left), top: Math.round(top) }};
+    playerCardOffsets[key] = {{ x: 0, y: 0 }};
+  }}
   renderModalBody();
 }}
 
 // clica num reserva/timeline → destaca a troca (sem abrir card)
 function highlightSub(name) {{
   highlightedPlayer = (highlightedPlayer === name) ? null : name;
-  cardPlayer = null;
+  openPlayerCards.clear();
   renderModalBody();
 }}
 
@@ -3522,40 +4122,108 @@ function highlightSub(name) {{
 function focusPlayer(name) {{
   if (!name) return;
   gameDetailTab = 'escalacao';
-  cardPlayer = name;
+  openPlayerCards.add(name);
   highlightedPlayer = name;
   renderModalBody();
 }}
 
-// monta o card flutuante com as stats do jogador na partida
-const _STAT_ROWS = [
-  ['rating', 'Nota', v => v.toFixed ? v.toFixed(1) : v],
-  ['goals', 'Gols'], ['assists', 'Assistências'],
-  ['shots', 'Finalizações'], ['on_target', 'No alvo'],
-  ['key_passes', 'Passes-chave'], ['xa', 'xA', v => (+v).toFixed(2)],
-  ['pass_acc', '% passes', v => v + '%'],
-  ['saves', 'Defesas'],
-  ['fouls_committed', 'Faltas'], ['fouls_drawn', 'Faltas sofridas'],
-  ['offsides', 'Impedimentos'], ['minutes', 'Minutos', v => v + "'"],
+// monta o card flutuante com as stats do jogador na partida.
+// Mantém só métricas básicas/comparáveis; criação avançada (passes-chave/xA)
+// depende de cobertura parcial da 365Scores e fica fora deste popover.
+const _STAT_GROUPS = [
+  ['Ataque', [
+    ['goals', 'Gols'], ['assists', 'Assistências'],
+    ['shots', 'Finalizações'], ['on_target', 'No alvo'],
+  ]],
+  ['Posse & defesa', [
+    ['pass_acc', 'Acerto de passe', v => v + '%'], ['saves', 'Defesas'],
+    ['fouls_committed', 'Faltas'], ['fouls_drawn', 'Faltas sofridas'],
+    ['offsides', 'Impedimentos'],
+  ]],
 ];
-function _playerCardHtml(p, who) {{
+function _playerCardHtml(p, vside, hside) {{
   const st = p.stats || {{}};
+  // tags de contexto (gol/cartão/entrada-saída)
   const ctx = [];
-  if (p.goals) ctx.push(`⚽ ${{p.goals}} gol${{p.goals > 1 ? 's' : ''}}`);
-  if (p.card) ctx.push(p.card === 'vermelho' ? '🟥 expulso' : '🟨 amarelo');
-  if (p.exited) ctx.push(`↓ saiu ${{p.exited}}'`);
-  if (p.entered) ctx.push(`↑ entrou ${{p.entered}}'`);
-  const rows = _STAT_ROWS
-    .filter(([k]) => st[k] != null)
-    .map(([k, lbl, fmt]) => `<div class="pc-row"><span>${{lbl}}</span><b>${{fmt ? fmt(st[k]) : st[k]}}</b></div>`)
-    .join('');
-  const body = rows || '<div class="pc-empty">Sem estatísticas detalhadas.</div>';
-  return `<div class="pcard pcard-${{who}}" onclick="event.stopPropagation()">
-    <div class="pc-head"><span class="pc-num">${{p.num ?? ''}}</span><span class="pc-name">${{p.name}}</span>
-      <button class="pc-close" onclick="event.stopPropagation();showPlayerCard('${{(p.name||'').replace(/'/g, "\\\\'")}}')">✕</button></div>
-    ${{p.pos ? `<div class="pc-pos">${{p.pos}}</div>` : ''}}
-    ${{ctx.length ? `<div class="pc-ctx">${{ctx.join(' · ')}}</div>` : ''}}
-    <div class="pc-stats">${{body}}</div>
+  if (p.goals) ctx.push(`<span class="pc-tag goal">⚽ ${{p.goals}} gol${{p.goals > 1 ? 's' : ''}}</span>`);
+  if (p.card) ctx.push(`<span class="pc-tag ${{p.card}}">${{p.card === 'vermelho' ? '🟥 Expulso' : '🟨 Amarelo'}}</span>`);
+  if (p.exited) ctx.push(`<span class="pc-tag out">↓ Saiu ${{p.exited}}'</span>`);
+  if (p.entered) ctx.push(`<span class="pc-tag in">↑ Entrou ${{p.entered}}'</span>`);
+
+  // grupos de stats — só renderiza grupo que tiver ao menos um valor
+  const groups = _STAT_GROUPS.map(([title, rows]) => {{
+    const cells = rows.filter(([k]) => st[k] != null)
+      .map(([k, lbl, fmt]) => `<div class="pc-stat"><span class="pc-sl">${{lbl}}</span><span class="pc-sv">${{fmt ? fmt(st[k]) : st[k]}}</span></div>`)
+      .join('');
+    return cells ? `<div class="pc-group"><div class="pc-gt">${{title}}</div><div class="pc-grid">${{cells}}</div></div>` : '';
+  }}).join('');
+
+  // topo estável: nota à esquerda, minutos/tags à direita, sempre com mesma altura.
+  const ratingHtml = st.rating != null
+    ? `<span class="pc-rating">${{(+st.rating).toFixed(1)}}<small>nota</small></span>`
+    : '<span class="pc-rating empty">0.0<small>nota</small></span>';
+  const minutesHtml = st.minutes != null
+    ? `<span class="pc-chip">${{st.minutes}}' em campo</span>`
+    : '<span class="pc-chip">&nbsp;</span>';
+  const ctxHtml = ctx.length
+    ? `<div class="pc-ctx">${{ctx.join('')}}</div>`
+    : '<div class="pc-ctx empty"><span class="pc-tag">placeholder</span></div>';
+
+  const key = _playerCardKey(p.name);
+  const off = playerCardOffsets[key] || {{ x: 0, y: 0 }};
+  const keyEsc = key.replace(/\\\\/g, "\\\\\\\\").replace(/'/g, "\\\\'");
+  const esc = (p.name || '').replace(/'/g, "\\\\'");
+  return `<div class="pcard v-${{vside}} h-${{hside}}" style="--pc-x:${{off.x || 0}}px;--pc-y:${{off.y || 0}}px" onclick="event.stopPropagation()">
+    <div class="pc-head" onpointerdown="startPlayerCardDrag(event, '${{keyEsc}}')">
+      <span class="pc-num">${{p.num ?? ''}}</span>
+      <div class="pc-id"><span class="pc-name">${{p.name}}</span>${{p.pos ? `<span class="pc-pos">${{p.pos}}</span>` : ''}}</div>
+      <button class="pc-close" onclick="event.stopPropagation();showPlayerCard('${{esc}}')">✕</button>
+    </div>
+    <div class="pc-meta">${{ratingHtml}}<div class="pc-meta-side">${{minutesHtml}}${{ctxHtml}}</div></div>
+    ${{groups || '<div class="pc-empty">Sem estatísticas detalhadas.</div>'}}
+  </div>`;
+}}
+
+function _rosterPlayerCardHtml(p) {{
+  const n = (k) => p[k] == null ? 0 : Number(p[k] || 0);
+  const ctx = [];
+  if (n('gols')) ctx.push(`<span class="pc-tag goal">⚽ ${{n('gols')}} gol${{n('gols') > 1 ? 's' : ''}}</span>`);
+  if (n('amarelos')) ctx.push(`<span class="pc-tag amarelo">🟨 ${{n('amarelos')}} amarelo${{n('amarelos') > 1 ? 's' : ''}}</span>`);
+  if (n('vermelhos')) ctx.push(`<span class="pc-tag vermelho">🟥 ${{n('vermelhos')}} vermelho${{n('vermelhos') > 1 ? 's' : ''}}</span>`);
+
+  const group = (title, rows) => {{
+    const cells = rows
+      .filter(([, v]) => v != null)
+      .map(([lbl, v]) => `<div class="pc-stat"><span class="pc-sl">${{lbl}}</span><span class="pc-sv">${{v}}</span></div>`)
+      .join('');
+    return cells ? `<div class="pc-group"><div class="pc-gt">${{title}}</div><div class="pc-grid">${{cells}}</div></div>` : '';
+  }};
+
+  const escName = _esc(p.name || '');
+  const closeName = (p.name || '').replace(/'/g, "\\\\'");
+  const key = _rosterCardKey(p.name);
+  const keyEsc = key.replace(/\\\\/g, "\\\\\\\\").replace(/'/g, "\\\\'");
+  const anchor = rosterCardAnchors[key] || {{ left: 16, top: 16 }};
+  const off = playerCardOffsets[key] || {{ x: 0, y: 0 }};
+  const ctxHtml = ctx.length
+    ? `<div class="pc-ctx">${{ctx.join('')}}</div>`
+    : '<div class="pc-ctx empty"><span class="pc-tag">placeholder</span></div>';
+  return `<div class="pcard el-pop" style="--el-pop-left:${{anchor.left}}px;--el-pop-top:${{anchor.top}}px;--pc-x:${{off.x || 0}}px;--pc-y:${{off.y || 0}}px" onclick="event.stopPropagation()">
+    <div class="pc-head" onpointerdown="startPlayerCardDrag(event, '${{keyEsc}}')">
+      <span class="pc-num">${{p.num ?? ''}}</span>
+      <div class="pc-id"><span class="pc-name">${{escName}}</span><span class="pc-pos">${{_esc(p.pos || '—')}} · ${{_esc(p.pos_group || 'Sem posição')}}</span></div>
+      <button class="pc-close" onclick="event.stopPropagation();showRosterPlayer('${{closeName}}')">✕</button>
+    </div>
+    <div class="pc-meta"><div class="pc-meta-side"><span class="pc-chip">${{n('jogos')}} jogo${{n('jogos') === 1 ? '' : 's'}} na Copa</span>${{ctxHtml}}</div></div>
+    ${{group('Ataque', [
+      ['Gols', n('gols')], ['Assistências', n('assist')],
+      ['Finalizações', n('chutes')], ['No alvo', n('no_alvo')],
+    ])}}
+    ${{group('Posse & defesa', [
+      ['Defesas', n('defesas')], ['Amarelos', n('amarelos')],
+      ['Vermelhos', n('vermelhos')], ['Faltas', n('faltas')],
+      ['Faltas sofridas', n('faltas_sofridas')], ['Impedimentos', n('impedimentos')],
+    ])}}
   </div>`;
 }}
 
@@ -3609,18 +4277,74 @@ function renderGameDetail(g) {{
   if (active === 'historia') {{
     content = `<div class="gd-story">${{_renderStory(g.story)}}</div>`;
   }} else if (active === 'stats') {{
-    content = `<div class="gd-stat-head"><span>${{modalTeam}}</span><span>${{g.opp}}</span></div>` +
-      g.stats_cmp.map(s => {{
-        const mv = s.mine == null ? 0 : s.mine, ov = s.opp == null ? 0 : s.opp;
-        const mpct = Math.round(mv / ((mv + ov) || 1) * 100);
-        const suf = s.pct ? '%' : '';
-        return `<div class="gd-stat">
-          <div class="gd-stat-vals"><span class="${{mv >= ov ? 'hi' : ''}}">${{s.mine == null ? '—' : s.mine}}${{suf}}</span>
-            <span class="gd-stat-lbl">${{s.label}}</span>
-            <span class="${{ov > mv ? 'hi' : ''}}">${{s.opp == null ? '—' : s.opp}}${{suf}}</span></div>
-          <div class="gd-bar"><div class="gd-bar-mine" style="width:${{mpct}}%"></div></div>
-        </div>`;
-      }}).join('');
+    // segue a ordem real do confronto: mandante à esquerda, visitante à direita.
+    // s.mine = time visto, s.opp = adversário; troca os lados se o visto é visitante.
+    const homeIsMe = g.home_team === modalTeam;
+    const leftName = g.home_team || (homeIsMe ? modalTeam : g.opp);
+    const rightName = g.away_team || (homeIsMe ? g.opp : modalTeam);
+    const leftFlag = g.home_flag || '';
+    const rightFlag = g.away_flag || '';
+    const statByLabel = (label) => (g.stats_cmp || []).find(s => s.label === label);
+    const sideVals = (s) => {{
+      const lv = (homeIsMe ? s.mine : s.opp);
+      const rv = (homeIsMe ? s.opp : s.mine);
+      const lvn = lv == null ? 0 : lv, rvn = rv == null ? 0 : rv;
+      const total = lvn + rvn;
+      const suf = s.pct ? '%' : '';
+      return {{ lv, rv, lvn, rvn, suf, lpct: total ? Math.round(lvn / total * 100) : 0, rpct: total ? Math.round(rvn / total * 100) : 0 }};
+    }};
+    const fmtStat = (v, suf) => v == null ? '—' : `${{v}}${{suf}}`;
+    const fmtDiff = (v) => Number.isInteger(v) ? `${{v}}` : v.toFixed(1).replace(/\\.0$/, '');
+    const edgeText = (s, d) => {{
+      if (d.lvn === d.rvn) return 'igual';
+      return `+${{fmtDiff(Math.abs(d.lvn - d.rvn))}}${{s.pct ? ' p.p.' : ''}}`;
+    }};
+    const spotlightCard = (title, label) => {{
+      const s = statByLabel(label);
+      if (!s) return '';
+      const d = sideVals(s);
+      const edgeSide = d.lvn === d.rvn ? 'even' : (d.lvn > d.rvn ? 'left' : 'right');
+      return `<div class="gd-spot">
+        <div class="gd-spot-top"><span class="gd-spot-title">${{title}}</span><span class="gd-spot-edge ${{edgeSide}}">${{edgeText(s, d)}}</span></div>
+        <div class="gd-spot-values">
+          <span class="gd-spot-num left">${{fmtStat(d.lv, d.suf)}}</span>
+          <span class="gd-spot-x">x</span>
+          <span class="gd-spot-num right">${{fmtStat(d.rv, d.suf)}}</span>
+        </div>
+        <div class="gd-balance">
+          <div class="gd-bal-half left"><span class="gd-bal-fill" style="width:${{d.lpct}}%"></span></div>
+          <div class="gd-bal-half right"><span class="gd-bal-fill" style="width:${{d.rpct}}%"></span></div>
+        </div>
+      </div>`;
+    }};
+    const miniStat = (label) => {{
+      const s = statByLabel(label);
+      if (!s) return '';
+      const d = sideVals(s);
+      return `<div class="gd-mini-stat">
+        <div class="gd-mini-label">${{label}}</div>
+        <div class="gd-mini-values">
+          <span class="gd-mini-v left">${{fmtStat(d.lv, d.suf)}}</span>
+          <span class="gd-mini-sep">x</span>
+          <span class="gd-mini-v right">${{fmtStat(d.rv, d.suf)}}</span>
+        </div>
+      </div>`;
+    }};
+    const spotlight = [
+      spotlightCard('Posse de bola', 'Posse de bola'),
+      spotlightCard('Finalizações', 'Finalizações'),
+      spotlightCard('Precisão de passe', 'Precisão de passe'),
+    ].join('');
+    const compactStats = ['No alvo', 'Escanteios', 'Faltas', 'Impedimentos'].map(miniStat).join('');
+    content = `<div class="gd-stats-board">
+      <div class="gd-stat-legend">
+        <div class="gd-side-key left"><b>${{leftName}}</b><span>${{leftFlag}}</span></div>
+        <span class="gd-axis-dot"></span>
+        <div class="gd-side-key right"><span>${{rightFlag}}</span><b>${{rightName}}</b></div>
+      </div>
+      <div class="gd-spotlight">${{spotlight}}</div>
+      <div class="gd-mini-grid">${{compactStats}}</div>
+    </div>`;
   }} else if (active === 'escalacao') {{
     content = renderLineupView(g);
   }}
@@ -3646,8 +4370,10 @@ function _timelineHtml(g) {{
 // lista de reservas (clicável p/ destacar a troca)
 // helper de destaque: o jogador clicado + o par da troca (em qualquer dos dois times)
 function _mkIsHi(allPlayers) {{
-  return (nm) => highlightedPlayer && (nm === highlightedPlayer
-    || (allPlayers.find(x => x.name === highlightedPlayer) || {{}}).sub_with === nm);
+  return (nm) => openPlayerCards.has(nm) || (highlightedPlayer && (
+    nm === highlightedPlayer
+    || (allPlayers.find(x => x.name === highlightedPlayer) || {{}}).sub_with === nm
+  ));
 }}
 
 // lista de reservas de um time (clicável p/ destacar a troca)
@@ -3699,7 +4425,7 @@ function renderPitch(homePitch, awayPitch, isHi) {{
     if (parts.length <= 1) return parts[0] || '';
     return `${{parts[0]}}<br>${{parts.slice(1).join(' ')}}`;
   }};
-  const dimmed = highlightedPlayer ? ' dim-others' : '';
+  const dimmed = (highlightedPlayer || openPlayerCards.size) ? ' dim-others' : '';
   const esc = (s) => (s || '').replace(/'/g, "\\\\'");
   const cardMark = (p) => p.card ? `<span class="pl-card ${{p.card}}"></span>` : '';
   const goalMark = (p) => p.goals ? `<span class="pl-goal-mark">⚽${{p.goals > 1 ? `<b>${{p.goals}}</b>` : ''}}</span>` : '';
@@ -3712,7 +4438,10 @@ function renderPitch(homePitch, awayPitch, isHi) {{
     const top = p.x;
     // todo jogador é clicável → abre o card de dados (e destaca a troca, se houver)
     const cls = `pitch-player ${{who}} clickable${{p.exited ? ' subbed-out' : ''}}${{isHi(p.name) ? ' hi' : ''}}`;
-    const card = (cardPlayer === p.name) ? _playerCardHtml(p, who) : '';
+    // flip do card: abaixo se o jogador está na parte de cima; alinhado p/ dentro nas bordas
+    const vside = top < 38 ? 'below' : 'above';
+    const hside = left < 22 ? 'r' : (left > 78 ? 'l' : 'c');
+    const card = openPlayerCards.has(p.name) ? _playerCardHtml(p, vside, hside) : '';
     return `<div class="${{cls}}" style="left:${{left}}%;top:${{top}}%" onclick="showPlayerCard('${{esc(p.name)}}')">
       <div class="pitch-shirt">${{p.num ?? ''}}${{cardMark(p)}}${{goalMark(p)}}${{p.exited ? `<span class="sub-out">↓${{p.exited}}'</span>` : ''}}</div>
       <div class="pitch-name">${{splitName(p.name)}}</div>
@@ -3729,7 +4458,8 @@ function renderPitch(homePitch, awayPitch, isHi) {{
     <div class="pl-line plh-box left"></div><div class="pl-line plh-box-s left"></div><div class="pl-goal-h left"></div>
     <div class="pl-line plh-box right"></div><div class="pl-line plh-box-s right"></div><div class="pl-goal-h right"></div>
   </div>`;
-  return `<div class="pitch-h pitch-vs${{dimmed}}">${{lines}}${{dots}}</div>`;
+  const hasCard = openPlayerCards.size ? ' has-card' : '';
+  return `<div class="pitch-h pitch-vs${{dimmed}}${{hasCard}}">${{lines}}${{dots}}</div>`;
 }}
 
 function _scoreColor(v) {{
@@ -3739,6 +4469,158 @@ function _scoreColor(v) {{
   const g = Math.round(0x55 + (0xc5 - 0x55) * t);
   const b = Math.round(0x44 + (0x5e - 0x44) * t);
   return `rgb(${{r}},${{g}},${{b}})`;
+}}
+
+// Aba "Estilo": flag em destaque + 4 eixos, cada um com seus próprios
+// ingredientes logo abaixo (conecta o número à causa). Frase curta de uma
+// linha explicando, por extenso, o que a classificação significou.
+const ESTILO_GLOSSARIO = {{
+  'Toque e Posse':       'domina a bola e constrói tocando, com paciência',
+  'Ofensivo':            'pressão ofensiva constante, muito volume de finalização',
+  'Drible e Individual': 'cria pelo talento individual: dribles e jogadas de meio',
+  'Defensivo':           'bloco baixo, abre mão da bola e segura o resultado',
+  'Contra-ataque':       'pouca posse, mas vertical e letal na transição',
+  'Jogo pelas Pontas':   'ataca pelos lados, com muitos cruzamentos',
+  'Pressão Alta':        'recupera a bola alto, no campo do adversário',
+  'Equilibrado':         'sem um traço dominante claro — perfil versátil',
+}};
+
+// Rótulos amigáveis + sufixo das métricas brutas usadas pelos arquétipos.
+const ESTILO_METRIC_LABELS = {{
+  posse:        ['Posse média', '%'],
+  passes:       ['Passes/jogo', ''],
+  precisao:     ['Precisão de passe', '%'],
+  gols:         ['Gols/jogo', ''],
+  no_alvo:      ['Chutes no alvo/jogo', ''],
+  chutes:       ['Chutes/jogo', ''],
+  dribles:      ['Dribles/jogo', ''],
+  key_passes:   ['Passes-chave/jogo', ''],
+  cruzamentos:  ['Cruzamentos certos/jogo', ''],
+  clearances:   ['Cortes/jogo', ''],
+  verticalidade:['Verticalidade (eixo)', ''],
+  pressao:      ['Pressão (eixo)', ''],
+}};
+const ARCHETYPE_ORDER = ['Toque e Posse','Ofensivo','Drible e Individual','Defensivo','Contra-ataque','Jogo pelas Pontas','Pressão Alta'];
+
+// Estado: qual arquétipo está selecionado no dropdown da aba Estilo.
+let estiloArqSel = null;
+
+// Uma linha "valor / meta" com barra de progresso colorida pelo score (0-1) +
+// uma frase DESCRITIVA do que a meta significa (não é regra, é o padrão do estilo).
+function styleMetricRow(item) {{
+  const [lbl, suf] = ESTILO_METRIC_LABELS[item.metrica] || [item.metrica, ''];
+  const pct = Math.round((item.score || 0) * 100);
+  // verde = tem o perfil (≥85%), amarelo = perto (≥55%), vermelho = vai contra
+  const cor = pct >= 85 ? '#3fb950' : pct >= 55 ? '#d29922' : '#f85149';
+  const icone = pct >= 85 ? '✅' : pct >= 55 ? '⚠️' : '❌';
+  const mais = item.direcao !== 'menos';
+  const alvo = mais ? `≥${{item.meta}}` : `≤${{item.meta}}`;
+  // frase: "este estilo costuma ter MUITOS/POUCOS X (~meta); o time tem VALOR"
+  const qtd = mais ? 'bastante' : 'pouco';
+  const desc = `times deste estilo têm ${{qtd}} (~${{item.meta}}${{suf}}); este time tem ${{item.valor}}${{suf}}`;
+  return `<div class="es-mm">
+    <div class="es-mm-head">
+      <span class="es-mm-lbl">${{lbl}}</span>
+      <span class="es-mm-vals"><b>${{item.valor}}${{suf}}</b> <span class="es-mm-sep">·</span> meta <span class="es-mm-meta">${{alvo}}${{suf}}</span> ${{icone}}</span>
+    </div>
+    <div class="es-mm-bar"><span class="es-mm-fill" style="width:${{pct}}%;background:${{cor}}"></span></div>
+    <div class="es-mm-desc">${{desc}}</div>
+  </div>`;
+}}
+
+// Render do bloco "ver como estilo X": afinidade + métricas valor/meta.
+function renderArchetypeDetail(e) {{
+  const af = e.afinidades || {{}};
+  const det = e.detalhe || {{}};
+  const arq = estiloArqSel || e.flag;
+  const afin = af[arq];
+  const items = det[arq] || [];
+  const isFlag = arq === e.flag;
+  const metricsHtml = items.map(styleMetricRow).join('') || '<div class="es-na">sem métricas com cobertura</div>';
+  const afinPct = afin !== undefined ? afin.toFixed(0) : '—';
+  return `<div class="es-arq-detail">
+    <div class="es-arq-bar-row">
+      <span class="es-arq-afin-lbl">Encaixe neste estilo</span>
+      <span class="es-arq-afin-val">${{afinPct}}%</span>
+    </div>
+    <div class="es-arq-bar"><span class="es-arq-bar-fill" style="width:${{afin || 0}}%"></span></div>
+    <div class="es-arq-gloss">${{ESTILO_GLOSSARIO[arq] || ''}}${{isFlag ? ' <span class="es-arq-isflag">· estilo do time</span>' : ''}}</div>
+    <div class="es-am-title">Métricas deste estilo — valor do time / meta ideal</div>
+    <div class="es-mm-grid">${{metricsHtml}}</div>
+  </div>`;
+}}
+
+// Troca o arquétipo selecionado, re-renderiza o detalhe e realça a barra
+// correspondente no gráfico de perfil (liga "o que detalho" a "onde está").
+function selectArquetipo(arq) {{
+  estiloArqSel = arq;
+  const host = document.getElementById('esArqDetail');
+  const d = TEAMS_DETAIL[modalTeam];
+  if (host && d) host.innerHTML = renderArchetypeDetail(d.estilo);
+  document.querySelectorAll('.es-perfil-row').forEach(r =>
+    r.classList.toggle('sel', r.dataset.arq === arq));
+}}
+
+function renderEstiloSection(e, nJogos) {{
+  if (!e || !e.flag) {{
+    return '<div class="md-empty">Estilo ainda não disponível (sem jogos processados).</div>';
+  }}
+  const af = e.afinidades || {{}};
+  const glos = ESTILO_GLOSSARIO[e.flag] || '';
+  const aviso = nJogos < 3
+    ? `<div class="es-aviso">⏳ Assinatura provisória — baseada em ${{nJogos}} jogo${{nJogos !== 1 ? 's' : ''}}. Reflete o que o time FEZ até agora, não a fama; se firma conforme o torneio avança.</div>`
+    : '';
+
+  // dropdown: arquétipos ordenados por afinidade. Default = a flag.
+  estiloArqSel = e.flag;
+  const ordenados = ARCHETYPE_ORDER.slice().sort((a, b) => (af[b] || 0) - (af[a] || 0));
+  const opts = ordenados.map(arq => {{
+    const pct = af[arq] !== undefined ? ` (${{af[arq].toFixed(0)}}%)` : '';
+    const sel = arq === e.flag ? ' selected' : '';
+    return `<option value="${{arq}}"${{sel}}>${{arq}}${{pct}}</option>`;
+  }}).join('');
+
+  // gráfico de afinidade aos 7 arquétipos (substitui os antigos 4 eixos):
+  // mostra o perfil completo de uma vez, o estilo do time em destaque.
+  const perfilHtml = ordenados.map(arq => {{
+    const v = af[arq];
+    if (v === undefined) return '';
+    const isFlag = arq === e.flag;
+    // a barra começa selecionada no estilo do time (= o que o detalhe mostra).
+    const isSel = arq === estiloArqSel;
+    const cor = isFlag ? '#58a6ff' : '#3a4a63';
+    return `<div class="es-perfil-row${{isFlag ? ' flag' : ''}}${{isSel ? ' sel' : ''}}" data-arq="${{arq}}" onclick="selectArquetipoDropdown('${{arq.replace(/'/g, "\\\\'")}}')">
+      <span class="es-perfil-nome">${{arq}}${{isFlag ? ' <span class="es-perfil-tag">estilo do time</span>' : ''}}</span>
+      <div class="es-perfil-bar"><span class="es-perfil-fill" style="width:${{v}}%;background:${{cor}}"></span></div>
+      <span class="es-perfil-val">${{v.toFixed(0)}}%</span>
+    </div>`;
+  }}).join('');
+
+  return `<div class="es-tab">
+    <div class="es-hero">
+      <div class="es-hero-flag">🎭</div>
+      <div class="es-hero-info">
+        <div class="es-hero-nome">${{e.flag}}</div>
+        ${{glos ? `<div class="es-hero-glos">${{glos}}</div>` : ''}}
+      </div>
+    </div>
+    <div class="es-help">A flag é o <b>arquétipo de estilo</b> que mais combina com as estatísticas do time. O perfil abaixo mostra o quanto o time se encaixa em <b>cada um dos estilos</b>.</div>
+    <div class="es-perfil-title">Perfil de estilo — encaixe em cada arquétipo</div>
+    <div class="es-perfil">${{perfilHtml}}</div>
+    <div class="es-arq-picker">
+      <label class="es-arq-label">Detalhar estilo:</label>
+      <select class="es-arq-select" onchange="selectArquetipo(this.value)">${{opts}}</select>
+    </div>
+    <div id="esArqDetail">${{renderArchetypeDetail(e)}}</div>
+    ${{aviso}}
+  </div>`;
+}}
+
+// clicar numa barra do perfil sincroniza o dropdown e detalha aquele estilo.
+function selectArquetipoDropdown(arq) {{
+  const sel = document.querySelector('.es-arq-select');
+  if (sel) sel.value = arq;
+  selectArquetipo(arq);
 }}
 
 function renderModalBody() {{
@@ -3809,76 +4691,148 @@ function renderModalBody() {{
     return;
   }}
 
+  if (modalTab === 'estilo') {{
+    body.innerHTML = renderEstiloSection(d.estilo, d.n_jogos);
+    return;
+  }}
+
   if (modalTab === 'jogos') {{
     if (!d.jogos || !d.jogos.length) {{ body.innerHTML = '<div class="md-empty">Nenhum jogo cadastrado ainda.</div>'; return; }}
     const myFlag = d.flag || '🏳️';
-    // agrupa por fase preservando a ordem cronológica de aparição
-    const phases = [];
-    const phaseIdx = {{}};
-    d.jogos.forEach((g) => {{
-      if (!(g.stage in phaseIdx)) {{ phaseIdx[g.stage] = phases.length; phases.push({{ label: g.stage, games: [] }}); }}
-      phases[phaseIdx[g.stage]].games.push(g);
-    }});
-
     // mandante sempre à esquerda, visitante à direita (ordem real do confronto).
     // A seleção sendo vista (modalTeam) fica em negrito destacado.
-    const sideHtml = (team, flag, mine) =>
-      `<span class="mg-side${{mine ? ' me' : ''}}">${{flag}} <b>${{team}}</b></span>`;
+    const sideHtml = (team, flag, mine, side) => {{
+      const cls = `mg-side ${{side}}${{mine ? ' me' : ''}}`;
+      return side === 'left'
+        ? `<span class="${{cls}}"><b>${{team}}</b> ${{flag}}</span>`
+        : `<span class="${{cls}}">${{flag}} <b>${{team}}</b></span>`;
+    }};
 
     const cardHtml = (g) => {{
       const i = d.jogos.indexOf(g);
       const homeIsMe = g.home_team === modalTeam;
-      const left = sideHtml(g.home_team, g.home_flag, homeIsMe);
-      const right = sideHtml(g.away_team, g.away_flag, !homeIsMe);
+      const left = sideHtml(g.home_team, g.home_flag, homeIsMe, 'left');
+      const right = sideHtml(g.away_team, g.away_flag, !homeIsMe, 'right');
       if (!g.finalizado) {{
         // próximo jogo: não clicável, sem placar
         return `<div class="mg scheduled">
           <div class="mg-head">
-            ${{left}}
-            <span class="mg-score res-next">×</span>
-            ${{right}}
-            <span class="md-game-meta mg-meta">a jogar · ${{g.date}}</span>
+            <span class="mg-match">
+              ${{left}}
+              <span class="mg-score res-next">×</span>
+              ${{right}}
+            </span>
+            <span class="mg-date">${{g.date}}</span>
           </div>
         </div>`;
       }}
-      const placar = (g.home_score != null && g.away_score != null) ? `${{g.home_score}} – ${{g.away_score}}` : '—';
+      const placar = (g.home_score != null && g.away_score != null) ? `${{g.home_score}} x ${{g.away_score}}` : '—';
       const open = (expandedGame === i);
       return `<div class="mg ${{open ? 'open' : ''}}" data-gi="${{i}}">
         <div class="mg-head" onclick="toggleGame(${{i}})">
-          ${{left}}
-          <span class="mg-score res-${{g.res}}">${{placar}}</span>
-          ${{right}}
-          <span class="md-game-meta mg-meta">${{g.stage}} · ${{g.date}}</span>
+          <span class="mg-match">
+            ${{left}}
+            <span class="mg-score res-${{g.res}}">${{placar}}</span>
+            ${{right}}
+          </span>
+          <span class="mg-date">${{g.date}}</span>
           <span class="mg-chevron">${{open ? '▲' : '▼'}}</span>
         </div>
         ${{open ? `<div class="mg-detail">${{renderGameDetail(g)}}</div>` : ''}}
       </div>`;
     }};
 
-    body.innerHTML = phases.map(ph =>
-      `<div class="mg-phase">${{ph.label}}</div>` + ph.games.map(cardHtml).join('')
-    ).join('');
+    body.innerHTML = d.jogos.map(cardHtml).join('');
     return;
   }}
 
   if (modalTab === 'elenco') {{
     if (!d.players || !d.players.length) {{ body.innerHTML = '<div class="md-empty">Sem dados de jogadores.</div>'; return; }}
-    body.innerHTML = `<table class="md-table">
-      <thead><tr>
-        <th>Jogador</th><th class="num">J</th><th class="num">G</th><th class="num">A</th>
-        <th class="num">Chutes</th><th class="num">No alvo</th>
-        <th class="num">🟨</th><th class="num">🟥</th><th class="num">Defesas</th>
-      </tr></thead><tbody>` + d.players.map(p => `<tr>
-        <td class="md-pname">${{p.name}}</td>
-        <td class="num">${{p.jogos ?? '—'}}</td>
-        <td class="num">${{p.gols || 0}}</td>
-        <td class="num">${{p.assist || 0}}</td>
-        <td class="num">${{p.chutes ?? '—'}}</td>
-        <td class="num">${{p.no_alvo ?? '—'}}</td>
-        <td class="num">${{p.amarelos || 0}}</td>
-        <td class="num">${{p.vermelhos || 0}}</td>
-        <td class="num">${{p.defesas || 0}}</td>
-      </tr>`).join('') + '</tbody></table>';
+    const players = d.players || [];
+    const val = (p, k) => p[k] == null ? 0 : Number(p[k] || 0);
+    const impact = (p) => val(p, 'gols') * 6 + val(p, 'assist') * 5 + val(p, 'no_alvo') * 3 + val(p, 'chutes') + val(p, 'defesas') * 4;
+    const sortPlayer = (a, b) => (a.pos_order ?? 99) - (b.pos_order ?? 99) || impact(b) - impact(a) || val(b, 'jogos') - val(a, 'jogos') || _esc(a.name).localeCompare(_esc(b.name));
+    const active = players.filter(p => val(p, 'jogos') > 0).sort(sortPlayer);
+    const unused = players.filter(p => val(p, 'jogos') <= 0).sort(sortPlayer);
+    const posGroups = ['Goleiros', 'Defensores', 'Meias', 'Atacantes', 'Sem posição'];
+    const topBy = (key) => {{
+      const ranked = players.filter(p => val(p, key) > 0).sort((a, b) => val(b, key) - val(a, key) || impact(b) - impact(a));
+      return ranked[0] || null;
+    }};
+    const leader = (label, key) => {{
+      const p = topBy(key);
+      return `<div class="el-leader">
+        <div class="el-leader-label">${{label}}</div>
+        <div class="el-leader-main">
+          <span class="el-leader-val">${{p ? val(p, key) : '—'}}</span>
+          <span class="el-leader-name">${{p ? _esc(p.name) : 'sem registro'}}</span>
+        </div>
+      </div>`;
+    }};
+    const stat = (label, value, cls = '') => `<span class="el-stat ${{cls}}"><b>${{value}}</b><span>${{label}}</span></span>`;
+    const marks = (p) => [
+      val(p, 'gols') ? `<span class="el-mark goal">⚽ ${{val(p, 'gols')}}</span>` : '',
+      val(p, 'amarelos') ? `<span class="el-mark"><span class="el-card-dot yellow"></span>${{val(p, 'amarelos')}}</span>` : '',
+      val(p, 'vermelhos') ? `<span class="el-mark"><span class="el-card-dot red"></span>${{val(p, 'vermelhos')}}</span>` : '',
+    ].filter(Boolean).join('');
+    const playerCard = (p) => {{
+      const pos = p.pos && p.pos !== '—' ? p.pos : '—';
+      const num = p.num ?? '—';
+      const nameEscAttr = (p.name || '').replace(/'/g, "\\\\'");
+      const isOpen = openRosterPlayer === p.name;
+      const stats = [
+        stat('Jogos', val(p, 'jogos'), 'hot'),
+        val(p, 'gols') ? stat('Gols', val(p, 'gols'), 'hot') : '',
+        val(p, 'assist') ? stat('Assistências', val(p, 'assist'), 'hot') : '',
+        val(p, 'chutes') ? stat('Chutes', val(p, 'chutes')) : '',
+        val(p, 'no_alvo') ? stat('No alvo', val(p, 'no_alvo')) : '',
+        val(p, 'faltas') ? stat('Faltas', val(p, 'faltas')) : '',
+        val(p, 'faltas_sofridas') ? stat('Faltas sofridas', val(p, 'faltas_sofridas')) : '',
+        val(p, 'impedimentos') ? stat('Impedimentos', val(p, 'impedimentos')) : '',
+        val(p, 'amarelos') ? stat('Amarelos', val(p, 'amarelos'), 'warn') : '',
+        val(p, 'vermelhos') ? stat('Vermelhos', val(p, 'vermelhos'), 'danger') : '',
+        val(p, 'defesas') ? stat('Defesas', val(p, 'defesas'), 'hot') : '',
+      ].filter(Boolean).join('');
+      return `<div class="el-player${{isOpen ? ' open' : ''}}" onclick="showRosterPlayer('${{nameEscAttr}}', this)">
+        <div class="el-player-top">
+          <span class="el-avatar">${{_esc(String(num))}}</span>
+          <div class="el-player-id">
+            <span class="el-name">${{_esc(p.name)}}</span>
+            <span class="el-pos-label">${{_esc(pos)}} · ${{_esc(p.pos_group || 'Sem posição')}}</span>
+          </div>
+          <div class="el-marks">${{marks(p)}}</div>
+        </div>
+        <div class="el-stat-grid">${{stats}}</div>
+        ${{isOpen ? _rosterPlayerCardHtml(p) : ''}}
+      </div>`;
+    }};
+    const activeGroup = (group) => {{
+      const items = active.filter(p => (p.pos_group || 'Sem posição') === group);
+      if (!items.length) return '';
+      return `<div class="el-pos-group">
+        <div class="el-pos-head">${{group}} <span class="el-pos-count">· ${{items.length}}</span></div>
+        <div class="el-player-grid">${{items.map(playerCard).join('')}}</div>
+      </div>`;
+    }};
+    const unusedGroup = (group) => {{
+      const items = unused.filter(p => (p.pos_group || 'Sem posição') === group);
+      if (!items.length) return '';
+      return `<div class="el-unused-group">
+        <div class="el-unused-head">${{group}} · ${{items.length}}</div>
+        <div class="el-unused-list">${{items.map(p => `<span class="el-unused-chip">${{_esc(String(p.num ?? '—'))}} · ${{_esc(p.name)}}</span>`).join('')}}</div>
+      </div>`;
+    }};
+    const leaders = [
+      leader('Gols', 'gols'),
+      leader('Assistências', 'assist'),
+      leader('Chutes', 'chutes'),
+      leader('Defesas', 'defesas'),
+    ].join('');
+    body.innerHTML = `<div class="el-board">
+      <div class="el-leaders">${{leaders}}</div>
+      ${{active.length ? `<div class="el-section-title">Entraram em campo · ${{active.length}}</div>${{posGroups.map(activeGroup).join('')}}` : ''}}
+      ${{unused.length ? `<div class="el-unused"><div class="el-section-title">Ainda não jogaram · ${{unused.length}}</div>${{posGroups.map(unusedGroup).join('')}}</div>` : ''}}
+    </div>`;
     return;
   }}
 
