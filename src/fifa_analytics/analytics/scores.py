@@ -884,20 +884,36 @@ def build_team_scores(
 # Features por partida — jogadores
 # ---------------------------------------------------------------------------
 
+def _player_name_key(value: Any) -> str:
+    text = "" if value is None or (isinstance(value, float) and pd.isna(value)) else str(value).strip()
+    if text.lower().endswith(" null"):
+        text = text[:-5].strip()
+    return slugify(text)
+
+
 def build_player_match_features(
     player_stats: pd.DataFrame, lineups: pd.DataFrame | None = None, rosters: pd.DataFrame | None = None
 ) -> pd.DataFrame:
-    if player_stats.empty:
+    if player_stats.empty and (rosters is None or rosters.empty):
         return pd.DataFrame()
 
-    features = player_stats.copy()
-    for column in [
+    metric_columns = [
         "appearances", "goals", "assists", "shots", "shots_on_target",
         "shots_off_target", "shots_blocked_att", "shots_woodwork",
         "saves", "goals_conceded", "shots_faced",
         "yellow_cards", "red_cards", "fouls_committed", "fouls_drawn",
         "offsides_player", "own_goals_player", "corners_won",
-    ]:
+    ]
+    features = player_stats.copy() if not player_stats.empty else pd.DataFrame(columns=["match_id", "team", "player_name", "position", *metric_columns])
+    # appearances ausente: deriva de minutes_played (jogou = 1, não entrou = 0).
+    # Sem minutes nem appearances, assume 1 (linha de stats = participou).
+    if "appearances" not in features.columns and not features.empty:
+        if "minutes_played" in features.columns:
+            mins = pd.to_numeric(features["minutes_played"], errors="coerce").fillna(0)
+            features["appearances"] = (mins > 0).astype(int)
+        else:
+            features["appearances"] = 1
+    for column in metric_columns:
         if column not in features.columns:
             features[column] = 0
         features[column] = pd.to_numeric(features[column], errors="coerce").fillna(0)
@@ -913,13 +929,37 @@ def build_player_match_features(
     # PERFIL do jogador (usado em scores e agrupamento de relatórios), usa-se
     # "roster_position" — a função de elenco/convocação da ESPN, estável e
     # correta independente de onde o jogador atuou num jogo específico.
+    if "position" not in features.columns:
+        features["position"] = pd.NA
     features["roster_position"] = features.get("position")
     if rosters is not None and not rosters.empty:
-        roster_position = rosters[["team", "player_name", "squad_position"]].drop_duplicates(["team", "player_name"])
-        features = features.merge(roster_position, on=["team", "player_name"], how="left")
+        roster_position = rosters[["team", "player_name", "squad_position"]].dropna(subset=["team", "player_name"]).copy()
+        roster_position["_player_key"] = roster_position["player_name"].map(_player_name_key)
+        roster_position = roster_position.drop_duplicates(["team", "_player_key"])
+        features["_player_key"] = features["player_name"].map(_player_name_key)
+        features = features.merge(
+            roster_position[["team", "_player_key", "squad_position"]],
+            on=["team", "_player_key"],
+            how="left",
+        )
         has_roster = features["squad_position"].notna()
         features.loc[has_roster, "roster_position"] = features.loc[has_roster, "squad_position"]
         features = features.drop(columns=["squad_position"])
+
+        existing = set(zip(features["team"], features["_player_key"]))
+        missing_roster = roster_position[
+            ~roster_position.apply(lambda row: (row["team"], row["_player_key"]) in existing, axis=1)
+        ]
+        if not missing_roster.empty:
+            roster_only = missing_roster[["team", "player_name", "squad_position", "_player_key"]].rename(
+                columns={"squad_position": "roster_position"}
+            )
+            roster_only["position"] = pd.NA
+            roster_only["match_id"] = pd.NA
+            for column in metric_columns:
+                roster_only[column] = 0
+            features = pd.concat([features, roster_only], ignore_index=True, sort=False)
+        features = features.drop(columns=["_player_key"], errors="ignore")
 
     features["participacoes_gol"] = features["goals"] + features["assists"]
     features["shot_accuracy"] = _safe_divide(features["shots_on_target"], features["shots"])
@@ -941,6 +981,7 @@ def build_player_scores(player_match_features: pd.DataFrame) -> pd.DataFrame:
     group_columns = ["player_slug", "player_name", "team"]
     aggregations = {
         "match_id": "nunique",
+        "appearances": "sum",  # jogos REALMENTE disputados (0 p/ reserva que não entrou)
         "goals": "sum",
         "assists": "sum",
         "shots": "sum",
@@ -960,7 +1001,18 @@ def build_player_scores(player_match_features: pd.DataFrame) -> pd.DataFrame:
     }
     available = {c: agg for c, agg in aggregations.items() if c in player_match_features.columns}
     scores = player_match_features.groupby(group_columns, dropna=False).agg(available).reset_index()
-    scores = scores.rename(columns={"match_id": "jogos"})
+    # jogos = partidas REALMENTE disputadas (soma de appearances). Cair pro nº de
+    # partidas listadas só se appearances não existir/for tudo nulo — senão reserva
+    # que nunca entrou contaria como 1 jogo (e recebia score sem ter jogado).
+    _match_count = pd.to_numeric(scores["match_id"], errors="coerce").fillna(0)
+    if "appearances" in scores.columns and pd.to_numeric(scores["appearances"], errors="coerce").notna().any():
+        _apps = pd.to_numeric(scores["appearances"], errors="coerce")
+        # se appearances for nulo numa linha, usa o nº de partidas como fallback
+        scores["jogos"] = _apps.fillna(_match_count).fillna(0).round().astype(int)
+        scores = scores.drop(columns=["match_id"])
+    else:
+        scores["jogos"] = _match_count.round().astype(int)
+        scores = scores.drop(columns=["match_id"])
 
     scores["gols_por_jogo"] = _safe_divide(scores["goals"], scores["jogos"])
     scores["assistencias_por_jogo"] = _safe_divide(scores["assists"], scores["jogos"])
@@ -973,6 +1025,9 @@ def build_player_scores(player_match_features: pd.DataFrame) -> pd.DataFrame:
     # score_geral calculado dentro do pool de cada perfil via z-score
     # Goleiro não compete com atacante — cada um é ranqueado entre os seus
     scores["score_geral"] = _score_by_profile(scores)
+    # quem não disputou nenhum jogo não recebe score (não faz sentido pontuar
+    # reserva que não entrou) — fica sem nota e some do filtro "só com jogos".
+    scores.loc[scores["jogos"] <= 0, "score_geral"] = pd.NA
 
     scores["confianca_amostra"] = _sample_confidence(scores["jogos"])
     scores["nivel_evidencia"] = scores["confianca_amostra"].apply(_evidence_level)
@@ -1308,7 +1363,9 @@ def _weighted_score_per_row(
 
 def _add_rank(frame: pd.DataFrame, score_col: str, rank_col: str) -> pd.DataFrame:
     out = frame.copy()
-    out[rank_col] = out[score_col].rank(method="min", ascending=False).astype(int)
+    # quem tem score nulo (ex.: jogador sem jogos) não recebe rank — Int64 nullable
+    # evita o crash de astype(int) sobre NaN e mantém o ranking só dos pontuados.
+    out[rank_col] = out[score_col].rank(method="min", ascending=False).astype("Int64")
     return out
 
 
