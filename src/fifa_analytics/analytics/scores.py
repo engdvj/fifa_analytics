@@ -1444,74 +1444,101 @@ def _score_acumulado(scores: pd.DataFrame) -> pd.Series:
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Classificação por ARQUÉTIPO de estilo
+# Classificação por ARQUÉTIPO de estilo (perfis IDEAIS absolutos)
 # ---------------------------------------------------------------------------
-# Cada time recebe UMA flag de estilo, da lista fixa abaixo. Não é "posição num
-# eixo" — é "de qual arquétipo o time mais se aproxima". Cada arquétipo é um
-# perfil-alvo de ingredientes em z-score (positivo = acima da média do torneio,
-# negativo = abaixo). Para cada time calculamos a distância ponderada entre o
-# vetor de ingredientes dele e o perfil de cada arquétipo; ele ganha a flag do
-# arquétipo MAIS PRÓXIMO. "Equilibrado" é o fallback quando nenhum arquétipo
-# está claramente próximo (todos os ingredientes perto da média).
+# Cada arquétipo é um PERFIL IDEAL definido em VALORES REAIS por jogo (não em
+# z-score relativo ao torneio). A afinidade do time a um arquétipo mede quão
+# perto os dados dele estão desse molde ideal — INDEPENDENTE dos outros times.
+# Não é ranking: um time não fica "100% Ofensivo" por ser o melhor do torneio,
+# e sim por bater o perfil ideal de um time ofensivo. A flag é o arquétipo de
+# MAIOR afinidade (≥ _STYLE_MIN_AFFINITY, senão "Equilibrado").
 #
-# Ingredientes (chaves dos vetores) — cada um é um z-score 0-centrado calculado
-# em _style_ingredients:
-#   posse, passes, precisao   → ter a bola / construir tocando
-#   dribles, key_passes       → criação individual (driblar, achar o passe)
-#   chutes, gols, no_alvo     → volume e produto ofensivo
-#   verticalidade             → chegar rápido ao ataque (chutes/posse, terço final)
-#   cruzamentos               → atacar pelos lados (cruzamentos certos)
-#   pressao                   → recuperar alto (terço final, desarmes/interceptações)
-#   defensivo                 → bloco baixo (clearances alto + posse baixa)
-#
-# Os pesos (segundo valor de cada tupla) dizem quais ingredientes DEFINEM o
-# arquétipo — ingredientes fora do dict do arquétipo não entram na distância
-# dele (não penaliza um time de posse por não driblar, p.ex.).
-_STYLE_ARCHETYPES: dict[str, dict[str, tuple[float, float]]] = {
-    # nome da flag : { ingrediente: (z-alvo, peso) }
-    # Z-alvos calibrados para a escala real observada (sinais fortes chegam a
-    # 2-3 desvios). Cada arquétipo é DEFINIDO pelos seus ingredientes-chave;
-    # produto ofensivo (gols/no_alvo) é deixado FORA dos arquétipos de
-    # construção (Posse, Pontas, Drible) para não confundir "joga bonito" com
-    # "fez gol" — quem cria muito mas não no volume bruto ainda é do estilo.
+# Cada métrica é (percentil, peso, direção):
+#   - percentil: qual ponto da distribuição REAL do torneio define a meta.
+#     Ex: gols do "Ofensivo" = p80 → a meta é o valor de gols/jogo que separa
+#     os 20% mais ofensivos. O percentil é FIXO (define o arquétipo); o valor
+#     concreto que ele representa RECALCULA a cada jogo (dinâmico, ver
+#     _resolve_style_targets).
+#   - direção +1 → "quanto MAIS, melhor": score da métrica = min(valor/meta, 1)
+#     — satura em 100% ao atingir a meta (passar dela não dá mais que 100%: uma
+#     goleada de 7×0 e um ataque sólido cravam igual o traço "ofensivo").
+#     A meta vem de um percentil ALTO (p70-p85).
+#   - direção -1 → "quanto MENOS, melhor": score = min(meta/valor, 1) — satura
+#     em 100% ao ficar ABAIXO da meta. A meta vem de um percentil BAIXO (p15-p35).
+# Afinidade do arquétipo = média ponderada dos scores das métricas (0-100).
+# Flag = arquétipo de maior afinidade (≥ _STYLE_MIN_AFFINITY, senão Equilibrado).
+# Cada arquétipo tem EXATAMENTE 4 métricas (exibição uniforme no dashboard). As
+# 2-3 primeiras são o traço dominante (peso alto); a(s) última(s), com peso
+# menor, são refinamentos que reforçam a identidade sem distorcer a classificação.
+_STYLE_PROFILES: dict[str, dict[str, tuple[float, float, int]]] = {
+    # nome : { métrica_por_jogo: (percentil, peso, direção) }
     "Toque e Posse": {
-        "passes": (2.0, 1.2), "posse": (1.6, 1.0), "precisao": (1.2, 0.8),
-        "gols": (0.0, 0.4),  # posse pela posse: não precisa marcar muito
+        # posse com PESO DOMINANTE: o traço que define o estilo é ter MUITO a
+        # bola. Um time de posse mediana (p50) não é Toque e Posse por acaso só
+        # porque passa com precisão — por isso posse pesa bem mais que as outras.
+        "posse": (82, 2.0, +1), "passes": (82, 1.2, +1), "precisao": (78, 0.8, +1),
+        "pressao": (55, 0.3, +1),        # quem domina a bola pressiona p/ recuperá-la
     },
     "Ofensivo": {
-        # z-alvos altos: o z-score satura em +3, então um time de fato ofensivo
-        # (muitos gols + finalizações) encosta nesse teto — alvos baixos deixariam
-        # resíduo de distância e outro arquétipo "magro" venceria por acaso.
-        "gols": (2.8, 1.4), "no_alvo": (2.6, 1.2), "chutes": (2.0, 1.0),
+        "gols": (80, 1.2, +1), "no_alvo": (80, 1.0, +1), "chutes": (75, 0.8, +1),
+        "verticalidade": (60, 0.4, +1),  # volume ofensivo costuma ser vertical
     },
     "Drible e Individual": {
-        "dribles": (1.6, 1.4), "key_passes": (1.2, 0.9),
-        "cruzamentos": (-0.5, 0.5),  # cria por dentro, não por cruzamento
+        "dribles": (80, 1.2, +1), "key_passes": (75, 0.8, +1),
+        "cruzamentos": (35, 0.5, -1),  # cria por dentro, não por cruzamento
+        "posse": (60, 0.4, +1),         # precisa da bola para o talento aparecer
     },
     "Defensivo": {
-        "defensivo": (1.4, 1.2), "posse": (-1.4, 1.0), "chutes": (-1.0, 0.7),
+        "clearances": (75, 1.0, +1), "posse": (25, 1.0, -1), "chutes": (30, 0.7, -1),
+        "passes": (30, 0.5, -1),         # bloco baixo troca poucos passes
     },
     "Contra-ataque": {
-        "verticalidade": (1.4, 1.2), "posse": (-0.8, 0.8), "passes": (-0.8, 0.7),
-        "no_alvo": (0.6, 0.5),  # pouca posse mas finaliza com perigo
+        "verticalidade": (75, 1.0, +1), "posse": (30, 0.9, -1),
+        "no_alvo": (60, 0.6, +1),        # pouca posse mas finaliza com perigo
+        "passes": (35, 0.4, -1),         # sai jogando direto, troca pouco passe
     },
     "Jogo pelas Pontas": {
-        "cruzamentos": (1.6, 1.4), "dribles": (-0.4, 0.5),
+        "cruzamentos": (80, 1.2, +1), "dribles": (35, 0.4, -1),
+        "key_passes": (60, 0.6, +1),     # cruzamento é criação de chance pelo lado
+        "posse": (55, 0.4, +1),          # joga aberto, precisa ter a bola
     },
     "Pressão Alta": {
-        # gols-alvo moderado: pressiona e cria, mas se finaliza no teto (+3) é
-        # mais Ofensivo do que pressão pela pressão — evita roubar a Alemanha.
-        "pressao": (1.6, 1.4), "posse": (0.5, 0.4), "gols": (0.5, 0.5),
+        # pressão é o traço dominante; posse penalizada com PESO ALTO (1.0) e
+        # alvo BAIXO (p45) — um time que domina a bola (posse alta) é Toque e
+        # Posse, não Pressão Alta. Sem isso, times de posse que pressionam
+        # roubavam a flag. Métricas extras com peso baixo só refinam.
+        "pressao": (82, 2.0, +1), "posse": (45, 0.9, -1),
+        "chutes": (60, 0.3, +1),         # recupera alto → finaliza mais
+        "verticalidade": (60, 0.3, +1),  # recupera e ataca rápido
     },
 }
 
-# Distância máxima (média ponderada por ingrediente) para o arquétipo mais
-# próximo ainda "contar": se nem o melhor arquétipo chega perto, o time é
-# "Equilibrado". Calibrado abaixo de ~0.99 (a distância de um time totalmente
-# na média ao arquétipo mais próximo) para que um time sem traço algum caia em
-# Equilibrado, mas times com assinatura real (distâncias ~0.5-0.8) sejam
-# classificados.
-_STYLE_MATCH_MAX_DISTANCE = 0.95
+# Sementes: valor-âncora de cada métrica (em valores/jogo) usado quando ainda há
+# poucos jogos no torneio — futebol de seleção "típico", de conhecimento de
+# domínio. A meta real é uma mistura semente↔percentil cujo peso migra para o
+# percentil conforme os jogos acumulam (ver _resolve_style_targets). Cada
+# métrica tem (semente_para_percentil_ALTO, semente_para_percentil_BAIXO): um
+# percentil p≥50 usa a 1ª (nível "destaca-se nisso"), p<50 usa a 2ª (nível
+# "evita isso"). Ancoradas nos ranges reais observados no torneio.
+_STYLE_METRIC_SEEDS: dict[str, tuple[float, float]] = {
+    # métrica : (semente p/ meta ALTA, semente p/ meta BAIXA)
+    "posse":         (60.0, 40.0),
+    "passes":        (560.0, 330.0),
+    "precisao":      (87.0, 78.0),
+    "gols":          (2.6, 0.7),
+    "no_alvo":       (6.5, 2.5),
+    "chutes":        (17.0, 8.0),
+    "dribles":       (11.0, 4.0),
+    "key_passes":    (15.0, 6.0),
+    "cruzamentos":   (7.0, 2.0),
+    "clearances":    (32.0, 16.0),
+    "verticalidade": (62.0, 40.0),
+    "pressao":       (60.0, 42.0),
+}
+
+# Afinidade mínima (0-100) para o time receber a flag do melhor arquétipo. Se
+# nem o melhor encaixe atinge isso, o time não tem perfil claro → "Equilibrado".
+_STYLE_MIN_AFFINITY = 55.0
 
 # Mantido para compat com a tabela de eixos exibida (4 eixos numéricos seguem
 # existindo como ingredientes visíveis; a flag agora vem do arquétipo).
@@ -1589,53 +1616,170 @@ def _add_team_style(scores: pd.DataFrame) -> pd.DataFrame:
     scores["estilo_largura"] = estilo_largura.round(1)
     scores["estilo_verticalidade"] = estilo_verticalidade.round(1)
 
-    # --- Classificação por arquétipo ---
-    # Ingredientes em z-score 0-centrado (não 0-100): comparáveis diretamente
-    # aos z-alvos dos arquétipos em _STYLE_ARCHETYPES.
-    def _z(series: pd.Series, lower_is_better: bool = False) -> pd.Series:
-        return (_zscore_to_100(series, lower_is_better=lower_is_better) - 50.0) / 16.67
-
-    ingredients = pd.DataFrame({
-        "posse": _z(posse_media),
-        "passes": _z(passes_pj),
-        "precisao": _z(precisao),
-        "dribles": _z(_per_game("dribbles_won")),
-        "key_passes": _z(_per_game("key_passes")),
-        "chutes": _z(_per_game("chutes")),
-        "gols": _z(_per_game("gols_pro") if "gols_pro" in scores.columns else _per_game("goals_for")),
-        "no_alvo": _z(_per_game("chutes_no_alvo")),
-        "verticalidade": (estilo_verticalidade - 50.0) / 16.67,
-        "cruzamentos": _z(_per_game("accurate_crosses")),
-        "pressao": (estilo_pressao - 50.0) / 16.67,
-        # defensivo: bloco baixo = muitos clearances + pouca posse, num só índice
-        "defensivo": (_z(_per_game("clearances")) + _z(posse_media, lower_is_better=True)) / 2,
+    # --- Classificação por arquétipo (perfis ideais, metas dinâmicas) ---
+    # Métricas em VALORES REAIS por jogo (não z-score) — comparadas a metas
+    # absolutas que evoluem com o torneio (ver _resolve_style_targets).
+    # `verticalidade`/`pressao` reusam os eixos 0-100 (já são escalas próprias).
+    metrics = pd.DataFrame({
+        "posse": posse_media,
+        "passes": passes_pj,
+        "precisao": precisao * (100.0 if precisao.max() <= 1.5 else 1.0),  # frac→%
+        "dribles": _per_game("dribbles_won"),
+        "key_passes": _per_game("key_passes"),
+        "chutes": _per_game("chutes"),
+        "gols": _per_game("gols_pro") if "gols_pro" in scores.columns else _per_game("goals_for"),
+        "no_alvo": _per_game("chutes_no_alvo"),
+        "cruzamentos": _per_game("accurate_crosses"),
+        "clearances": _per_game("clearances"),
+        "verticalidade": estilo_verticalidade,
+        "pressao": estilo_pressao,
     }, index=scores.index)
 
-    scores["estilo_jogo"] = ingredients.apply(_classify_style, axis=1)
+    # nº de jogos do TORNEIO (não por time) = soma das aparições / 2 — é o
+    # tamanho da amostra que estabiliza as metas dinâmicas.
+    total_games = int(round(float(scores["jogos"].sum()) / 2.0))
+    targets = _resolve_style_targets(metrics, n_jogos=total_games)
+    affinities = _style_affinities(metrics, targets)
+    scores["estilo_jogo"] = [_classify_style(a) for a in affinities]
+    # Afinidade (0-100) a CADA arquétipo, serializada como JSON por time — o
+    # dashboard usa no dropdown "ver o time como estilo X". String para
+    # sobreviver ao parquet sem virar uma coluna por arquétipo.
+    import json as _json
+    scores["estilo_afinidades"] = [_json.dumps(row) for row in affinities]
+    # Detalhamento valor-vs-meta por arquétipo/métrica — o dashboard mostra
+    # "26/18 ✅" com barra, deixando claro POR QUE um arquétipo encaixa.
+    breakdown = _style_breakdown(metrics, targets)
+    scores["estilo_detalhe"] = [_json.dumps(row) for row in breakdown]
     return scores
 
 
-def _classify_style(ing: pd.Series) -> str:
-    """Classifica um time no arquétipo de estilo mais próximo. Para cada
-    arquétipo, mede a distância média ponderada entre os ingredientes do time
-    e o perfil-alvo; ganha a flag do de MENOR distância. Se nem o melhor
-    arquétipo chega perto (distância acima de _STYLE_MATCH_MAX_DISTANCE), o
-    time não tem assinatura clara → "Equilibrado"."""
-    best_name, best_dist = None, float("inf")
-    for name, profile in _STYLE_ARCHETYPES.items():
-        total_w = sum(w for _, w in profile.values())
-        if total_w <= 0:
-            continue
-        # distância = média ponderada de |z_time - z_alvo| nos ingredientes que
-        # definem o arquétipo (os demais não contam).
-        dist = sum(
-            abs(float(ing.get(key, 0.0)) - target) * w
-            for key, (target, w) in profile.items()
-        ) / total_w
-        if dist < best_dist:
-            best_name, best_dist = name, dist
+def _style_breakdown(metrics: pd.DataFrame, targets: dict[str, float]) -> list[dict[str, list[dict[str, Any]]]]:
+    """Para cada time, detalha o encaixe em cada arquétipo métrica a métrica:
+    {arquétipo: [{metrica, valor, meta, score, direcao}, ...]}. `score` é o
+    0-1 daquela métrica (mesma saturação suave de _style_affinities); `direcao`
+    é "mais" (+1, mais é melhor) ou "menos" (-1). Usado só p/ exibição."""
+    out: list[dict[str, list[dict[str, Any]]]] = []
+    for idx in metrics.index:
+        row = metrics.loc[idx]
+        team_detail: dict[str, list[dict[str, Any]]] = {}
+        for name, profile in _STYLE_PROFILES.items():
+            items: list[dict[str, Any]] = []
+            for metric, (pct, _w, direction) in profile.items():
+                meta = targets.get(f"{metric}@{pct}")
+                val = row.get(metric)
+                if meta is None or val is None or pd.isna(val):
+                    continue
+                val = float(val)
+                if direction > 0:
+                    ratio = val / meta if meta > 0 else 0.0
+                else:
+                    ratio = meta / val if val > 0 else 2.0
+                items.append({
+                    "metrica": metric,
+                    "valor": round(val, 1),
+                    "meta": round(float(meta), 1),
+                    "score": round(_style_metric_score(ratio), 3),
+                    "direcao": "mais" if direction > 0 else "menos",
+                })
+            team_detail[name] = items
+        out.append(team_detail)
+    return out
 
-    if best_name is None or best_dist > _STYLE_MATCH_MAX_DISTANCE:
+
+def _style_target_blend_weight(n_jogos: int) -> float:
+    """Peso (0-1) do percentil do torneio na meta, vs. a semente fixa. Cresce
+    com o nº de jogos disputados — cedo confia na semente (futebol típico),
+    tarde confia nos dados reais. Curva côncava saturando perto de ~60 jogos
+    (metade do torneio): poucos jogos → percentis instáveis, então a semente
+    domina e segura a assinatura; conforme acumula, a meta migra para os dados
+    e se estabiliza."""
+    import numpy as np
+    # marcos: 0 jogos→0.0 | 10→0.30 | 30→0.65 | 60+→0.95
+    return float(np.interp(max(n_jogos, 0), [0, 10, 30, 60], [0.0, 0.30, 0.65, 0.95]))
+
+
+def _resolve_style_targets(metrics: pd.DataFrame, n_jogos: int) -> dict[str, float]:
+    """Resolve a meta CONCRETA de cada métrica usada pelos arquétipos, de forma
+    DINÂMICA: mistura a semente fixa com o percentil real do torneio, com peso
+    migrando para o percentil conforme os jogos acumulam. Retorna {métrica: meta}.
+
+    Cada métrica pode aparecer em vários arquétipos com o MESMO percentil-alvo
+    (alto p/ direção +1, baixo p/ -1) — resolvemos uma meta por (métrica), pelo
+    percentil declarado nos perfis. Se a mesma métrica usa percentis diferentes
+    entre arquétipos (ex: posse p80 no Posse, p25 no Defensivo), guardamos uma
+    meta por (métrica, percentil)."""
+    k = _style_target_blend_weight(n_jogos)
+    targets: dict[str, float] = {}
+    for profile in _STYLE_PROFILES.values():
+        for metric, (pct, _w, _d) in profile.items():
+            key = f"{metric}@{pct}"
+            if key in targets:
+                continue
+            col = metrics.get(metric)
+            seed_hi, seed_lo = _STYLE_METRIC_SEEDS.get(metric, (1.0, 1.0))
+            seed = seed_hi if pct >= 50 else seed_lo
+            if col is None or col.dropna().empty:
+                targets[key] = seed
+                continue
+            observed = float(np.percentile(col.dropna().astype(float), pct))
+            targets[key] = seed * (1.0 - k) + observed * k
+    return targets
+
+
+def _style_affinities(metrics: pd.DataFrame, targets: dict[str, float]) -> list[dict[str, float]]:
+    """Afinidade 0-100 de cada time a cada arquétipo, medida contra o PERFIL
+    IDEAL absoluto (não contra os outros times). Para cada métrica do arquétipo:
+      direção +1: score = min(valor/meta, 1)  (satura ao ATINGIR a meta alta)
+      direção -1: score = min(meta/valor, 1)  (satura ao ficar ABAIXO da meta baixa)
+    Afinidade do arquétipo = média ponderada (0-100). Independente do torneio:
+    bater o molde dá 100% mesmo sem ser o melhor, e superá-lo não passa de 100%."""
+    out: list[dict[str, float]] = []
+    for idx in metrics.index:
+        row = metrics.loc[idx]
+        affin: dict[str, float] = {}
+        for name, profile in _STYLE_PROFILES.items():
+            total_w, acc = 0.0, 0.0
+            for metric, (pct, w, direction) in profile.items():
+                meta = targets.get(f"{metric}@{pct}")
+                val = row.get(metric)
+                if meta is None or val is None or pd.isna(val):
+                    continue
+                val = float(val)
+                # ratio = quão perto do alvo (1.0 = atingiu; >1 = superou).
+                if direction > 0:
+                    ratio = val / meta if meta > 0 else 0.0
+                else:
+                    ratio = meta / val if val > 0 else 2.0
+                acc += _style_metric_score(ratio) * w
+                total_w += w
+            affin[name] = round(100.0 * acc / total_w, 1) if total_w > 0 else 0.0
+        out.append(affin)
+    return out
+
+
+def _style_metric_score(ratio: float) -> float:
+    """Score 0-1 de uma métrica dado o ratio valor/meta. Saturação SUAVE: atingir
+    a meta (ratio=1) dá ~0.85, não 1.0 — só superá-la com folga (ratio≥1.4) chega
+    a 1.0. Assim um time que apenas alcança o limiar de vários arquétipos não
+    crava 100% em todos ao mesmo tempo; o arquétipo em que ele MAIS se destaca
+    (maior ratio) sobressai. Abaixo da meta, cai proporcionalmente."""
+    if ratio <= 0:
+        return 0.0
+    if ratio >= 1.0:
+        # 1.0→0.85 ... 1.4+→1.0 (recompensa folga, mas com teto rápido)
+        return min(1.0, 0.85 + 0.15 * (ratio - 1.0) / 0.4)
+    # abaixo do alvo: 0.85 no alvo decaindo a 0 — penaliza não atingir
+    return 0.85 * ratio
+
+
+def _classify_style(affinities: dict[str, float]) -> str:
+    """Flag = arquétipo de MAIOR afinidade ao perfil ideal. Se nem o melhor
+    atinge _STYLE_MIN_AFFINITY, o time não encaixa claramente em nenhum molde
+    → "Equilibrado"."""
+    if not affinities:
+        return "Equilibrado"
+    best_name = max(affinities, key=lambda k: affinities[k])
+    if affinities[best_name] < _STYLE_MIN_AFFINITY:
         return "Equilibrado"
     return best_name
 

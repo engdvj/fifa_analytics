@@ -10,6 +10,7 @@ from fifa_analytics.analytics.scores import (
     _classify_style,
     _player_profile,
     _sample_confidence,
+    _style_affinities,
     _zscore_to_100,
     build_player_match_features,
     build_player_scores,
@@ -332,46 +333,44 @@ def test_team_style_possession_axis_orders_teams():
 
 def test_team_style_flag_is_from_archetype_list():
     """A flag de estilo deve ser sempre um dos arquétipos nomeados (ou Equilibrado)."""
-    from fifa_analytics.analytics.scores import _STYLE_ARCHETYPES
-    valid = set(_STYLE_ARCHETYPES) | {"Equilibrado"}
+    from fifa_analytics.analytics.scores import _STYLE_PROFILES
+    valid = set(_STYLE_PROFILES) | {"Equilibrado"}
     features = _make_two_team_features()
     scores = build_team_scores(features)
     assert set(scores["estilo_jogo"]).issubset(valid)
 
 
-def _ingredients(**overrides) -> pd.Series:
-    """Vetor de ingredientes (z-score 0-centrado) com tudo neutro por padrão."""
-    base = {k: 0.0 for k in [
-        "posse", "passes", "precisao", "dribles", "key_passes", "chutes",
-        "gols", "no_alvo", "verticalidade", "cruzamentos", "pressao", "defensivo",
-    ]}
-    base.update(overrides)
-    return pd.Series(base)
+def test_classify_style_picks_highest_affinity():
+    """A flag é o arquétipo de maior afinidade (acima do mínimo)."""
+    assert _classify_style({"Ofensivo": 90.0, "Toque e Posse": 60.0}) == "Ofensivo"
+    assert _classify_style({"Defensivo": 80.0, "Contra-ataque": 50.0}) == "Defensivo"
 
 
-def test_classify_style_possession_team():
-    ing = _ingredients(posse=1.8, passes=2.2, precisao=1.3)
-    assert _classify_style(ing) == "Toque e Posse"
+def test_classify_style_balanced_when_no_strong_match():
+    """Nenhuma afinidade acima do mínimo → Equilibrado."""
+    assert _classify_style({"Ofensivo": 30.0, "Toque e Posse": 25.0}) == "Equilibrado"
+    assert _classify_style({}) == "Equilibrado"
 
 
-def test_classify_style_offensive_team():
-    ing = _ingredients(gols=2.8, no_alvo=2.6, chutes=2.0)
-    assert _classify_style(ing) == "Ofensivo"
+def test_style_affinity_saturates_not_ranking():
+    """Afinidade mede encaixe ABSOLUTO no perfil ideal, não ranking: um time que
+    bate a meta tem afinidade alta mesmo não sendo o melhor; superar a meta não
+    explode acima de 100%."""
+    metrics = pd.DataFrame({"gols": [3.0, 7.0], "no_alvo": [7.0, 12.0], "chutes": [18.0, 26.0]})
+    # metas batidas já no 1º time; o 2º só supera — ambos devem cravar alto, perto um do outro
+    targets = {"gols@80": 3.0, "no_alvo@80": 7.0, "chutes@75": 18.0}
+    af = _style_affinities(metrics, targets)
+    assert af[0]["Ofensivo"] >= 80          # bate a meta exatamente → alto
+    assert af[1]["Ofensivo"] <= 100         # superar não passa de 100
+    assert af[1]["Ofensivo"] - af[0]["Ofensivo"] <= 20  # diferença modesta (não vira ranking)
 
 
-def test_classify_style_defensive_team():
-    ing = _ingredients(defensivo=1.5, posse=-1.4, chutes=-1.0)
-    assert _classify_style(ing) == "Defensivo"
-
-
-def test_classify_style_dribble_team():
-    ing = _ingredients(dribles=1.8, key_passes=1.2, cruzamentos=-0.5)
-    assert _classify_style(ing) == "Drible e Individual"
-
-
-def test_classify_style_balanced_when_flat():
-    """Time sem nenhum traço destacado → Equilibrado (nenhum arquétipo perto)."""
-    assert _classify_style(_ingredients()) == "Equilibrado"
+def test_style_targets_evolve_with_games():
+    """As metas dinâmicas migram da semente para o percentil real conforme os
+    jogos do torneio acumulam (peso do percentil cresce)."""
+    from fifa_analytics.analytics.scores import _style_target_blend_weight
+    assert _style_target_blend_weight(0) < _style_target_blend_weight(30) < _style_target_blend_weight(80)
+    assert _style_target_blend_weight(80) > 0.9  # tarde no torneio, dados dominam
 
 
 # ---------------------------------------------------------------------------
