@@ -43,6 +43,7 @@ CLAUDE_BIN = os.environ.get("FIFA_CLAUDE_BIN") or shutil.which("claude") or str(
 )
 
 MATCHES_PATH = ROOT / "data" / "gold" / "dim_match" / "canonical_matches.parquet"
+SOURCE_MAP_PATH = ROOT / "data" / "gold" / "dim_match" / "source_match_map.parquet"
 SNAPSHOTS_DIR = ROOT / "data" / "gold" / "analytics" / "snapshots"
 MATCH_ORDER_PATH = SNAPSHOTS_DIR / "match_order.json"
 STOP_FILE = "/tmp/fifa-copa-stop"  # janela pede encerramento ao fechar
@@ -252,8 +253,67 @@ def _load_live() -> list[str]:
     return labels
 
 
+def _schedule_sort_overrides() -> dict[str, tuple[str | None, str | None]]:
+    """Best-effort schedule keys by canonical match id.
+
+    The canonical index deliberately prioritizes worldcup2026 for operational
+    fields, but that feed stores some kickoff times as local venue time. For
+    ordering the watcher queue, ESPN's timestamp is a better common clock when
+    available. This affects display order only; scores/status still come from the
+    canonical table.
+    """
+    import pandas as pd
+
+    if not SOURCE_MAP_PATH.exists():
+        return {}
+
+    try:
+        source_map = pd.read_parquet(SOURCE_MAP_PATH)
+    except Exception:
+        return {}
+
+    source_paths = [
+        ("espn", ROOT / "data" / "silver" / "matches" / "espn_matches.parquet"),
+        ("worldcup2026", ROOT / "data" / "silver" / "matches" / "worldcup2026_matches.parquet"),
+    ]
+    overrides: dict[str, tuple[str | None, str | None]] = {}
+
+    for source, path in source_paths:
+        if not path.exists():
+            continue
+        try:
+            src = pd.read_parquet(path)
+        except Exception:
+            continue
+        if src.empty or "match_id" not in src.columns:
+            continue
+
+        cols = [c for c in ["match_id", "date", "kickoff_time"] if c in src.columns]
+        merged = source_map[source_map["source"] == source].merge(
+            src[cols],
+            left_on="source_match_id",
+            right_on="match_id",
+            how="left",
+            suffixes=("", "_source"),
+        )
+        for _, row in merged.iterrows():
+            canonical_id = row.get("canonical_match_id")
+            if not canonical_id or canonical_id in overrides:
+                continue
+            date = row.get("date")
+            time_text = row.get("kickoff_time")
+            if pd.isna(date) and pd.isna(time_text):
+                continue
+            overrides[str(canonical_id)] = (
+                None if pd.isna(date) else str(date)[:10],
+                None if pd.isna(time_text) else str(time_text)[:5],
+            )
+
+    return overrides
+
+
 def _load_agendados(limit: int = 12) -> list[str]:
-    """Retorna labels dos próximos jogos agendados (sem placar), por data.
+    """Retorna labels dos próximos jogos agendados (sem placar), em ordem real.
 
     Exclui finalizados e ao_vivo — só os que ainda não começaram.
     Usados só para exibição na janela — não entram na fila de processamento.
@@ -263,8 +323,32 @@ def _load_agendados(limit: int = 12) -> list[str]:
     if not MATCHES_PATH.exists():
         return []
 
-    matches = pd.read_parquet(MATCHES_PATH).sort_values("date")
-    agendados = matches[matches["status"] == "agendado"]
+    matches = pd.read_parquet(MATCHES_PATH)
+    agendados = matches[matches["status"] == "agendado"].copy()
+    if agendados.empty:
+        return []
+
+    agendados["_sort_date"] = agendados["date"].astype("string") if "date" in agendados.columns else ""
+    agendados["_sort_time"] = agendados["kickoff_time"].astype("string") if "kickoff_time" in agendados.columns else ""
+
+    overrides = _schedule_sort_overrides()
+    id_col = "canonical_match_id" if "canonical_match_id" in agendados.columns else "match_id"
+    for idx, row in agendados.iterrows():
+        date_time = overrides.get(str(row.get(id_col)))
+        if not date_time:
+            continue
+        sort_date, sort_time = date_time
+        if sort_date:
+            agendados.at[idx, "_sort_date"] = sort_date
+        if sort_time:
+            agendados.at[idx, "_sort_time"] = sort_time
+
+    sort_cols = [
+        c for c in ["_sort_date", "_sort_time", "temporal_order", "match_number", "match_id"]
+        if c in agendados.columns
+    ]
+    agendados = agendados.sort_values(sort_cols, na_position="last")
+
     labels = []
     for _, row in agendados.iterrows():
         home, away = row.get("home_team"), row.get("away_team")
