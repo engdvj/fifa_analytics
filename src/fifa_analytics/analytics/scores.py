@@ -10,7 +10,12 @@ from fifa_analytics.analytics.name_reconciliation import (
     apply_player_aliases,
     detect_name_mismatches,
 )
-from fifa_analytics.utils.text import slugify
+from fifa_analytics.utils.text import (
+    clean_person_name,
+    person_name_exact_key,
+    person_name_key,
+    slugify,
+)
 
 # ---------------------------------------------------------------------------
 # Pesos do score de seleções
@@ -38,6 +43,13 @@ PLAYER_PRODUCTION_REFS = {
     "participations_per_game": 3.0,   # gols+assist/jogo (meia)
     "shots_on_target_per_game": 5.0,  # 5 chutes no alvo/jogo = teto
     "total_shots_per_game": 8.0,      # 8 finalizações/jogo = teto
+    "expected_goals_per_game": 3.0,
+    "expected_assists_per_game": 2.0,
+    "defensive_actions_per_game": 16.0,
+    "duels_won_per_game": 10.0,
+    "ball_recoveries_per_game": 10.0,
+    "shots_blocked_per_game": 3.0,
+    "expected_goals_prevented_per_game": 2.0,
 }
 
 TEAM_SCORE_WEIGHTS = {
@@ -75,13 +87,13 @@ _ELO_MAX_VARIANCE_MAX_GAMES = 3
 _POSITION_TO_PROFILE: dict[str, str] = {
     # Goleiro
     "GK": "goleiro", "G": "goleiro",
-    # Defensor — zagueiros, laterais, volantes (sem produção ofensiva esperada)
+    # Defensor — zagueiros e laterais
     "CB": "defensor", "CD": "defensor", "CD-L": "defensor", "CD-R": "defensor",
     "SW": "defensor",
     "RB": "defensor", "LB": "defensor", "RWB": "defensor", "LWB": "defensor",
-    "DM": "defensor", "D": "defensor",
-    # Meia — centroavante criativo e meias de todos os tipos
-    "CDM": "meio", "CM": "meio", "CM-L": "meio", "CM-R": "meio",
+    "D": "defensor",
+    # Meia — volantes e meias de todos os tipos
+    "DM": "meio", "CDM": "meio", "CM": "meio", "CM-L": "meio", "CM-R": "meio",
     "CAM": "meio", "AM": "meio", "AM-L": "meio", "AM-R": "meio",
     "RM": "meio", "LM": "meio", "M": "meio", "MF": "meio",
     # Atacante — pontas, centroavantes, segundos atacantes
@@ -908,10 +920,77 @@ def build_team_scores(
 # ---------------------------------------------------------------------------
 
 def _player_name_key(value: Any) -> str:
-    text = "" if value is None or (isinstance(value, float) and pd.isna(value)) else str(value).strip()
-    if text.lower().endswith(" null"):
-        text = text[:-5].strip()
-    return slugify(text)
+    return person_name_key(value)
+
+
+def _player_exact_key(value: Any) -> str:
+    return person_name_exact_key(value)
+
+
+def _clean_player_name(value: Any) -> str:
+    return clean_person_name(value)
+
+
+def _clean_player_names(frame: pd.DataFrame | None) -> pd.DataFrame | None:
+    if frame is None or frame.empty or "player_name" not in frame.columns:
+        return frame
+    out = frame.copy()
+    out["player_name"] = out["player_name"].map(_clean_player_name)
+    return out
+
+
+def _optional_row_sum(frame: pd.DataFrame, columns: list[str]) -> pd.Series:
+    present = [c for c in columns if c in frame.columns]
+    if not present:
+        return pd.Series(pd.NA, index=frame.index)
+    values = frame[present].apply(pd.to_numeric, errors="coerce")
+    return values.fillna(0).sum(axis=1).where(values.notna().any(axis=1), pd.NA)
+
+
+def _add_unique_player_slugs(features: pd.DataFrame) -> pd.DataFrame:
+    if features.empty:
+        features["player_slug"] = pd.Series(dtype="object")
+        return features
+    out = features.copy()
+    out["_base_player_slug"] = out.apply(
+        lambda row: slugify(f"{row.get('player_name')}_{row.get('team')}"), axis=1
+    )
+    identity_cols = ["team", "player_name"]
+    if "player_id" in out.columns and out["player_id"].notna().any():
+        out["_player_identity"] = out.apply(
+            lambda row: (
+                str(row.get("team")),
+                str(row.get("player_id")) if pd.notna(row.get("player_id")) and row.get("player_id") != "" else str(row.get("player_name")),
+            ),
+            axis=1,
+        )
+    else:
+        out["_player_identity"] = out.apply(lambda row: tuple(str(row.get(c)) for c in identity_cols), axis=1)
+
+    identity_rows = (
+        out[["_base_player_slug", "_player_identity", "player_id"] if "player_id" in out.columns else ["_base_player_slug", "_player_identity"]]
+        .drop_duplicates(["_base_player_slug", "_player_identity"])
+        .sort_values(["_base_player_slug", "_player_identity"])
+        .reset_index(drop=True)
+    )
+    identity_rows["_collision_index"] = identity_rows.groupby("_base_player_slug").cumcount() + 1
+    identity_rows["_collision_count"] = identity_rows.groupby("_base_player_slug")["_base_player_slug"].transform("size")
+
+    def _slug_for_identity(row: pd.Series) -> str:
+        base = row["_base_player_slug"]
+        if int(row["_collision_count"]) <= 1:
+            return base
+        player_id = row.get("player_id") if "player_id" in row else None
+        suffix = slugify(player_id) if player_id is not None and pd.notna(player_id) and str(player_id) else str(int(row["_collision_index"]))
+        return f"{base}_{suffix}"
+
+    identity_rows["player_slug"] = identity_rows.apply(_slug_for_identity, axis=1)
+    out = out.merge(
+        identity_rows[["_base_player_slug", "_player_identity", "player_slug"]],
+        on=["_base_player_slug", "_player_identity"],
+        how="left",
+    )
+    return out.drop(columns=["_base_player_slug", "_player_identity"], errors="ignore")
 
 
 def build_player_match_features(
@@ -924,6 +1003,9 @@ def build_player_match_features(
     # curados (config/player_aliases.yaml) e detecta inconsistências novas entre
     # stats e roster (provável truncamento), avisando no log + relatório de
     # qualidade — assim casos como "Cano(bbio)" não passam despercebidos.
+    player_stats = _clean_player_names(player_stats)
+    lineups = _clean_player_names(lineups)
+    rosters = _clean_player_names(rosters)
     player_stats = apply_player_aliases(player_stats)
     if lineups is not None and not lineups.empty:
         lineups = apply_player_aliases(lineups)
@@ -937,12 +1019,31 @@ def build_player_match_features(
         "yellow_cards", "red_cards", "fouls_committed", "fouls_drawn",
         "offsides_player", "own_goals_player", "corners_won",
     ]
+    optional_365_columns = [
+        "minutes",
+        "expected_goals", "expected_assists", "expected_goals_on_target",
+        "big_chances_created", "big_chances_missed", "big_chances_scored",
+        "key_passes", "dribbles_won",
+        "was_dribbled_past", "possession_lost", "fouls", "was_fouled",
+        "tackles_won", "interceptions", "clearances",
+        "ball_recovery", "ground_duels_won", "aerial_duels_won",
+        "shots_blocked", "crosses_completed", "long_passes_completed",
+        "expected_goals_prevented", "expected_goals_on_target_conceded",
+        "punches", "penalties_saved", "high_claims", "played_sweeper",
+        "penalty_won", "penalty_committed", "penalties_missed",
+        "error_led_to_goal", "goals_conceded_365",
+    ]
     features = player_stats.copy() if not player_stats.empty else pd.DataFrame(columns=["match_id", "team", "player_name", "position", *metric_columns])
     # appearances ausente: deriva de minutes_played (jogou = 1, não entrou = 0).
     # Sem minutes nem appearances, assume 1 (linha de stats = participou).
     if "appearances" not in features.columns and not features.empty:
         if "minutes_played" in features.columns:
             mins = pd.to_numeric(features["minutes_played"], errors="coerce").fillna(0)
+            if "minutes" in features.columns:
+                mins = mins.where(mins > 0, pd.to_numeric(features["minutes"], errors="coerce").fillna(0))
+            features["appearances"] = (mins > 0).astype(int)
+        elif "minutes" in features.columns:
+            mins = pd.to_numeric(features["minutes"], errors="coerce").fillna(0)
             features["appearances"] = (mins > 0).astype(int)
         else:
             features["appearances"] = 1
@@ -950,11 +1051,55 @@ def build_player_match_features(
         if column not in features.columns:
             features[column] = 0
         features[column] = pd.to_numeric(features[column], errors="coerce").fillna(0)
+    for column in optional_365_columns:
+        if column in features.columns:
+            features[column] = pd.to_numeric(features[column], errors="coerce")
+
+    if "fouls_drawn" in features.columns and "was_fouled" in features.columns:
+        features["fouls_drawn"] = features["fouls_drawn"].where(features["fouls_drawn"].ne(0), features["was_fouled"].fillna(0))
+    if "fouls_committed" in features.columns and "fouls" in features.columns:
+        features["fouls_committed"] = features["fouls_committed"].where(features["fouls_committed"].ne(0), features["fouls"].fillna(0))
+    if "shots_blocked_att" in features.columns and "shots_blocked" in features.columns:
+        features["shots_blocked_att"] = features["shots_blocked_att"].where(features["shots_blocked_att"].ne(0), features["shots_blocked"].fillna(0))
 
     if lineups is not None and not lineups.empty and {"match_id", "team", "player_name"}.issubset(lineups.columns):
-        lineup_cols = [c for c in ["match_id", "team", "player_name", "position", "is_starter", "formation"] if c in lineups.columns]
-        lineup_info = lineups[lineup_cols].drop_duplicates(["match_id", "team", "player_name"])
-        features = features.merge(lineup_info, on=["match_id", "team", "player_name"], how="left")
+        if "player_id" in features.columns and "player_id" in lineups.columns and features["player_id"].notna().any():
+            lineup_cols = [c for c in ["match_id", "team", "player_id", "position", "is_starter", "formation"] if c in lineups.columns]
+            lineup_info = lineups[lineup_cols].dropna(subset=["player_id"]).drop_duplicates(["match_id", "team", "player_id"])
+            lineup_keys = ["match_id", "team", "player_id"]
+        else:
+            lineup_cols = [c for c in ["match_id", "team", "player_name", "position", "is_starter", "formation"] if c in lineups.columns]
+            lineup_info = lineups[lineup_cols].copy()
+            lineup_info["_player_key"] = lineup_info["player_name"].map(_player_name_key)
+            lineup_info["_player_exact"] = lineup_info["player_name"].map(_player_exact_key)
+            lineup_info["_key_count"] = lineup_info.groupby(["match_id", "team", "_player_key"])["_player_key"].transform("size")
+            lineup_info["_lineup_join_key"] = lineup_info["_player_key"]
+            has_key_collision = lineup_info["_key_count"].gt(1)
+            lineup_info.loc[has_key_collision, "_lineup_join_key"] = lineup_info.loc[has_key_collision, "_player_exact"]
+            ambiguous_lineup_keys = set(
+                zip(
+                    lineup_info.loc[has_key_collision, "match_id"],
+                    lineup_info.loc[has_key_collision, "team"],
+                    lineup_info.loc[has_key_collision, "_player_key"],
+                )
+            )
+            features["_player_key"] = features["player_name"].map(_player_name_key)
+            features["_player_exact"] = features["player_name"].map(_player_exact_key)
+            features["_lineup_join_key"] = features["_player_key"]
+            if ambiguous_lineup_keys:
+                collision_mask = features.apply(
+                    lambda row: (row["match_id"], row["team"], row["_player_key"]) in ambiguous_lineup_keys,
+                    axis=1,
+                )
+                features.loc[collision_mask, "_lineup_join_key"] = features.loc[collision_mask, "_player_exact"]
+            lineup_info = (
+                lineup_info
+                .drop(columns=["player_name", "_player_key", "_player_exact", "_key_count"], errors="ignore")
+                .drop_duplicates(["match_id", "team", "_lineup_join_key"])
+            )
+            lineup_keys = ["match_id", "team", "_lineup_join_key"]
+        features = _merge_lineup_info(features, lineup_info, lineup_keys)
+        features = features.drop(columns=["_player_key", "_player_exact", "_lineup_join_key"], errors="ignore")
 
     # "position" (do lineup) é a posição TÁTICA daquele jogo especifico — varia
     # jogo a jogo (ex: Vinícius Júnior às vezes joga aberto como "AM-L") e fica
@@ -968,23 +1113,70 @@ def build_player_match_features(
     if rosters is not None and not rosters.empty:
         roster_position = rosters[["team", "player_name", "squad_position"]].dropna(subset=["team", "player_name"]).copy()
         roster_position["_player_key"] = roster_position["player_name"].map(_player_name_key)
-        roster_position = roster_position.drop_duplicates(["team", "_player_key"])
+        roster_position["_player_exact"] = roster_position["player_name"].map(_player_exact_key)
+        roster_position["_key_count"] = roster_position.groupby(["team", "_player_key"])["_player_key"].transform("size")
+        roster_position["_roster_join_key"] = roster_position["_player_key"]
+        has_key_collision = roster_position["_key_count"].gt(1)
+        roster_position.loc[has_key_collision, "_roster_join_key"] = roster_position.loc[has_key_collision, "_player_exact"]
+        roster_position = roster_position.drop_duplicates(["team", "_roster_join_key"])
+        ambiguous_roster_keys = set(
+            zip(
+                roster_position.loc[roster_position["_key_count"].gt(1), "team"],
+                roster_position.loc[roster_position["_key_count"].gt(1), "_player_key"],
+            )
+        )
         features["_player_key"] = features["player_name"].map(_player_name_key)
+        features["_player_exact"] = features["player_name"].map(_player_exact_key)
+        features["_roster_join_key"] = features["_player_key"]
+        if ambiguous_roster_keys:
+            collision_mask = features.apply(
+                lambda row: (row["team"], row["_player_key"]) in ambiguous_roster_keys,
+                axis=1,
+            )
+            features.loc[collision_mask, "_roster_join_key"] = features.loc[collision_mask, "_player_exact"]
         features = features.merge(
-            roster_position[["team", "_player_key", "squad_position"]],
-            on=["team", "_player_key"],
+            roster_position[["team", "_roster_join_key", "squad_position"]],
+            on=["team", "_roster_join_key"],
             how="left",
         )
         has_roster = features["squad_position"].notna()
         features.loc[has_roster, "roster_position"] = features.loc[has_roster, "squad_position"]
         features = features.drop(columns=["squad_position"])
 
-        existing = set(zip(features["team"], features["_player_key"]))
+        if not features.empty and "match_id" in features.columns:
+            match_team_pairs = (
+                features[features["match_id"].notna()][["match_id", "team"]]
+                .drop_duplicates()
+            )
+            if not match_team_pairs.empty:
+                roster_by_match = match_team_pairs.merge(roster_position, on="team", how="inner")
+                existing_match_players = (
+                    features[features["match_id"].notna()][["match_id", "team", "_roster_join_key"]]
+                    .dropna(subset=["match_id", "team", "_roster_join_key"])
+                    .drop_duplicates()
+                    .assign(_exists=True)
+                )
+                roster_by_match = roster_by_match.merge(
+                    existing_match_players,
+                    on=["match_id", "team", "_roster_join_key"],
+                    how="left",
+                )
+                missing_match_roster = roster_by_match[roster_by_match["_exists"].isna()]
+                if not missing_match_roster.empty:
+                    dnp_rows = missing_match_roster[
+                        ["match_id", "team", "player_name", "squad_position", "_player_key", "_player_exact", "_roster_join_key"]
+                    ].rename(columns={"squad_position": "roster_position"})
+                    dnp_rows["position"] = pd.NA
+                    for column in metric_columns:
+                        dnp_rows[column] = 0
+                    features = pd.concat([features, dnp_rows], ignore_index=True, sort=False)
+
+        existing = set(zip(features["team"], features["_roster_join_key"]))
         missing_roster = roster_position[
-            ~roster_position.apply(lambda row: (row["team"], row["_player_key"]) in existing, axis=1)
+            ~roster_position.apply(lambda row: (row["team"], row["_roster_join_key"]) in existing, axis=1)
         ]
         if not missing_roster.empty:
-            roster_only = missing_roster[["team", "player_name", "squad_position", "_player_key"]].rename(
+            roster_only = missing_roster[["team", "player_name", "squad_position", "_player_key", "_player_exact", "_roster_join_key"]].rename(
                 columns={"squad_position": "roster_position"}
             )
             roster_only["position"] = pd.NA
@@ -992,15 +1184,27 @@ def build_player_match_features(
             for column in metric_columns:
                 roster_only[column] = 0
             features = pd.concat([features, roster_only], ignore_index=True, sort=False)
-        features = features.drop(columns=["_player_key"], errors="ignore")
+        features = features.drop(columns=["_player_key", "_player_exact", "_roster_join_key"], errors="ignore")
 
     features["participacoes_gol"] = features["goals"] + features["assists"]
+    features["duels_won"] = _optional_row_sum(features, ["ground_duels_won", "aerial_duels_won"])
+    features["defensive_actions"] = _optional_row_sum(features, ["tackles_won", "interceptions", "clearances", "ball_recovery", "shots_blocked"])
+    features["expected_goal_involvements"] = _optional_row_sum(features, ["expected_goals", "expected_assists"])
     features["shot_accuracy"] = _safe_divide(features["shots_on_target"], features["shots"])
     features["perfil"] = features.apply(_player_profile, axis=1)
-    features["player_slug"] = features.apply(
-        lambda row: slugify(f"{row.get('player_name')}_{row.get('team')}"), axis=1
-    )
+    features = _add_unique_player_slugs(features)
     return features.sort_values(["team", "player_name", "match_id"]).reset_index(drop=True)
+
+
+def _merge_lineup_info(features: pd.DataFrame, lineup_info: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
+    info_cols = [c for c in lineup_info.columns if c not in keys]
+    merged = features.merge(lineup_info, on=keys, how="left", suffixes=("", "_lineup"))
+    for col in info_cols:
+        lineup_col = f"{col}_lineup"
+        if lineup_col in merged.columns:
+            merged[col] = merged[lineup_col].combine_first(merged[col])
+            merged = merged.drop(columns=[lineup_col])
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -1030,6 +1234,41 @@ def build_player_scores(player_match_features: pd.DataFrame) -> pd.DataFrame:
         "yellow_cards": "sum",
         "red_cards": "sum",
         "participacoes_gol": "sum",
+        "expected_goals": _sum_optional,
+        "expected_assists": _sum_optional,
+        "expected_goals_on_target": _sum_optional,
+        "big_chances_created": _sum_optional,
+        "big_chances_missed": _sum_optional,
+        "big_chances_scored": _sum_optional,
+        "key_passes": _sum_optional,
+        "dribbles_won": _sum_optional,
+        "was_dribbled_past": _sum_optional,
+        "possession_lost": _sum_optional,
+        "fouls": _sum_optional,
+        "was_fouled": _sum_optional,
+        "tackles_won": _sum_optional,
+        "interceptions": _sum_optional,
+        "clearances": _sum_optional,
+        "ball_recovery": _sum_optional,
+        "ground_duels_won": _sum_optional,
+        "aerial_duels_won": _sum_optional,
+        "shots_blocked": _sum_optional,
+        "crosses_completed": _sum_optional,
+        "long_passes_completed": _sum_optional,
+        "expected_goals_prevented": _sum_optional,
+        "expected_goals_on_target_conceded": _sum_optional,
+        "punches": _sum_optional,
+        "penalties_saved": _sum_optional,
+        "high_claims": _sum_optional,
+        "played_sweeper": _sum_optional,
+        "penalty_won": _sum_optional,
+        "penalty_committed": _sum_optional,
+        "penalties_missed": _sum_optional,
+        "error_led_to_goal": _sum_optional,
+        "goals_conceded_365": _sum_optional,
+        "duels_won": _sum_optional,
+        "defensive_actions": _sum_optional,
+        "expected_goal_involvements": _sum_optional,
         "perfil": _mode_or_first,
     }
     available = {c: agg for c, agg in aggregations.items() if c in player_match_features.columns}
@@ -1068,6 +1307,18 @@ def build_player_scores(player_match_features: pd.DataFrame) -> pd.DataFrame:
     scores["defesas_por_jogo"] = _safe_divide(scores["saves"], scores["jogos"])
     scores["faltas_sofridas_por_jogo"] = _safe_divide(scores.get("fouls_drawn", pd.Series(0, index=scores.index)), scores["jogos"])
     scores["faltas_cometidas_por_jogo"] = _safe_divide(scores.get("fouls_committed", pd.Series(0, index=scores.index)), scores["jogos"])
+    for metric in [
+        "expected_goals", "expected_assists", "expected_goals_on_target",
+        "key_passes", "big_chances_created", "big_chances_missed",
+        "big_chances_scored", "dribbles_won", "tackles_won",
+        "interceptions", "clearances", "ball_recovery", "duels_won",
+        "shots_blocked", "expected_goals_prevented", "penalties_saved",
+        "high_claims", "punches",
+    ]:
+        scores[f"{metric}_por_jogo"] = _safe_divide(
+            scores.get(metric, pd.Series(0, index=scores.index)),
+            scores["jogos"],
+        )
 
     # score_geral calculado dentro do pool de cada perfil via z-score
     # Goleiro não compete com atacante — cada um é ranqueado entre os seus
@@ -1461,27 +1712,18 @@ def _player_profile(row: pd.Series) -> str:
 def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
     """Calcula score_geral dentro do pool de cada perfil via média ponderada de z-scores.
 
-    Métricas e pesos por perfil (só o que existe nos dados ESPN Copa 2026):
+    Métricas e pesos por perfil:
 
-    Goleiro:  saves/jogo         peso 0.4
-              save%              peso 0.4  (saves / saves+gols_sofridos)
-              gols_sofridos/jogo peso 0.2  (lower_is_better)
+    Goleiro:  xGP/jogo           eixo principal quando disponível
+              save% / saves      volume e eficiência de defesa
+              gols_sofridos/jogo lower_is_better
 
-    Defensor: fouls_drawn/jogo   peso 0.4  (duelos ganhos, pressão)
-              goals_conceded/j   peso 0.3  (lower — solidez defensiva)
-              shots_on_target/j  peso 0.2  (chegada ao ataque)
-              fouls_committed/j  peso 0.1  (lower — disciplina)
+    Defensor: desarmes, interceptações, cortes, bloqueios, duelos e recuperações
+              vindos da 365Scores, com gols sofridos e disciplina como freio.
 
-    Meia:     goals+assists/jogo peso 0.5  (criação e finalização)
-              shots_on_target/j  peso 0.2  (chutes perigosos)
-              total_shots/jogo   peso 0.1  (volume ofensivo)
-              fouls_drawn/jogo   peso 0.2  (envolvimento — peso baixo)
+    Meia:     gols+assistências, xG+xA, chutes e envolvimento.
 
-    Atacante: goals/jogo         peso 0.5  (função principal)
-              assists/jogo       peso 0.2  (criação)
-              shots_on_target/j  peso 0.2  (pressão constante)
-              total_shots/jogo   peso 0.1  (volume ofensivo)
-              — fouls_drawn excluído: ruidoso, não discrimina qualidade ofensiva
+    Atacante: gols, xG/xGOT, assistências/xA e volume de finalização.
     """
     result = pd.Series(50.0, index=scores.index)
 
@@ -1496,6 +1738,30 @@ def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
         if col not in pool.columns:
             return pd.Series(0.0, index=pool.index)
         return _safe_divide(pool[col].fillna(0), pool["jogos"])
+
+    def _sum_existing(cols: list[str], pool: pd.DataFrame) -> pd.Series | None:
+        present = [c for c in cols if c in pool.columns]
+        if not present:
+            return None
+        total = pd.Series(0.0, index=pool.index)
+        has_signal = pd.Series(False, index=pool.index)
+        for col in present:
+            numeric = pd.to_numeric(pool[col], errors="coerce")
+            has_signal = has_signal | numeric.notna()
+            total = total.add(numeric.fillna(0), fill_value=0.0)
+        return total.where(has_signal, np.nan)
+
+    def _absolute_per_game(cols: list[str], pool: pd.DataFrame, reference: float) -> pd.Series:
+        total = _sum_existing(cols, pool)
+        if total is None:
+            return pd.Series(np.nan, index=pool.index)
+        return _absolute_to_100(_safe_divide(total, pool["jogos"]), reference)
+
+    def _zscore_per_game(cols: list[str], pool: pd.DataFrame, lower_is_better: bool = False) -> pd.Series:
+        total = _sum_existing(cols, pool)
+        if total is None:
+            return pd.Series(np.nan, index=pool.index)
+        return _zscore_to_100(_safe_divide(total, pool["jogos"]), lower_is_better=lower_is_better)
 
     def _wavg(components_weights: list[tuple[pd.Series, float]]) -> pd.Series:
         """Média ponderada NaN-aware POR LINHA: componente ausente (NaN) numa linha
@@ -1535,18 +1801,23 @@ def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
             conceded_col = pool["goals_conceded"].fillna(0) if "goals_conceded" in pool.columns else pd.Series(0.0, index=pool.index)
             save_rate = _safe_divide(saves_col, saves_col + conceded_col)
             raw = _wavg([
-                (_zscore_to_100(_per_game("saves", pool)),                          0.4 * PERF_WEIGHT),
-                (_zscore_to_100(save_rate),                                         0.4 * PERF_WEIGHT),
-                (_zscore_to_100(_per_game("goals_conceded", pool), lower_is_better=True), 0.2 * PERF_WEIGHT),
+                (_absolute_per_game(["expected_goals_prevented"], pool, PLAYER_PRODUCTION_REFS["expected_goals_prevented_per_game"]), 0.35 * PERF_WEIGHT),
+                (_zscore_to_100(save_rate),                                         0.25 * PERF_WEIGHT),
+                (_zscore_to_100(_per_game("saves", pool)),                          0.10 * PERF_WEIGHT),
+                (_absolute_per_game(["penalties_saved", "high_claims", "played_sweeper"], pool, PLAYER_PRODUCTION_REFS["duels_won_per_game"]), 0.10 * PERF_WEIGHT),
+                (_zscore_per_game(["goals_conceded"], pool, lower_is_better=True),  0.20 * PERF_WEIGHT),
                 (rating_z,                                                          RATING_WEIGHT),
             ])
 
         elif profile == "defensor":
             raw = _wavg([
-                (_zscore_to_100(_per_game("fouls_drawn", pool)),                                    0.4 * PERF_WEIGHT),
-                (_zscore_to_100(_per_game("shots_on_target", pool)),                                0.2 * PERF_WEIGHT),
-                (_zscore_to_100(_per_game("goals_conceded", pool), lower_is_better=True),           0.3 * PERF_WEIGHT),
-                (_zscore_to_100(_per_game("fouls_committed", pool), lower_is_better=True),          0.1 * PERF_WEIGHT),
+                (_absolute_per_game(["tackles_won", "interceptions", "clearances", "shots_blocked"], pool, PLAYER_PRODUCTION_REFS["defensive_actions_per_game"]), 0.35 * PERF_WEIGHT),
+                (_absolute_per_game(["ground_duels_won", "aerial_duels_won"], pool, PLAYER_PRODUCTION_REFS["duels_won_per_game"]), 0.20 * PERF_WEIGHT),
+                (_absolute_per_game(["ball_recovery"], pool, PLAYER_PRODUCTION_REFS["ball_recoveries_per_game"]), 0.15 * PERF_WEIGHT),
+                (_zscore_per_game(["goals_conceded"], pool, lower_is_better=True),                  0.15 * PERF_WEIGHT),
+                (_zscore_to_100(_per_game("fouls_committed", pool), lower_is_better=True),          0.05 * PERF_WEIGHT),
+                (_zscore_per_game(["was_dribbled_past"], pool, lower_is_better=True),                0.05 * PERF_WEIGHT),
+                (_absolute_per_game(["crosses_completed", "long_passes_completed"], pool, PLAYER_PRODUCTION_REFS["duels_won_per_game"]), 0.05 * PERF_WEIGHT),
                 (rating_z,                                                                          RATING_WEIGHT),
             ])
 
@@ -1564,10 +1835,13 @@ def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
             if isinstance(total_shots, int):
                 total_shots = pd.Series(0.0, index=pool.index)
             raw = _wavg([
-                (_absolute_to_100(_safe_divide(participacoes, pool["jogos"]), PLAYER_PRODUCTION_REFS["participations_per_game"]),  0.5 * PERF_WEIGHT),
-                (_absolute_to_100(_per_game("shots_on_target", pool), PLAYER_PRODUCTION_REFS["shots_on_target_per_game"]),         0.2 * PERF_WEIGHT),
-                (_absolute_to_100(_safe_divide(total_shots, pool["jogos"]), PLAYER_PRODUCTION_REFS["total_shots_per_game"]),       0.1 * PERF_WEIGHT),
-                (_zscore_to_100(_per_game("fouls_drawn", pool)),                  0.2 * PERF_WEIGHT),
+                (_absolute_to_100(_safe_divide(participacoes, pool["jogos"]), PLAYER_PRODUCTION_REFS["participations_per_game"]),  0.35 * PERF_WEIGHT),
+                (_absolute_per_game(["expected_goals", "expected_assists"], pool, PLAYER_PRODUCTION_REFS["participations_per_game"]), 0.25 * PERF_WEIGHT),
+                (_absolute_to_100(_per_game("shots_on_target", pool), PLAYER_PRODUCTION_REFS["shots_on_target_per_game"]),         0.15 * PERF_WEIGHT),
+                (_absolute_per_game(["key_passes"], pool, PLAYER_PRODUCTION_REFS["assists_per_game"]),                              0.10 * PERF_WEIGHT),
+                (_absolute_to_100(_safe_divide(total_shots, pool["jogos"]), PLAYER_PRODUCTION_REFS["total_shots_per_game"]),       0.05 * PERF_WEIGHT),
+                (_absolute_per_game(["ball_recovery", "ground_duels_won", "aerial_duels_won"], pool, PLAYER_PRODUCTION_REFS["duels_won_per_game"]), 0.05 * PERF_WEIGHT),
+                (_zscore_to_100(_per_game("fouls_drawn", pool)),                  0.05 * PERF_WEIGHT),
                 (rating_z,                                                        RATING_WEIGHT),
             ])
 
@@ -1579,10 +1853,13 @@ def _score_by_profile(scores: pd.DataFrame) -> pd.Series:
             if isinstance(total_shots, int):
                 total_shots = pd.Series(0.0, index=pool.index)
             raw = _wavg([
-                (_absolute_to_100(_per_game("goals", pool), PLAYER_PRODUCTION_REFS["goals_per_game"]),                   0.5 * PERF_WEIGHT),
-                (_absolute_to_100(_per_game("assists", pool), PLAYER_PRODUCTION_REFS["assists_per_game"]),               0.2 * PERF_WEIGHT),
-                (_absolute_to_100(_per_game("shots_on_target", pool), PLAYER_PRODUCTION_REFS["shots_on_target_per_game"]), 0.2 * PERF_WEIGHT),
-                (_absolute_to_100(_safe_divide(total_shots, pool["jogos"]), PLAYER_PRODUCTION_REFS["total_shots_per_game"]), 0.1 * PERF_WEIGHT),
+                (_absolute_to_100(_per_game("goals", pool), PLAYER_PRODUCTION_REFS["goals_per_game"]),                   0.35 * PERF_WEIGHT),
+                (_absolute_per_game(["expected_goals", "expected_goals_on_target"], pool, PLAYER_PRODUCTION_REFS["expected_goals_per_game"]), 0.25 * PERF_WEIGHT),
+                (_absolute_to_100(_per_game("assists", pool), PLAYER_PRODUCTION_REFS["assists_per_game"]),               0.15 * PERF_WEIGHT),
+                (_absolute_per_game(["expected_assists"], pool, PLAYER_PRODUCTION_REFS["expected_assists_per_game"]),     0.10 * PERF_WEIGHT),
+                (_absolute_to_100(_per_game("shots_on_target", pool), PLAYER_PRODUCTION_REFS["shots_on_target_per_game"]), 0.10 * PERF_WEIGHT),
+                (_absolute_per_game(["dribbles_won"], pool, PLAYER_PRODUCTION_REFS["duels_won_per_game"]),               0.03 * PERF_WEIGHT),
+                (_absolute_to_100(_safe_divide(total_shots, pool["jogos"]), PLAYER_PRODUCTION_REFS["total_shots_per_game"]), 0.02 * PERF_WEIGHT),
                 (rating_z,                                                        RATING_WEIGHT),
             ])
 
@@ -2004,6 +2281,11 @@ def _mode_or_first(values: pd.Series) -> Any:
         return None
     mode = clean.mode()
     return mode.iloc[0] if not mode.empty else clean.iloc[0]
+
+
+def _sum_optional(values: pd.Series) -> float:
+    numeric = pd.to_numeric(values, errors="coerce")
+    return float(numeric.sum(min_count=1))
 
 
 def _number(value: Any) -> float | None:

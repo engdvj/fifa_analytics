@@ -64,16 +64,24 @@ PROFILE_LABELS = {"goleiro": "Goleiro", "defensor": "Defensor", "meio": "Meia", 
 # Colunas relevantes por perfil — goleiro nao marca gol nem chuta a gol como
 # metrica relevante, atacante nao defende. Cada perfil mostra so o que importa.
 PROFILE_STATS: dict[str, list[str]] = {
-    "goleiro": ["saves", "goals_conceded", "yellow_cards", "red_cards"],
-    "defensor": ["goals", "assists", "shots_on_target", "shots_off_target", "fouls_committed", "fouls_drawn", "yellow_cards", "red_cards"],
-    "meio": ["goals", "assists", "shots_on_target", "shots_off_target", "fouls_committed", "fouls_drawn", "yellow_cards", "red_cards"],
-    "atacante": ["goals", "assists", "shots_on_target", "shots_off_target", "fouls_committed", "fouls_drawn", "yellow_cards", "red_cards"],
+    "goleiro": ["saves", "goals_conceded", "expected_goals_prevented", "penalties_saved", "high_claims", "punches", "yellow_cards", "red_cards"],
+    "defensor": ["goals", "assists", "tackles_won", "interceptions", "clearances", "ball_recovery", "duels_won", "shots_blocked", "fouls_committed", "yellow_cards", "red_cards"],
+    "meio": ["goals", "assists", "expected_goals", "expected_assists", "key_passes", "duels_won", "ball_recovery", "shots_on_target", "fouls_drawn", "yellow_cards", "red_cards"],
+    "atacante": ["goals", "assists", "expected_goals", "expected_assists", "expected_goals_on_target", "big_chances_scored", "dribbles_won", "shots_on_target", "shots_off_target", "big_chances_missed", "yellow_cards", "red_cards"],
 }
 STAT_COL_LABELS = {
     "goals": "gols", "assists": "assist", "shots_on_target": "no_alvo",
     "shots_off_target": "fora_do_alvo", "saves": "defesas", "goals_conceded": "gols_sofridos",
     "fouls_committed": "faltas_com", "fouls_drawn": "faltas_sof",
     "yellow_cards": "amarelos", "red_cards": "vermelhos",
+    "expected_goals": "xG", "expected_assists": "xA", "expected_goals_on_target": "xGOT",
+    "expected_goals_prevented": "xGP", "punches": "socos",
+    "penalties_saved": "penaltis_def", "high_claims": "bolas_altas",
+    "tackles_won": "desarmes", "interceptions": "intercept", "clearances": "cortes",
+    "ball_recovery": "recuper", "duels_won": "duelos", "shots_blocked": "bloqueios",
+    "key_passes": "passes_chave", "dribbles_won": "dribles",
+    "big_chances_created": "gr_chances_criadas", "big_chances_scored": "gr_chances_conv",
+    "big_chances_missed": "gr_chances_perd",
 }
 TEAM_RANKINGS = [
     ("geral", "score_geral", "nota geral"),
@@ -528,12 +536,21 @@ def write_player_reports(player_match_features: pd.DataFrame) -> list[Path]:
     for player_slug, group in player_match_features.groupby("player_slug", sort=False):
         team_slug = slugify(group.iloc[0].get("team", ""))
         team_dir = ensure_dir(PLAYER_REPORTS_DIR / team_slug)
-        # slug do arquivo = apenas o nome do jogador (sem sufixo _selecao)
-        name_slug = player_slug[: -(len(team_slug) + 1)] if player_slug.endswith(f"_{team_slug}") else player_slug
+        name_slug = _player_file_slug(player_slug, team_slug)
         path = team_dir / f"{name_slug}.md"
         path.write_text(_render_player_report(group), encoding="utf-8")
         paths.append(path)
     return paths
+
+
+def _player_file_slug(player_slug: str, team_slug: str) -> str:
+    team_part = f"_{team_slug}"
+    if player_slug.endswith(team_part):
+        return player_slug[: -len(team_part)]
+    if team_part in player_slug:
+        before, after = player_slug.split(team_part, 1)
+        return f"{before}{after}"
+    return player_slug
 
 
 def _render_player_report(matches: pd.DataFrame) -> str:
@@ -565,14 +582,19 @@ def _render_player_report(matches: pd.DataFrame) -> str:
     # Tabela por jogo — mesmas colunas do perfil, só as que tiveram algum evento
     match_cols = ["match_id"] + avail_stats
     avail_match = [c for c in match_cols if c in matches.columns]
-    match_display = matches.sort_values("match_id")[avail_match].copy()
-    if "match_id" in match_display.columns:
-        match_display["match_id"] = match_display["match_id"].apply(_match_link)
-    event_cols_match = [c for c in avail_match if c != "match_id"]
-    has_any = match_display[event_cols_match].apply(pd.to_numeric, errors="coerce").fillna(0).gt(0).any() if event_cols_match else pd.Series(dtype=bool)
-    keep_cols = ["match_id"] + [c for c in event_cols_match if has_any.get(c, False)]
-    match_display = match_display[keep_cols].rename(columns={"match_id": "jogo", **STAT_COL_LABELS})
-    match_table = match_display.fillna(0).to_markdown(index=False)
+    appearances = pd.to_numeric(matches.get("appearances", pd.Series(0, index=matches.index)), errors="coerce").fillna(0)
+    played_matches = matches[appearances > 0].copy()
+    if played_matches.empty:
+        match_table = "Ainda nao disputou jogos."
+    else:
+        match_display = played_matches.sort_values("match_id")[avail_match].copy()
+        if "match_id" in match_display.columns:
+            match_display["match_id"] = match_display["match_id"].apply(_match_link)
+        event_cols_match = [c for c in avail_match if c != "match_id"]
+        has_any = match_display[event_cols_match].apply(pd.to_numeric, errors="coerce").fillna(0).gt(0).any() if event_cols_match else pd.Series(dtype=bool)
+        keep_cols = ["match_id"] + [c for c in event_cols_match if has_any.get(c, False)]
+        match_display = match_display[keep_cols].rename(columns={"match_id": "jogo", **STAT_COL_LABELS})
+        match_table = match_display.fillna(0).to_markdown(index=False)
 
     return f"""<!--
 player: {player_name}
@@ -699,6 +721,8 @@ def _render_team_report(
     amarelos = int(team.get("amarelos", 0) or 0)
     vermelhos = int(team.get("vermelhos", 0) or 0)
     faltas = int(team.get("faltas", 0) or 0)
+    own_goals_for = int(team.get("own_goals_for", 0) or 0)
+    own_goals_against = int(team.get("own_goals_against", 0) or 0)
     cartoes_str = f"{amarelos} amarelo{'s' if amarelos != 1 else ''}"
     if vermelhos:
         cartoes_str += f", {vermelhos} vermelho{'s' if vermelhos != 1 else ''}"
@@ -714,6 +738,10 @@ def _render_team_report(
         ["disciplina (ranking)", f"{_format_value(team.get('ranking_disciplina'))} de {total_teams}"],
         ["rating Elo", f"{team.get('elo_rating', 1500):.0f} (1500 = neutro)"],
     ]
+    if own_goals_for:
+        summary_rows.insert(5, ["gols contra a favor", own_goals_for])
+    if own_goals_against:
+        summary_rows.insert(6 if own_goals_for else 5, ["gols contra sofridos", own_goals_against])
     consistency_label = _consistency_label(team.get("consistencia_resultado"))
     if consistency_label:
         summary_rows.append(["consistencia de resultado", consistency_label])
@@ -732,6 +760,7 @@ def _render_team_report(
     team_slug = slugify(team.get("team", ""))
     match_table = _team_matches_table(matches, team_slug_by_name)
     players_section = _team_players_by_position(player_events, team_slug)
+    players_totals_note = _players_totals_note(own_goals_for, own_goals_against)
     group_section = _format_group_standings(group_table, str(team.get("team", "")), team_slug_by_name)
     tactics_section = _format_tactics(matches)
     return f"""<!--
@@ -765,8 +794,20 @@ Maturidade do Elo: no inicio do torneio todos os times comecam no mesmo rating (
 {tactics_section}{group_section}
 ## Jogadores
 
+{players_totals_note}
 {players_section}
 """
+
+
+def _players_totals_note(own_goals_for: int = 0, own_goals_against: int = 0) -> str:
+    notes = [
+        "Os totais da selecao podem vir de estatisticas de equipe, enquanto a tabela abaixo soma eventos individuais disponiveis por jogador."
+    ]
+    if own_goals_for:
+        notes.append("Gols contra a favor entram no placar da selecao, mas nao contam como gol de jogador da propria selecao.")
+    if own_goals_against:
+        notes.append("Gols contra sofridos aparecem no placar adversario, mas ficam atribuídos ao jogador que marcou contra no evento da partida.")
+    return f"{' '.join(notes)}\n"
 
 
 def _format_tactics(matches: pd.DataFrame) -> str:
@@ -920,22 +961,36 @@ def _team_players_by_position(player_events: pd.DataFrame, team_slug: str) -> st
     SECTION_LABELS = {"goleiro": "Goleiros", "defensor": "Defensores", "meio": "Meias", "atacante": "Atacantes"}
     ALL_STAT_COLS = sorted({c for cols in PROFILE_STATS.values() for c in cols})
 
-    # Agrega por jogador somando todas as partidas
-    agg = {c: "sum" for c in ALL_STAT_COLS if c in player_events.columns}
+    # Agrega por identidade estável do jogador. Nome é rótulo; slug/player_id é chave.
+    events = player_events.copy()
+    if "player_slug" not in events.columns:
+        events["player_slug"] = events["player_name"].map(lambda name: slugify(f"{name}_{team_slug}"))
+    group_key = "player_slug"
+
+    agg = {c: _sum_optional_report_stat for c in ALL_STAT_COLS if c in events.columns}
+    agg["player_name"] = "first"
     agg["perfil"] = "first"
-    agg["player_slug"] = "first"
-    agg["match_id"] = "nunique"
-    available_agg = {c: f for c, f in agg.items() if c in player_events.columns or c == "match_id"}
+    if "appearances" in events.columns:
+        agg["appearances"] = "sum"
+    else:
+        agg["match_id"] = "nunique"
+    available_agg = {c: f for c, f in agg.items() if c in events.columns}
     grouped = (
-        player_events.groupby("player_name", dropna=False)
+        events.groupby(group_key, dropna=False)
         .agg(available_agg)
         .reset_index()
-        .rename(columns={"match_id": "jogos"})
     )
+    if "appearances" in grouped.columns:
+        grouped["jogos"] = pd.to_numeric(grouped["appearances"], errors="coerce").fillna(0).round().astype(int)
+        grouped = grouped.drop(columns=["appearances"])
+    elif "match_id" in grouped.columns:
+        grouped = grouped.rename(columns={"match_id": "jogos"})
+    else:
+        grouped["jogos"] = 0
 
     stat_cols_available = [c for c in ALL_STAT_COLS if c in grouped.columns]
     for c in stat_cols_available:
-        grouped[c] = pd.to_numeric(grouped[c], errors="coerce").fillna(0).astype(int)
+        grouped[c] = pd.to_numeric(grouped[c], errors="coerce")
 
     sections = []
     for profile in PROFILE_ORDER:
@@ -952,10 +1007,9 @@ def _team_players_by_position(player_events: pd.DataFrame, team_slug: str) -> st
         for _, row in pool.iterrows():
             name = row["player_name"]
             slug = row.get("player_slug", "")
-            # player_slug tem formato nome_time — extrai só o nome para o path
-            name_slug = slug[: -(len(team_slug) + 1)] if slug and slug.endswith(f"_{team_slug}") else slugify(name)
+            name_slug = _player_file_slug(str(slug), team_slug) if slug else slugify(name)
             link = f"[[reports/players/{team_slug}/{name_slug}\\|{name}]]"
-            stats = [str(int(row[c])) for c in profile_cols]
+            stats = [_format_player_stat_value(c, row[c]) for c in profile_cols]
             rows.append([link] + stats)
 
         col_headers = ["jogador"] + [STAT_COL_LABELS.get(c, c) for c in profile_cols]
@@ -963,6 +1017,28 @@ def _team_players_by_position(player_events: pd.DataFrame, team_slug: str) -> st
         sections.append(f"### {SECTION_LABELS[profile]}\n\n{table}")
 
     return "\n\n".join(sections) if sections else "Sem dados de escalação disponíveis."
+
+
+def _sum_optional_report_stat(values: pd.Series) -> float:
+    numeric = pd.to_numeric(values, errors="coerce")
+    return float(numeric.sum(min_count=1))
+
+
+def _format_player_stat_value(column: str, value: Any) -> str:
+    if pd.isna(value):
+        return ""
+    numeric = float(value)
+    decimal_cols = {
+        "expected_goals",
+        "expected_assists",
+        "expected_goals_on_target",
+        "expected_goals_prevented",
+    }
+    if column in decimal_cols:
+        return f"{numeric:.2f}".rstrip("0").rstrip(".")
+    if numeric.is_integer():
+        return str(int(numeric))
+    return f"{numeric:.1f}".rstrip("0").rstrip(".")
 
 
 def _ranking_trend(team_scores: pd.DataFrame, history: pd.DataFrame) -> pd.Series:

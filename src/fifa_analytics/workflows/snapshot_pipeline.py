@@ -19,8 +19,10 @@ from fifa_analytics.analytics.scores import (
     build_team_scores,
 )
 from fifa_analytics.paths import GOLD_DIR
+from fifa_analytics.validation.match_validation import validate_match_completeness
 from fifa_analytics.transforms.standings import calculate_group_standings
 from fifa_analytics.utils.io import ensure_dir, read_dataframe, write_dataframe
+from fifa_analytics.utils.text import clean_person_name, person_name_exact_key
 from fifa_analytics.utils.time import utc_now_iso
 from fifa_analytics.workflows.scores_pipeline import (
     _ranking_trend,
@@ -44,10 +46,26 @@ _PLAYER_SNAP_COLS = [
     "score_geral", "ranking_score_geral", "nivel_evidencia",
     "rating_365",  # nota de atuação média (365scores), escala ~2.9-9.8
     "goals", "assists", "participacoes_gol", "saves", "goals_conceded",
-    "shots_on_target", "yellow_cards", "red_cards",
+    "shots", "shots_on_target", "fouls_committed", "fouls_drawn",
+    "yellow_cards", "red_cards",
+    "expected_goals", "expected_assists", "expected_goals_on_target",
+    "key_passes", "big_chances_created", "big_chances_missed",
+    "big_chances_scored", "dribbles_won", "tackles_won",
+    "interceptions", "clearances", "ball_recovery", "duels_won",
+    "shots_blocked", "expected_goals_prevented", "penalties_saved",
+    "high_claims", "punches",
     "gols_por_jogo", "assistencias_por_jogo", "participacoes_por_jogo",
     "chutes_no_alvo_por_jogo", "defesas_por_jogo",
     "faltas_cometidas_por_jogo", "faltas_sofridas_por_jogo",
+    "expected_goals_por_jogo", "expected_assists_por_jogo",
+    "expected_goals_on_target_por_jogo", "key_passes_por_jogo",
+    "big_chances_created_por_jogo", "big_chances_missed_por_jogo",
+    "big_chances_scored_por_jogo", "dribbles_won_por_jogo",
+    "tackles_won_por_jogo", "interceptions_por_jogo",
+    "clearances_por_jogo", "ball_recovery_por_jogo",
+    "duels_won_por_jogo", "shots_blocked_por_jogo",
+    "expected_goals_prevented_por_jogo", "penalties_saved_por_jogo",
+    "high_claims_por_jogo", "punches_por_jogo",
 ]
 
 
@@ -60,15 +78,12 @@ def _read_optional(path: Path) -> pd.DataFrame:
 def _shirt_numbers_for(scores: pd.DataFrame, lineups: pd.DataFrame, rosters: pd.DataFrame) -> list:
     """Número da camisa por (nome exato, time): moda do shirt_number nos lineups,
     com fallback no roster. Nome casado SEM dobrar acento (Ederson ≠ Éderson)."""
-    def _exact(s):
-        return " ".join(s.split()) if isinstance(s, str) else ""
-
     num_by: dict[tuple[str, str], int] = {}
     for src in (lineups, rosters):
         if src is None or src.empty or "shirt_number" not in src.columns:
             continue
         tmp = src.dropna(subset=["player_name"]).copy()
-        tmp["_k"] = tmp["player_name"].map(_exact)
+        tmp["_k"] = tmp["player_name"].map(person_name_exact_key)
         tmp["_n"] = pd.to_numeric(tmp["shirt_number"], errors="coerce")
         tmp = tmp.dropna(subset=["_n"])
         for (nm, tm), grp in tmp.groupby(["_k", "team"]):
@@ -76,7 +91,7 @@ def _shirt_numbers_for(scores: pd.DataFrame, lineups: pd.DataFrame, rosters: pd.
             if key not in num_by:  # lineups têm prioridade (vêm primeiro)
                 num_by[key] = int(grp["_n"].mode().iloc[0])
     return [
-        num_by.get((_exact(nm), tm)) for nm, tm in zip(scores["player_name"], scores["team"])
+        num_by.get((person_name_exact_key(nm), tm)) for nm, tm in zip(scores["player_name"], scores["team"])
     ]
 
 
@@ -113,20 +128,11 @@ def _build_player_snapshot(
         return
 
     scores = scores.copy()
-    # nota de atuação média até N — lê a coluna `rating` JÁ CASADA no canonical
-    # (fonte única; ver _attach_player_rating). Só considera jogos REALMENTE
-    # disputados (appearances>0): a fonte às vezes traz nota de quem não entrou
-    # (ex.: Martinelli, appearances=0 mas rating 6.5) — não pode contar.
-    if "rating" in ps_ate.columns:
-        tmp = ps_ate.assign(rating=pd.to_numeric(ps_ate["rating"], errors="coerce"))
-        if "appearances" in tmp.columns:
-            apps = pd.to_numeric(tmp["appearances"], errors="coerce").fillna(0)
-            tmp = tmp[apps > 0]
-        tmp = tmp.dropna(subset=["rating"])
-        rating_avg = tmp.groupby(["player_name", "team"])["rating"].mean().round(2)
-        scores["rating_365"] = [
-            rating_avg.get((nm, tm)) for nm, tm in zip(scores["player_name"], scores["team"])
-        ]
+    # Usa a média de rating calculada por build_player_scores() sobre as features
+    # já normalizadas. Recalcular aqui a partir do canonical cru reabria bugs de
+    # string, como "Raphinha " (com espaço final) não casar com "Raphinha".
+    if "rating_medio" in scores.columns:
+        scores["rating_365"] = pd.to_numeric(scores["rating_medio"], errors="coerce").round(2)
     else:
         scores["rating_365"] = pd.NA
     # quem não disputou nenhum jogo não tem nota (mesma regra do score)
@@ -134,9 +140,7 @@ def _build_player_snapshot(
         scores.loc[pd.to_numeric(scores["jogos"], errors="coerce").fillna(0) <= 0, "rating_365"] = pd.NA
     # normaliza o nome (tira espaços nas pontas) — a fonte às vezes traz "Ederson "
     # com espaço, que aparece como jogador "diferente" e quebra joins por nome.
-    scores["player_name"] = scores["player_name"].map(
-        lambda v: " ".join(v.split()) if isinstance(v, str) else v
-    )
+    scores["player_name"] = scores["player_name"].map(clean_person_name)
 
     # número da camisa por (jogador, time): moda do shirt_number nos lineups; cai
     # pro roster se faltar. Casado por nome EXATO (preserva acento) p/ não colidir
@@ -183,15 +187,45 @@ def _load_match_order() -> list[str]:
     sort_cols = [c for c in ("temporal_order", "date", "kickoff_time", "match_id") if c in order_frame.columns]
     chronological = order_frame.sort_values(sort_cols, na_position="last")["match_id"].tolist()
 
-    # Regrava a ordem pela cronologia canônica. Jogos antigos preservados que não
-    # aparecem mais nas features ficam no fim, para não sumirem silenciosamente.
+    # Regrava a ordem com a lista canônica atual. Preserva a posição de jogos que
+    # continuam válidos, mas remove IDs órfãos que desapareceram das features; se
+    # eles ficarem no fim, viram snapshots fantasma no dashboard.
     existing = json.loads(MATCH_ORDER_PATH.read_text()) if MATCH_ORDER_PATH.exists() else []
-    seen = set(chronological)
-    order = chronological + [mid for mid in existing if mid not in seen]
+    valid = set(chronological)
+    order = [mid for mid in existing if mid in valid]
+    seen = set(order)
+    order.extend(mid for mid in chronological if mid not in seen)
 
     ensure_dir(SNAPSHOTS_DIR)
     MATCH_ORDER_PATH.write_text(json.dumps(order), encoding="utf-8")
     return order
+
+
+def _snapshot_index(path: Path, prefix: str) -> int | None:
+    stem = path.stem if path.suffix != ".json" else path.name.removesuffix(".json")
+    if not stem.startswith(prefix):
+        return None
+    try:
+        return int(stem.split("_")[-1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _prune_stale_snapshot_artifacts(n_total: int) -> None:
+    """Remove snapshots acima do total válido da ordem canônica atual."""
+    for pattern, prefix in (("snapshot_jogo_*.parquet", "snapshot_jogo"), ("weights_jogo_*.json", "weights_jogo")):
+        for path in SNAPSHOTS_DIR.glob(pattern):
+            idx = _snapshot_index(path, prefix)
+            if idx is not None and idx > n_total:
+                path.unlink(missing_ok=True)
+
+    for path in (SCORE_HISTORY_PATH, SNAPSHOTS_DIR / "snapshot_timeline.parquet", PLAYER_TIMELINE_PATH):
+        existing = _read_optional(path)
+        if existing.empty or "snapshot_jogo" not in existing.columns:
+            continue
+        filtered = existing[pd.to_numeric(existing["snapshot_jogo"], errors="coerce").le(n_total)].copy()
+        if len(filtered) != len(existing):
+            write_dataframe(path, filtered.reset_index(drop=True))
 
 
 def _last_processed_jogo() -> int:
@@ -251,6 +285,7 @@ def run_snapshot_jogo(n: int | None = None) -> dict[str, Any]:
     ensure_dir(SNAPSHOTS_DIR)
     match_order = _load_match_order()
     n_total = len(match_order)
+    _prune_stale_snapshot_artifacts(n_total)
     last = _last_processed_jogo()
 
     if n is None:
@@ -277,6 +312,24 @@ def run_snapshot_jogo(n: int | None = None) -> dict[str, Any]:
     match_id = match_order[n - 1]
     ids_ate_agora = match_order[:n]
     features_n = all_features[all_features["match_id"].isin(ids_ate_agora)].copy()
+
+    # ── PORTA DE QUALIDADE: não processa jogo com dado incompleto/inconsistente.
+    # Valida o jogo N em todas as dimensões (placar, eventos, stats de time e
+    # jogador, lineups, coerência entre fontes primárias) — dado quebrado aqui
+    # corromperia o snapshot, a narrativa, os scores. Se houver erro, ABORTA e
+    # devolve a lista, sem escrever nada.
+    source_map = _read_optional(GOLD_DIR / "dim_match" / "source_match_map.parquet")
+    match_row = matches[matches["canonical_match_id"] == match_id]
+    if not match_row.empty:
+        errors = validate_match_completeness(
+            match_row.iloc[0], source_map, events, team_stats, player_stats, lineups
+        )
+        if errors:
+            print(f"\n⚠️  Jogo {n} ({match_id}) NÃO processado — dados incompletos/inconsistentes:")
+            for e in errors:
+                print(f"     • {e}")
+            print("     Corrija a coleta/reconciliação e rode de novo.\n")
+            return {"status": "bloqueado", "n": n, "match_id": match_id, "erros": errors}
 
     # Histórico acumulado até o jogo anterior (persistido no disco)
     score_history_acum = _read_optional(SCORE_HISTORY_PATH)

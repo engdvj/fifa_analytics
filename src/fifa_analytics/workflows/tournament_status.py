@@ -66,7 +66,8 @@ def build_tournament_status(matches: pd.DataFrame) -> pd.DataFrame:
         match_id = match["match_id"]
         manifest = _read_manifest(match_id)
         missing_sections = _missing_sections(match_id, manifest)
-        report_exists = (FINAL_REPORTS_DIR / f"{match_id}.md").exists()
+        final_report_path = _final_report_path(match_id, manifest)
+        report_exists = final_report_path is not None
         report_status = _report_status(report_exists, missing_sections)
 
         rows.append(
@@ -93,7 +94,7 @@ def build_tournament_status(matches: pd.DataFrame) -> pd.DataFrame:
                 "missing_sections": missing_sections,
                 "data_quality_status": manifest.get("data_quality_status", "desconhecido"),
                 "report_status": report_status,
-                "final_report_path": str(FINAL_REPORTS_DIR / f"{match_id}.md") if report_exists else None,
+                "final_report_path": str(final_report_path) if final_report_path else None,
                 "status_updated_at": utc_now_iso(),
             }
         )
@@ -129,6 +130,23 @@ def _read_manifest(match_id: str) -> dict[str, Any]:
         return {}
     with path.open("r", encoding="utf-8") as file:
         return yaml.safe_load(file) or {}
+
+
+def _final_report_path(match_id: str, manifest: dict[str, Any]) -> Path | None:
+    manifest_path = manifest.get("final_report_path")
+    if manifest_path:
+        path = Path(str(manifest_path))
+        if path.exists():
+            return path
+
+    legacy_path = FINAL_REPORTS_DIR / f"{match_id}.md"
+    if legacy_path.exists():
+        return legacy_path
+
+    match_number = str(match_id).rsplit("_", 1)[-1]
+    for path in FINAL_REPORTS_DIR.rglob(f"{match_number}_*.md"):
+        return path
+    return None
 
 
 def _has_fragment(match_id: str, fragment_id: str) -> bool:

@@ -17,7 +17,7 @@ from fifa_analytics.analytics.scores import (
     build_team_match_features,
     build_team_scores,
 )
-from fifa_analytics.utils.text import slugify
+from fifa_analytics.utils.text import clean_person_name, person_name_exact_key, person_name_key, slugify
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +153,14 @@ def test_player_profile_st_is_atacante():
 def test_player_profile_cm_is_meio():
     row = pd.Series({"position": "CM", "saves": 0, "goals": 0, "tackles": 0, "shots_on_target": 0, "interceptions": 0})
     assert _player_profile(row) == "meio"
+
+
+def test_player_profile_dm_and_cdm_are_same_profile():
+    dm = pd.Series({"position": "DM", "saves": 0, "goals": 0, "tackles": 0, "shots_on_target": 0, "interceptions": 0})
+    cdm = pd.Series({"position": "CDM", "saves": 0, "goals": 0, "tackles": 0, "shots_on_target": 0, "interceptions": 0})
+
+    assert _player_profile(dm) == "meio"
+    assert _player_profile(cdm) == "meio"
 
 
 def test_player_profile_fallback_saves():
@@ -425,6 +433,45 @@ def test_player_scores_better_cb_has_higher_score():
     assert militao["score_geral"] > rudiger["score_geral"]
 
 
+def test_player_scores_defender_uses_365_defensive_actions():
+    players = pd.DataFrame([
+        _player("j1", "Brasil", "Zagueiro Forte", position="CB", tackles_won=4, interceptions=3, clearances=5, ball_recovery=4, ground_duels_won=3, aerial_duels_won=2),
+        _player("j1", "Alemanha", "Zagueiro Quieto", position="CB", tackles_won=1, interceptions=0, clearances=1, ball_recovery=1, ground_duels_won=0, aerial_duels_won=0),
+    ])
+
+    scores = build_player_scores(build_player_match_features(players))
+    forte = scores[scores["player_name"] == "Zagueiro Forte"].iloc[0]
+    quieto = scores[scores["player_name"] == "Zagueiro Quieto"].iloc[0]
+
+    assert forte["score_geral"] > quieto["score_geral"]
+
+
+def test_player_scores_goalkeeper_uses_expected_goals_prevented():
+    players = pd.DataFrame([
+        _player("j1", "Brasil", "Goleiro XGP", position="GK", saves=3, goals_conceded=1, expected_goals_prevented=1.5),
+        _player("j1", "Alemanha", "Goleiro Neutro", position="GK", saves=3, goals_conceded=1, expected_goals_prevented=0.0),
+    ])
+
+    scores = build_player_scores(build_player_match_features(players))
+    xgp = scores[scores["player_name"] == "Goleiro XGP"].iloc[0]
+    neutro = scores[scores["player_name"] == "Goleiro Neutro"].iloc[0]
+
+    assert xgp["score_geral"] > neutro["score_geral"]
+
+
+def test_player_scores_attacker_uses_expected_goals_when_goals_are_equal():
+    players = pd.DataFrame([
+        _player("j1", "Brasil", "Atacante XG", position="ST", goals=0, shots_on_target=1, expected_goals=1.2, expected_goals_on_target=1.0),
+        _player("j1", "Alemanha", "Atacante Baixo XG", position="ST", goals=0, shots_on_target=1, expected_goals=0.1, expected_goals_on_target=0.1),
+    ])
+
+    scores = build_player_scores(build_player_match_features(players))
+    high = scores[scores["player_name"] == "Atacante XG"].iloc[0]
+    low = scores[scores["player_name"] == "Atacante Baixo XG"].iloc[0]
+
+    assert high["score_geral"] > low["score_geral"]
+
+
 def test_player_scores_has_score_geral():
     features = _make_player_features()
     scores = build_player_scores(features)
@@ -437,6 +484,131 @@ def test_player_scores_slug_generated():
     scores = build_player_scores(features)
     vinicius = scores[scores["player_name"] == "Vinicius"].iloc[0]
     assert vinicius["player_slug"] == slugify("Vinicius_Brasil")
+
+
+def test_player_match_features_unique_slug_for_accent_collision_and_cleans_names():
+    players = pd.DataFrame(
+        [
+            _player("j1", "Brasil", "Ederson ", position="GK", player_id="1"),
+            _player("j1", "Brasil", "Éderson", position="CM", player_id="2"),
+            _player("j1", "Egito", "Zizo null", position="RW", player_id="3"),
+        ]
+    )
+
+    features = build_player_match_features(players)
+    brasil_slugs = features[features["team"] == "Brasil"]["player_slug"].tolist()
+
+    assert len(set(brasil_slugs)) == 2
+    assert set(features["player_name"]) == {"Ederson", "Éderson", "Zizo"}
+
+
+def test_slugify_transliterates_nordic_letters():
+    assert slugify("Martin Ødegaard") == "martin_odegaard"
+    assert slugify("Alexander Sørloth") == "alexander_sorloth"
+
+
+def test_person_name_normalization_handles_spaces_and_hyphen_variants():
+    assert clean_person_name(" Raphinha\u00a0") == "Raphinha"
+    assert clean_person_name("Moteb Al \u2011 Harbi null") == "Moteb Al-Harbi"
+    assert person_name_key("Moteb Al\u2011Harbi") == person_name_key("Moteb Al Harbi")
+    assert person_name_exact_key("Ederson") != person_name_exact_key("Éderson")
+
+
+def test_player_report_without_appearances_omits_empty_match_table():
+    import fifa_analytics.workflows.scores_pipeline as scores_pipeline
+
+    report = scores_pipeline._render_player_report(
+        pd.DataFrame(
+            [
+                {
+                    "match_id": pd.NA,
+                    "team": "Brasil",
+                    "player_name": "Neymar",
+                    "position": "LW",
+                    "perfil": "atacante",
+                    "appearances": 0,
+                    "goals": 0,
+                    "assists": 0,
+                }
+            ]
+        )
+    )
+
+    assert "Ainda nao disputou jogos." in report
+    assert "| jogo |" not in report
+
+
+def test_team_players_by_position_groups_by_player_slug_and_keeps_xg_decimals():
+    import fifa_analytics.workflows.scores_pipeline as scores_pipeline
+
+    table = scores_pipeline._team_players_by_position(
+        pd.DataFrame(
+            [
+                {
+                    "player_name": "Alex",
+                    "player_slug": "alex_brasil_1",
+                    "perfil": "atacante",
+                    "appearances": 1,
+                    "goals": 0,
+                    "assists": 0,
+                    "expected_goals": 0.25,
+                },
+                {
+                    "player_name": "Alex",
+                    "player_slug": "alex_brasil_2",
+                    "perfil": "atacante",
+                    "appearances": 1,
+                    "goals": 0,
+                    "assists": 0,
+                    "expected_goals": 1.75,
+                },
+            ]
+        ),
+        "brasil",
+    )
+
+    assert "reports/players/brasil/alex_1" in table
+    assert "reports/players/brasil/alex_2" in table
+    assert "0.25" in table
+    assert "1.75" in table
+
+
+def test_team_report_documents_own_goals_and_player_total_differences():
+    import fifa_analytics.workflows.scores_pipeline as scores_pipeline
+
+    report = scores_pipeline._render_team_report(
+        pd.Series(
+            {
+                "team": "Brasil",
+                "jogos": 1,
+                "points": 3,
+                "saldo_gols": 1,
+                "gols_pro": 2,
+                "gols_contra": 1,
+                "own_goals_for": 1,
+                "own_goals_against": 1,
+                "ranking_disciplina": 1,
+                "ranking_score_geral": 1,
+                "score_geral": 50,
+                "score_resultado": 50,
+                "score_ataque": 50,
+                "score_defesa": 50,
+                "score_eficiencia": 50,
+                "score_controle": 50,
+                "score_forca_relativa": 50,
+                "score_disciplina": 50,
+            }
+        ),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        total_teams=32,
+        team_slug_by_name={},
+    )
+
+    assert "gols contra a favor" in report
+    assert "gols contra sofridos" in report
+    assert "tabela abaixo soma eventos individuais" in report
+    assert "nao contam como gol de jogador da propria selecao" in report
 
 
 def test_player_scores_nivel_evidencia_values():
@@ -484,6 +656,52 @@ def test_build_player_match_features_assigns_profile_from_position():
     assert features[features["player_name"] == "Vinicius"]["perfil"].iloc[0] == "atacante"
 
 
+def test_build_player_match_features_merges_lineup_by_player_id_before_name():
+    players = pd.DataFrame([
+        _player("j1", "Brasil", "Vini Jr", player_id="123", position=None),
+    ])
+    lineups = pd.DataFrame([
+        {
+            "match_id": "j1",
+            "team": "Brasil",
+            "player_id": "123",
+            "player_name": "Vinícius Júnior",
+            "position": "LW",
+            "is_starter": True,
+        }
+    ])
+
+    features = build_player_match_features(players, lineups=lineups)
+    row = features.iloc[0]
+
+    assert row["position"] == "LW"
+    assert bool(row["is_starter"]) is True
+    assert row["perfil"] == "atacante"
+
+
+def test_build_player_match_features_merges_lineup_by_normalized_name_without_player_id():
+    players = pd.DataFrame([
+        _player("j1", "Arábia Saudita", "Moteb Al Harbi", position=None),
+    ])
+    lineups = pd.DataFrame([
+        {
+            "match_id": "j1",
+            "team": "Arábia Saudita",
+            "player_name": "Moteb Al\u2011Harbi",
+            "position": "LB",
+            "is_starter": True,
+        }
+    ])
+
+    features = build_player_match_features(players, lineups=lineups)
+    row = features.iloc[0]
+
+    assert row["player_name"] == "Moteb Al Harbi"
+    assert row["position"] == "LB"
+    assert bool(row["is_starter"]) is True
+    assert row["perfil"] == "defensor"
+
+
 def test_build_player_match_features_includes_roster_players_without_stats():
     players = pd.DataFrame([
         _player("j1", "Brasil", "Vinicius ", position="AM-L", goals=1),
@@ -495,14 +713,49 @@ def test_build_player_match_features_includes_roster_players_without_stats():
 
     features = build_player_match_features(players, rosters=rosters)
 
-    assert set(features["player_name"]) == {"Vinicius ", "Neymar"}
-    vinicius = features[features["player_name"] == "Vinicius "].iloc[0]
+    assert set(features["player_name"]) == {"Vinicius", "Neymar"}
+    vinicius = features[features["player_name"] == "Vinicius"].iloc[0]
     neymar = features[features["player_name"] == "Neymar"].iloc[0]
     assert vinicius["roster_position"] == "F"
     assert vinicius["perfil"] == "atacante"
     assert neymar["appearances"] == 0
     assert neymar["roster_position"] == "F"
     assert neymar["perfil"] == "atacante"
+
+
+def test_build_player_match_features_expands_roster_players_by_match():
+    players = pd.DataFrame([
+        _player("j1", "Brasil", "Vinicius", position="AM-L", goals=1),
+        _player("j2", "Brasil", "Vinicius", position="AM-L", goals=0),
+    ])
+    rosters = pd.DataFrame([
+        {"team": "Brasil", "player_name": "Vinicius", "squad_position": "F"},
+        {"team": "Brasil", "player_name": "Neymar", "squad_position": "F"},
+    ])
+
+    features = build_player_match_features(players, rosters=rosters)
+    neymar = features[features["player_name"] == "Neymar"].sort_values("match_id")
+
+    assert list(neymar["match_id"]) == ["j1", "j2"]
+    assert neymar["appearances"].sum() == 0
+
+
+def test_build_player_match_features_preserves_roster_accent_collision():
+    players = pd.DataFrame([
+        _player("j1", "Brasil", "Ederson", position="GK", saves=1),
+    ])
+    rosters = pd.DataFrame([
+        {"team": "Brasil", "player_name": "Ederson", "squad_position": "G"},
+        {"team": "Brasil", "player_name": "Éderson", "squad_position": "M"},
+    ])
+
+    features = build_player_match_features(players, rosters=rosters)
+    edersons = features.sort_values("player_name")
+
+    assert set(edersons["player_name"]) == {"Ederson", "Éderson"}
+    assert set(edersons["roster_position"]) == {"G", "M"}
+    assert edersons["player_slug"].nunique() == 2
+    assert features[features["player_name"] == "Éderson"]["appearances"].iloc[0] == 0
 
 
 # ---------------------------------------------------------------------------

@@ -45,6 +45,37 @@ def test_build_tournament_status_marks_partial_report(tmp_path, monkeypatch):
     assert "03_lineups" in row["missing_sections"]
 
 
+def test_build_tournament_status_finds_nested_final_report_from_manifest(tmp_path, monkeypatch):
+    fragments_dir = tmp_path / "fragments"
+    final_reports_dir = tmp_path / "final"
+    manifests_dir = tmp_path / "manifests"
+    match_id = "copa_2026_jogo_001"
+    nested_report = final_reports_dir / "fase_de_grupos" / "rodada_1" / "001_mexico_x_africa_do_sul.md"
+
+    (fragments_dir / match_id).mkdir(parents=True)
+    manifests_dir.mkdir(parents=True)
+    nested_report.parent.mkdir(parents=True)
+    nested_report.write_text("report", encoding="utf-8")
+    for fragment_id in tournament_status_module.EXPECTED_FRAGMENT_IDS:
+        (fragments_dir / match_id / f"{fragment_id}.md").write_text(fragment_id, encoding="utf-8")
+    (manifests_dir / f"{match_id}.yaml").write_text(
+        f"missing_sections: []\nfinal_report_path: {nested_report}\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(tournament_status_module, "FRAGMENTS_DIR", fragments_dir)
+    monkeypatch.setattr(tournament_status_module, "FINAL_REPORTS_DIR", final_reports_dir)
+    monkeypatch.setattr(tournament_status_module, "MANIFESTS_DIR", manifests_dir)
+
+    status = tournament_status_module.build_tournament_status(
+        pd.DataFrame([{"match_id": match_id, "status": "finalizado"}])
+    )
+    row = status.iloc[0]
+
+    assert row["report_status"] == "completo"
+    assert row["final_report_path"] == str(nested_report)
+
+
 def test_tournament_reports_summarize_status_and_missing_sections():
     status = pd.DataFrame(
         [
