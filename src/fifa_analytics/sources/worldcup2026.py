@@ -14,8 +14,13 @@ from fifa_analytics.utils.time import utc_now_iso
 
 
 _FALLBACK_BASE_URL = "https://worldcup26.ir"
-DEFAULT_TIMEOUT = 20
-DEFAULT_RETRIES = 4
+DEFAULT_TIMEOUT = 25
+# A worldcup26.ir é instável: ~60% de sucesso por tentativa, com SSLError
+# (UNEXPECTED_EOF) e HTTP 500 transitórios, e resposta lenta (7-8s) quando
+# funciona. Mais tentativas elevam muito a chance de sucesso no conjunto
+# (1 - 0.4^6 ≈ 99.6% vs 0.4^4 ≈ 97.4%), e o backoff com jitter evita martelar
+# o servidor durante a janela ruim.
+DEFAULT_RETRIES = 6
 
 
 def _base_url() -> str:
@@ -37,11 +42,17 @@ def fetch_endpoint(
     retries: int = DEFAULT_RETRIES,
     verify_tls: bool = False,
 ) -> dict[str, Any]:
-    """Busca um endpoint da API worldcup26.ir com retry simples."""
+    """Busca um endpoint da API worldcup26.ir com retry resiliente.
+
+    A fonte é instável (SSLError UNEXPECTED_EOF, HTTP 500 transitórios). Cada
+    tentativa abre uma CONEXÃO NOVA — uma conexão TLS que caiu no meio pode
+    deixar a sessão num estado ruim, então reusá-la propaga a falha. O backoff
+    é exponencial com jitter (evita martelar o servidor em sincronia durante a
+    janela ruim e dá tempo do EOF de SSL passar)."""
+    import random
+
     resolved_base = base_url or _base_url()
     url = f"{resolved_base.rstrip('/')}/{endpoint.lstrip('/')}"
-    session = requests.Session()
-    session.headers.update({"User-Agent": "fifa-analytics/0.1"})
 
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
@@ -49,15 +60,23 @@ def fetch_endpoint(
             with warnings.catch_warnings():
                 if not verify_tls:
                     warnings.simplefilter("ignore")
-                response = session.get(url, timeout=timeout, verify=verify_tls)
+                # conexão nova por tentativa: não reusa sessão potencialmente
+                # corrompida por um EOF de TLS anterior.
+                with requests.Session() as session:
+                    session.headers.update({"User-Agent": "fifa-analytics/0.1"})
+                    response = session.get(url, timeout=timeout, verify=verify_tls)
             response.raise_for_status()
             return response.json()
         except (requests.RequestException, ValueError) as exc:
             last_error = exc
             if attempt < retries:
-                time.sleep(min(attempt * 1.5, 6))
+                # backoff exponencial (1.5, 3, 4.5, 6, 8…) capado em 10s, + jitter
+                base_wait = min(1.5 * (1.6 ** (attempt - 1)), 10.0)
+                time.sleep(base_wait + random.uniform(0, 1.0))
 
-    raise WorldCup2026SourceError(f"Falha ao buscar {url} apos {retries} tentativas: {last_error}") from last_error
+    raise WorldCup2026SourceError(
+        f"Falha ao buscar {url} apos {retries} tentativas: {last_error}"
+    ) from last_error
 
 
 def fetch_all() -> dict[str, Any]:
