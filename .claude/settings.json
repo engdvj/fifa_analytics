@@ -9,7 +9,10 @@
       "Bash(nohup bash watcher/run-window.sh)",
       "WebFetch(domain:givevoicetofootball.github.io)",
       "Bash(pkill -f \"sleep 300\")",
-      "Bash(ps -eo pid,args)"
+      "Bash(ps -eo pid,args)",
+      "Bash(git prune *)",
+      "Bash(git gc *)",
+      "Bash(git fsck *)"
     ],
     "deny": [
       "Bash(git push --force:*)",
