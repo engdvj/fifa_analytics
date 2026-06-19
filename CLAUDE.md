@@ -57,7 +57,7 @@ A seção "A história do jogo" (`reports/fragments/{match_id}/01b_story.md`) te
 Normalizados via `config/teams_mapping.yaml` + `transforms/team_names.traduzir_selecao()`. Sempre passar nomes pela função antes de salvar.
 
 ### Pesos do score de seleções (calibração incremental)
-`TEAM_SCORE_WEIGHTS` em `analytics/scores.py` define os pesos de design (fixos: `score_resultado`=0.35, `score_forca_relativa`=0.15). Os 4 componentes de processo (`score_ataque`, `score_defesa`, `score_eficiencia`, `score_controle`) são recalibrados a cada 2 jogos novos finalizados via regressão (RidgeCV) em `analytics/calibration.py`, contra saldo de gols real — não confunda com os pesos fixos, que não entram nessa regressão por serem circulares (resultado) ou acumulados (Elo). `scores_pipeline._load_latest_calibrated_weights()` lê o snapshot mais recente em `data/gold/analytics/calibration_history/` e aplica via `apply_calibrated_weights()`. Rode `fifa-analytics calibrar-pesos` após coletar jogos novos para gerar um snapshot; ele só gera se houver +2 jogos desde o último (`--forcar` ignora isso).
+`TEAM_SCORE_WEIGHTS` em `analytics/scores.py` define os pesos de design (fixos: `score_resultado`=0.35, `score_forca_relativa`=0.15). Os 4 componentes de processo (`score_ataque`, `score_defesa`, `score_eficiencia`, `score_controle`) são recalibrados a cada jogo novo finalizado (`CALIBRATION_INTERVAL_GAMES = 1` em `scores_pipeline.py`) via regressão (RidgeCV) em `analytics/calibration.py`, contra saldo de gols real — não confunda com os pesos fixos, que não entram nessa regressão por serem circulares (resultado) ou acumulados (Elo). As features de cada componente (`PROCESS_FEATURES`) incluem métricas avançadas da 365Scores quando há cobertura: `team_xg` (ataque/eficiência), `xg_against`+`team_xgp` (defesa) — sinais de qualidade, não de volume (volume de desarmes/cortes indica time pressionado, fica de fora de propósito). `scores_pipeline._load_latest_calibrated_weights()` lê o snapshot mais recente em `data/gold/analytics/calibration_history/` e aplica via `apply_calibrated_weights()`. Rode `fifa-analytics calibrar-pesos` após coletar jogos novos para gerar um snapshot; ele só gera se houver +1 jogo desde o último (`--forcar` ignora isso).
 
 `score_forca_relativa` tem peso adicionalmente escalado por `_elo_maturity_factor()`: no início do torneio, com todos os times no rating Elo inicial (1500), vencer não prova força relativa de fato — o peso cresce organicamente conforme os ratings se diferenciam de verdade (variância real do Elo vs. teto teórico simulado via `_simulate_max_elo_variance`). A fração "não ganha" é transferida para `score_resultado`.
 
@@ -90,7 +90,7 @@ fifa-analytics atualizar
 fifa-analytics worldcup2026        # fonte operacional principal
 fifa-analytics espn                # enriquecimento ESPN
 fifa-analytics wikipedia           # referência pública
-fifa-analytics 365scores           # segunda fonte de validação: formação, expected_assists, key_passes, dribbles_won
+fifa-analytics 365scores           # 2ª fonte: stats (xG/xGP/duelos/xA/key_passes) + TIMELINE de eventos (gols/cartões/subs) que completa a ESPN quando ela vem incompleta
 fifa-analytics indice-canonico     # reconcilia fontes → gold
 fifa-analytics relatorios-basicos  # gera fragmentos + relatórios finais
 fifa-analytics status-torneio      # standings, status, pendências

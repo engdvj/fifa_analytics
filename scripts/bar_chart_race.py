@@ -39,6 +39,7 @@ METRIC_COLS = {
     "elo_rating": "elo_rating",
     # médias ofensivas por jogo
     "gols_por_jogo": "gols_por_jogo",
+    "xg_por_jogo": "xg_por_jogo",                 # xG agregado do elenco (365Scores)
     "chutes_por_jogo": "_chutes_por_jogo",       # calculado abaixo
     "chutes_no_alvo_por_jogo": "chutes_no_alvo_por_jogo",
     "precisao_chute": "chutes_no_alvo_por_chute", # % chutes no alvo
@@ -47,9 +48,14 @@ METRIC_COLS = {
     "dribbles_won_por_jogo": "dribbles_won_por_jogo",
     # médias defensivas por jogo
     "gols_contra_por_jogo": "gols_contra_por_jogo",
+    "xgp_por_jogo": "xgp_por_jogo",               # xGP: gols evitados acima do esperado (365Scores)
     "chutes_sofridos_por_jogo": "chutes_sofridos_por_jogo",
+    "shots_blocked_por_jogo": "shots_blocked_por_jogo",
+    "duels_won_por_jogo": "duels_won_por_jogo",
     "defesas_por_jogo": "_defesas_por_jogo",
     "jogos_sem_sofrer_gol": "jogos_sem_sofrer_gol",
+    # cobertura de dados avançados (365Scores) — usado pelo filtro, não exibido como métrica
+    "advanced_coverage": "advanced_coverage",
     # controle por jogo
     "posse_media": "posse_media",
     "passes_por_jogo": "passes_por_jogo",
@@ -256,6 +262,7 @@ def _read_optional(path: Path) -> pd.DataFrame:
 
 _lineups = _read_optional(Path("data/gold/lineups/canonical_lineups.parquet"))
 _pstats = _read_optional(Path("data/gold/fact_player_match_stats/canonical_player_stats.parquet"))
+_pfeatures = _read_optional(Path("data/gold/analytics/player_match_features.parquet"))
 _events = _read_optional(Path("data/gold/fact_events/canonical_events.parquet"))
 _tstats = _read_optional(Path("data/gold/fact_team_match_stats/canonical_team_stats.parquet"))
 _commentary = _read_optional(Path("data/gold/fact_commentary/canonical_commentary.parquet"))
@@ -300,6 +307,7 @@ _p365 = _read_optional(Path("data/gold/fact_player_match_stats/365scores.parquet
 
 _lineups = _strip_name_cols(_lineups, ("player_name",))
 _pstats = _strip_name_cols(_pstats, ("player_name",))
+_pfeatures = _strip_name_cols(_pfeatures, ("player_name",))
 _events = _strip_name_cols(_events, ("player", "related_player"))
 _commentary = _strip_name_cols(_commentary, ("player", "participants"))
 _p365 = _strip_name_cols(_p365, ("player_name",))
@@ -313,6 +321,7 @@ try:
     from fifa_analytics.analytics.name_reconciliation import apply_player_aliases as _apply_aliases
     _lineups = _apply_aliases(_lineups)
     _pstats = _apply_aliases(_pstats)
+    _pfeatures = _apply_aliases(_pfeatures)
     _rosters = _apply_aliases(_rosters)
 except Exception:  # standalone sem o pacote instalado: segue sem aliases
     pass
@@ -405,14 +414,35 @@ def _player_stats_for(mid: str, team: str, date: str, opponent: str = "") -> dic
             out[nm] = {
                 "goals": _num0(r.get("goals")), "assists": _num0(r.get("assists")),
                 "shots": _num0(r.get("shots")), "on_target": _num0(r.get("shots_on_target")),
-                "saves": _num0(r.get("saves")),
+                "saves": _num0(r.get("saves")), "goals_conceded": _num0(r.get("goals_conceded")),
                 "fouls_committed": _num0(r.get("fouls_committed")), "fouls_drawn": _num0(r.get("fouls_drawn")),
                 "offsides": _num0(r.get("offsides")),
                 "yellow": _num0(r.get("yellow_cards")), "red": _num0(r.get("red_cards")),
                 "own_goals": _num0(r.get("own_goals")),
+                "xg": _num0(r.get("expected_goals")),
+                "xa": _num0(r.get("expected_assists")),
+                "xgot": _num0(r.get("expected_goals_on_target")),
+                "key_passes": _num0(r.get("key_passes")),
+                "big_chances_created": _num0(r.get("big_chances_created")),
+                "big_chances_missed": _num0(r.get("big_chances_missed")),
+                "big_chances_scored": _num0(r.get("big_chances_scored")),
+                "dribbles_won": _num0(r.get("dribbles_won")),
+                "tackles_won": _num0(r.get("tackles_won")),
+                "interceptions": _num0(r.get("interceptions")),
+                "clearances": _num0(r.get("clearances")),
+                "ball_recovery": _num0(r.get("ball_recovery")),
+                "shots_blocked": _num0(r.get("shots_blocked")),
+                "xgp": _num0(r.get("expected_goals_prevented")),
+                "penalties_saved": _num0(r.get("penalties_saved")),
+                "high_claims": _num0(r.get("high_claims")),
+                "punches": _num0(r.get("punches")),
                 # nota de atuação: vem do canonical (fonte única, já casada)
                 "rating": _num0(r.get("rating")),
             }
+            ground_duels = _num0(r.get("ground_duels_won"))
+            aerial_duels = _num0(r.get("aerial_duels_won"))
+            if ground_duels is not None or aerial_duels is not None:
+                out[nm]["duels_won"] = (ground_duels or 0) + (aerial_duels or 0)
     # enriquecimento 365scores (minutos, xA, key passes, % passes) por nome+time —
     # a nota (rating) NÃO é sobrescrita aqui: já veio do canonical acima.
     if not _p365.empty:
@@ -429,8 +459,33 @@ def _player_stats_for(mid: str, team: str, date: str, opponent: str = "") -> dic
             if r is None:
                 continue
             st["minutes"] = _num0(r.get("minutes"))
-            st["xa"] = _num0(r.get("expected_assists"))
-            st["key_passes"] = _num0(r.get("key_passes"))
+            for key, col in (
+                ("xg", "expected_goals"),
+                ("xgot", "expected_goals_on_target"),
+                ("xa", "expected_assists"),
+                ("key_passes", "key_passes"),
+                ("big_chances_created", "big_chances_created"),
+                ("big_chances_missed", "big_chances_missed"),
+                ("big_chances_scored", "big_chances_scored"),
+                ("dribbles_won", "dribbles_won"),
+                ("tackles_won", "tackles_won"),
+                ("interceptions", "interceptions"),
+                ("clearances", "clearances"),
+                ("ball_recovery", "ball_recovery"),
+                ("shots_blocked", "shots_blocked"),
+                ("xgp", "expected_goals_prevented"),
+                ("goals_conceded", "goals_conceded"),
+                ("penalties_saved", "penalties_saved"),
+                ("high_claims", "high_claims"),
+                ("punches", "punches"),
+            ):
+                v = _num0(r.get(col))
+                if v is not None:
+                    st[key] = v
+            ground_duels = _num0(r.get("ground_duels_won"))
+            aerial_duels = _num0(r.get("aerial_duels_won"))
+            if ground_duels is not None or aerial_duels is not None:
+                st["duels_won"] = (ground_duels or 0) + (aerial_duels or 0)
             ap, pc = _num0(r.get("accurate_passes")), _num0(r.get("passes"))
             st["pass_acc"] = round(ap / pc * 100) if ap and pc else None
     return out
@@ -576,7 +631,7 @@ def _pos_x_hint(position: str | None) -> float | None:
         return 25.0
     if p.endswith("-R") or p.startswith("R"):
         return 75.0
-    if p in ("CD", "CM", "AM", "DM", "CF", "M", "F", "G", "SW"):
+    if p in ("CD", "CB", "CM", "AM", "CAM", "DM", "CDM", "CF", "ST", "SS", "M", "F", "G", "GK", "SW"):
         return 50.0
     return None
 
@@ -584,12 +639,12 @@ def _pos_x_hint(position: str | None) -> float | None:
 # "Altura" tática de cada código de posição: menor = mais defensivo (perto do gol),
 # maior = mais ofensivo. Usado para agrupar os jogadores nas linhas da formação.
 _POS_DEPTH = {
-    "G": 0,
-    "SW": 1, "CD": 2, "CD-L": 2, "CD-R": 2, "LB": 2, "RB": 2,
-    "DM": 3,
-    "CM": 4, "CM-L": 4, "CM-R": 4, "LM": 4, "RM": 4, "M": 4,
-    "AM": 5, "AM-L": 5, "AM-R": 5,
-    "LF": 6, "RF": 6, "CF-L": 6, "CF-R": 6, "F": 6,
+    "G": 0, "GK": 0,
+    "SW": 1, "CD": 2, "CD-L": 2, "CD-R": 2, "CB": 2, "LB": 2, "RB": 2, "LWB": 2, "RWB": 2,
+    "DM": 3, "CDM": 3,
+    "CM": 4, "CM-L": 4, "CM-R": 4, "LM": 4, "RM": 4, "M": 4, "MF": 4,
+    "AM": 5, "AM-L": 5, "AM-R": 5, "CAM": 5,
+    "LF": 6, "RF": 6, "LW": 6, "RW": 6, "CF": 6, "CF-L": 6, "CF-R": 6, "RCF": 6, "ST": 6, "SS": 6, "F": 6, "FW": 6,
 }
 
 _POS_GROUP_ORDER = {
@@ -613,11 +668,11 @@ def _position_group(pos: str | None) -> str:
         return "Sem posição"
     if p in {"G", "GK", "GOALKEEPER"}:
         return "Goleiros"
-    if p in {"D", "DEFENDER", "SW", "CD", "CD-L", "CD-R", "LB", "RB"} or "BACK" in p:
+    if p in {"D", "DEFENDER", "SW", "CD", "CD-L", "CD-R", "CB", "LB", "RB", "LWB", "RWB"} or "BACK" in p:
         return "Defensores"
-    if p in {"M", "MIDFIELDER", "DM", "CM", "CM-L", "CM-R", "LM", "RM", "AM", "AM-L", "AM-R"} or "MIDFIELD" in p:
+    if p in {"M", "MF", "MIDFIELDER", "DM", "CDM", "CM", "CM-L", "CM-R", "LM", "RM", "AM", "AM-L", "AM-R", "CAM"} or "MIDFIELD" in p:
         return "Meias"
-    if p in {"F", "FW", "FORWARD", "ATTACKER", "LF", "RF", "CF", "CF-L", "CF-R", "RCF"} or "FORWARD" in p:
+    if p in {"F", "FW", "FORWARD", "ATTACKER", "LF", "RF", "LW", "RW", "CF", "CF-L", "CF-R", "RCF", "ST", "SS", "STRIKER"} or "FORWARD" in p or "WINGER" in p:
         return "Atacantes"
     return "Sem posição"
 
@@ -637,15 +692,22 @@ def _position_label(pos: str | None) -> str:
         "CD": "Zagueiro",
         "CD L": "Zagueiro esquerdo",
         "CD R": "Zagueiro direito",
+        "CB": "Zagueiro",
         "CENTRE BACK": "Zagueiro",
         "CENTER BACK": "Zagueiro",
         "LB": "Lateral esquerdo",
         "LEFT BACK": "Lateral esquerdo",
         "RB": "Lateral direito",
         "RIGHT BACK": "Lateral direito",
+        "LWB": "Ala esquerdo",
+        "LEFT WING BACK": "Ala esquerdo",
+        "RWB": "Ala direito",
+        "RIGHT WING BACK": "Ala direito",
         "M": "Meia",
+        "MF": "Meia",
         "MIDFIELDER": "Meia",
         "DM": "Volante",
+        "CDM": "Volante",
         "DEFENSIVE MIDFIELD": "Volante",
         "CM": "Meia central",
         "CM L": "Meia central esquerdo",
@@ -656,6 +718,7 @@ def _position_label(pos: str | None) -> str:
         "AM": "Meia ofensivo",
         "AM L": "Meia ofensivo esquerdo",
         "AM R": "Meia ofensivo direito",
+        "CAM": "Meia ofensivo",
         "ATTACKING MIDFIELD": "Meia ofensivo",
         "LM": "Meia esquerdo",
         "LEFT MIDFIELD": "Meia esquerdo",
@@ -665,6 +728,9 @@ def _position_label(pos: str | None) -> str:
         "FW": "Atacante",
         "ATTACKER": "Atacante",
         "FORWARD": "Atacante",
+        "ST": "Atacante",
+        "STRIKER": "Atacante",
+        "SS": "Segundo atacante",
         "CF": "Centroavante",
         "CF L": "Centroavante esquerdo",
         "CF R": "Centroavante direito",
@@ -675,6 +741,10 @@ def _position_label(pos: str | None) -> str:
         "LEFT FORWARD": "Atacante esquerdo",
         "RF": "Atacante direito",
         "RIGHT FORWARD": "Atacante direito",
+        "LW": "Ponta esquerdo",
+        "LEFT WINGER": "Ponta esquerdo",
+        "RW": "Ponta direito",
+        "RIGHT WINGER": "Ponta direito",
     }
     return mapped.get(norm, p.upper())
 
@@ -694,13 +764,13 @@ def _build_pitch(starters: list[dict], formation: str | None) -> list[dict]:
     if sum(line_counts) != 10:  # formação descreve os 10 de linha (sem o goleiro)
         return []
 
-    gk = [p for p in starters if (p.get("pos") or "").upper() == "G"]
-    field = [p for p in starters if (p.get("pos") or "").upper() != "G"]
+    gk = [p for p in starters if (p.get("pos_code") or p.get("pos") or "").upper() in {"G", "GK"}]
+    field = [p for p in starters if (p.get("pos_code") or p.get("pos") or "").upper() not in {"G", "GK"}]
     if len(field) != sum(line_counts):
         return []
 
     # ordena os jogadores de linha por profundidade tática (defensivo → ofensivo)
-    field_sorted = sorted(field, key=lambda p: _POS_DEPTH.get((p.get("pos") or "").upper(), 4))
+    field_sorted = sorted(field, key=lambda p: _POS_DEPTH.get((p.get("pos_code") or p.get("pos") or "").upper(), 4))
 
     n_lines = len(line_counts)
     pitch = []
@@ -715,7 +785,7 @@ def _build_pitch(starters: list[dict], formation: str | None) -> list[dict]:
         # ordena a linha esquerda→direita pela dica de lado da position
         linha_lr = sorted(
             linha,
-            key=lambda p: (_pos_x_hint(p.get("pos")) if _pos_x_hint(p.get("pos")) is not None else 50.0),
+            key=lambda p: (_pos_x_hint(p.get("pos_code") or p.get("pos")) if _pos_x_hint(p.get("pos_code") or p.get("pos")) is not None else 50.0),
         )
         for ci, p in enumerate(linha_lr):
             x = (100 / (count + 1)) * (ci + 1) if count > 1 else 50.0
@@ -735,10 +805,12 @@ def _build_team_lineup(mid: str, team: str, date: str = "", opponent: str = "") 
         formation = str(fvals[0]) if len(fvals) else None
         for _, p in lu.sort_values("shirt_number", na_position="last").iterrows():
             _pname = p.get("player_name")
+            pos_code = p.get("position") if not pd.isna(p.get("position")) else None
             item = {
                 "name": _clean_person_name(_pname),
                 "num": _num(p.get("shirt_number")),
-                "pos": p.get("position") if not pd.isna(p.get("position")) else None,
+                "pos_code": _clean_pos(pos_code) or None,
+                "pos": _position_label(pos_code),
             }
             (starters if bool(p.get("is_starter")) else subs).append(item)
 
@@ -960,7 +1032,8 @@ for _team in _all_cup_teams:
         })
 
     # — elenco agregado (stats somadas em todos os jogos)
-    ps = _pstats[_pstats["team"] == _team]
+    player_detail_source = _pfeatures if not _pfeatures.empty else _pstats
+    ps = player_detail_source[player_detail_source["team"] == _team]
     roster_team = _rosters[_rosters["team"] == _team] if not _rosters.empty else pd.DataFrame()
     roster_keys = set(roster_team["player_name"].dropna().map(_name_key_exact)) if not roster_team.empty and "player_name" in roster_team.columns else set()
     roster_count = len(roster_keys)
@@ -1072,8 +1145,11 @@ for _team in _all_cup_teams:
             # próprio do dashboard, que dava valores divergentes.
             rating_media = None
             rating_jogos = 0
-            if not _pstats.empty and "rating" in _pstats.columns:
-                cps_p = _pstats[(_pstats["team"] == _team) & (_pstats["player_name"] == p["player_name"])]
+            if not player_detail_source.empty and "rating" in player_detail_source.columns:
+                cps_p = player_detail_source[
+                    (player_detail_source["team"] == _team)
+                    & (player_detail_source["player_name"] == p["player_name"])
+                ]
                 ratings = pd.to_numeric(cps_p.get("rating"), errors="coerce").dropna() if not cps_p.empty else pd.Series(dtype=float)
                 if len(ratings):
                     rating_media = round(float(ratings.mean()), 1)
@@ -1081,6 +1157,7 @@ for _team in _all_cup_teams:
             players.append({
                 "name": p["player_name"],
                 "num": num_by_name.get(pkey),
+                "pos_code": _clean_pos(pos_raw) or None,
                 "pos": _position_label(pos_raw),
                 "pos_group": pos_group,
                 "pos_order": _POS_GROUP_ORDER.get(pos_group, 99),
@@ -1254,6 +1331,8 @@ for _ord, (_, mrow) in enumerate(matches_sorted.iterrows()):
         dot_status = "live"
     elif mid in snapshot_n_by_mid:
         dot_status = "done"
+    elif status == "finalizado":
+        dot_status = "missing"
     else:
         dot_status = "pending"
     mi = match_info.get(mid, {})
@@ -1298,6 +1377,7 @@ METRIC_GROUPS = [
     ]),
     ("Ataque · Média/jogo", "tt-col-ataque", [
         ("gols_por_jogo", "Gols"),
+        ("xg_por_jogo", "xG (Gols Esperados)"),
         ("chutes_por_jogo", "Chutes"),
         ("chutes_no_alvo_por_jogo", "No Alvo"),
         ("precisao_chute", "Precisão de Chute %"),
@@ -1305,7 +1385,10 @@ METRIC_GROUPS = [
     ]),
     ("Defesa · Média/jogo", "tt-col-defesa", [
         ("gols_contra_por_jogo", "Gols Sofridos"),
+        ("xgp_por_jogo", "xGP (Gols Evitados)"),
         ("chutes_sofridos_por_jogo", "Chutes Sofridos"),
+        ("shots_blocked_por_jogo", "Bloqueios"),
+        ("duels_won_por_jogo", "Duelos Ganhos"),
         ("defesas_por_jogo", "Defesas do Goleiro"),
         ("jogos_sem_sofrer_gol", "Jogos Sem Sofrer Gol"),
     ]),
@@ -1348,24 +1431,28 @@ METRIC_RELATIONS: dict[str, list[str]] = {
     "gols_pro":                ["saldo_gols", "gols_por_jogo", "score_resultado", "score_ataque"],
     "gols_contra":             ["saldo_gols", "gols_contra_por_jogo", "jogos_sem_sofrer_gol", "score_resultado", "score_defesa"],
 
-    # ── score_ataque ← gols/jogo + chutes_no_alvo/jogo (× contexto adversário)
-    "score_ataque":            ["gols_por_jogo", "chutes_no_alvo_por_jogo", "score_eficiencia"],
-    "gols_por_jogo":           ["gols_pro", "chutes_no_alvo_por_jogo", "precisao_chute", "score_ataque", "score_eficiencia"],
+    # ── score_ataque ← gols/jogo + xG/jogo (qualidade) + chutes_no_alvo/jogo (× contexto adversário)
+    "score_ataque":            ["gols_por_jogo", "xg_por_jogo", "chutes_no_alvo_por_jogo", "score_eficiencia"],
+    "gols_por_jogo":           ["gols_pro", "xg_por_jogo", "chutes_no_alvo_por_jogo", "precisao_chute", "score_ataque", "score_eficiencia"],
+    "xg_por_jogo":             ["gols_por_jogo", "chutes_no_alvo_por_jogo", "score_ataque", "score_eficiencia"],
     "chutes_no_alvo_por_jogo": ["chutes_por_jogo", "precisao_chute", "gols_por_jogo", "score_ataque", "score_eficiencia"],
     "chutes_por_jogo":         ["chutes_no_alvo_por_jogo", "precisao_chute", "escanteios_por_jogo"],
     "escanteios_por_jogo":     ["chutes_por_jogo", "key_passes_por_jogo"],
 
-    # ── score_eficiencia ← gols/chute (precisao_chute) + chutes_no_alvo/chute + key_passes/jogo
-    "score_eficiencia":        ["precisao_chute", "chutes_no_alvo_por_jogo", "gols_por_jogo", "key_passes_por_jogo", "score_ataque"],
+    # ── score_eficiencia ← gols/chute (precisao_chute) + gols vs xG + chutes_no_alvo/chute + key_passes/jogo
+    "score_eficiencia":        ["precisao_chute", "xg_por_jogo", "chutes_no_alvo_por_jogo", "gols_por_jogo", "key_passes_por_jogo", "score_ataque"],
     "precisao_chute":          ["chutes_por_jogo", "chutes_no_alvo_por_jogo", "gols_por_jogo", "score_eficiencia"],
     "key_passes_por_jogo":     ["gols_por_jogo", "escanteios_por_jogo", "score_eficiencia", "score_controle"],
 
     # ── score_defesa ← gols sofridos/jogo (eixo dominante, gol contra pesa +) +
-    #    volume sofrido segurado (solidez) ponderado pela força do adversário (Elo)
-    "score_defesa":            ["gols_contra_por_jogo", "gols_contra", "chutes_sofridos_por_jogo"],
+    #    QUALIDADE defensiva (xGP, bloqueios, duelos) ponderada pela força do adversário (Elo)
+    "score_defesa":            ["gols_contra_por_jogo", "gols_contra", "chutes_sofridos_por_jogo", "xgp_por_jogo", "shots_blocked_por_jogo", "duels_won_por_jogo"],
     "gols_contra_por_jogo":    ["gols_contra", "chutes_sofridos_por_jogo", "score_defesa"],
-    "chutes_sofridos_por_jogo":["gols_contra_por_jogo", "score_defesa"],
-    "defesas_por_jogo":        ["chutes_sofridos_por_jogo", "gols_contra_por_jogo"],
+    "chutes_sofridos_por_jogo":["gols_contra_por_jogo", "score_defesa", "shots_blocked_por_jogo"],
+    "xgp_por_jogo":            ["gols_contra_por_jogo", "defesas_por_jogo", "score_defesa"],
+    "shots_blocked_por_jogo":  ["chutes_sofridos_por_jogo", "score_defesa"],
+    "duels_won_por_jogo":      ["score_defesa", "chutes_sofridos_por_jogo"],
+    "defesas_por_jogo":        ["chutes_sofridos_por_jogo", "gols_contra_por_jogo", "xgp_por_jogo"],
     "jogos_sem_sofrer_gol":    ["gols_contra_por_jogo", "gols_contra"],
 
     # ── score_controle ← posse + passes + precisao_passes + posse_produtiva (chutes_no_alvo/posse) + dribbles
@@ -1455,51 +1542,45 @@ metric_relations_indirect_json = json.dumps(METRIC_RELATIONS_INDIRECT, ensure_as
 SCORE_INFO: dict[str, dict] = {
     "score_resultado": {
         "title": "Resultado",
-        "role": "Base da campanha",
-        "desc": "Mede o que o time já transformou em placar: pontos, saldo e aproveitamento.",
-        "detail": "Vitórias e empates pesam mais quando vêm contra adversários mais fortes. É o componente mais estável no começo da Copa.",
-        "good": "favorece quem pontua e constrói saldo",
-        "metricas": ["Pontos", "Aproveit.", "Saldo", "Gols +/-"],
+        "role": "Desempenho no placar",
+        "desc": "Resume o que a seleção já converteu em campanha: pontos, saldo e gols marcados.",
+        "detail": "É o componente mais determinante porque confirma produção em resultado. Vitórias e empates ganham mais contexto quando vêm contra adversários competitivos.",
+        "good": "prioriza pontuação consistente, saldo positivo e impacto real no jogo",
     },
     "score_ataque": {
         "title": "Ataque",
-        "role": "Volume ofensivo",
-        "desc": "Olha quanto o time cria e chega ao gol, não só se a bola entrou.",
-        "detail": "Finalizações, chutes no alvo e criação ajudam a separar um ataque dominante de um time que marcou em poucas chances.",
-        "good": "favorece pressão ofensiva constante",
-        "metricas": ["Gols/j", "Chutes", "No alvo", "P-chave"],
+        "role": "Produção ofensiva",
+        "desc": "Avalia quanto a seleção cria e qual é a qualidade das chances, além dos gols já marcados.",
+        "detail": "Gols continuam sendo o sinal principal, mas chances claras, xG e chutes no alvo ajudam a separar pressão produtiva de volume sem perigo.",
+        "good": "prioriza criação de chances relevantes, presença na área e finalizações perigosas",
     },
     "score_defesa": {
         "title": "Defesa",
-        "role": "Proteção do gol",
-        "desc": "Sofrer menos gols sempre vale mais. Em caso de empate, sobe quem segurou mais pressão de um adversário forte.",
-        "detail": "Gol contra pesa mais (a defesa se desorganizou). Segurar volume sem levar gol conta a favor.",
-        "good": "favorece quem sofre poucos gols sob pressão de times fortes",
-        "metricas": ["Gols sofr.", "Gol contra", "Volume sofrido", "Força do rival"],
+        "role": "Solidez sem a bola",
+        "desc": "Mede a capacidade de proteger o gol, limitar chances claras e resistir contra adversários fortes.",
+        "detail": "Gols sofridos definem a base da nota. Dentro dessa faixa, pesam ações que indicam controle defensivo: duelos ganhos, bloqueios, xGP e contexto do rival.",
+        "good": "prioriza poucos gols sofridos, proteção de área e resposta eficiente à pressão",
     },
     "score_eficiencia": {
         "title": "Eficiência",
-        "role": "Qualidade da chance",
-        "desc": "Mede se o time transforma volume em perigo real.",
-        "detail": "Ajuda a diferenciar quem chuta muito sem direção de quem cria finalizações limpas e aproveita melhor as chances.",
-        "good": "favorece precisão e decisão no último terço",
-        "metricas": ["Precisão", "Alvo/chute", "Gols/chute", "P-chave"],
+        "role": "Aproveitamento das chances",
+        "desc": "Mostra se a seleção transforma suas oportunidades em gols com precisão e tomada de decisão.",
+        "detail": "Diferencia volume de aproveitamento. Conversão, pontaria e gols acima do esperado indicam um ataque que não desperdiça as melhores chances.",
+        "good": "prioriza conversão alta, boa pontaria e decisões limpas no último terço",
     },
     "score_controle": {
         "title": "Controle",
-        "role": "Domínio territorial",
-        "desc": "Descreve o quanto o time controla a bola e sustenta posse com qualidade.",
-        "detail": "Tem peso menor porque posse não vence jogo sozinha, mas ajuda a explicar superioridade e estilo.",
-        "good": "favorece posse produtiva e circulação limpa",
-        "metricas": ["Posse", "Passes", "Precisão", "Dribles"],
+        "role": "Gestão do jogo",
+        "desc": "Observa como a seleção sustenta posse, circula a bola e reduz instabilidade durante a partida.",
+        "detail": "Tem peso menor porque posse, sozinha, não vence jogo. Ainda assim, ajuda a identificar equipes que controlam ritmo, território e tomada de risco.",
+        "good": "prioriza circulação segura, posse produtiva e capacidade de ditar o ritmo",
     },
     "score_forca_relativa": {
-        "title": "Força relativa",
-        "role": "Contexto do caminho",
-        "desc": "Usa o Elo acumulado para contextualizar contra quem o time performou.",
-        "detail": "No início pesa menos na prática, porque todos partem próximos. Conforme a Copa avança, vencer times fortes passa a separar melhor.",
-        "good": "favorece campanhas fortes contra adversários fortes",
-        "metricas": ["Rating Elo", "Margem", "Adversário", "Sequência"],
+        "title": "Força Relativa",
+        "role": "Qualidade da campanha",
+        "desc": "Contextualiza o desempenho pela força dos adversários enfrentados e pela evolução do rating da seleção.",
+        "detail": "No início pesa menos porque as seleções partem próximas. Conforme a Copa avança, bons resultados contra rivais fortes passam a diferenciar melhor as campanhas.",
+        "good": "prioriza desempenho sustentado contra adversários de maior dificuldade",
     },
     "score_disciplina": {
         "title": "Disciplina",
@@ -1507,7 +1588,6 @@ SCORE_INFO: dict[str, dict] = {
         "desc": "Mostra o quanto faltas e cartões atrapalham o time.",
         "detail": "É informativo e normalmente fica fora do peso principal quando não aparece nos pills. Vermelho pesa mais que amarelo.",
         "good": "favorece times que competem sem se expor a punições",
-        "metricas": ["Faltas", "Amarelos", "Vermelhos", "Por jogo"],
     },
 }
 score_info_json = json.dumps(SCORE_INFO, ensure_ascii=False)
@@ -1571,9 +1651,12 @@ header {{
   font-size: 0.7rem;
   color: #8b949e;
   white-space: nowrap;
-  cursor: help;
+  cursor: pointer;
+  font-family: inherit;
+  appearance: none;
 }}
 .w-pill:hover {{ border-color: #58a6ff; background: #1a2233; }}
+.w-pill.open {{ border-color: #58a6ff; background: #1a2233; }}
 .w-pill .w-name {{ color: #c8d3e0; font-weight: 600; }}
 .w-pill .w-val  {{ color: #58a6ff; font-weight: 700; }}
 /* tooltip do peso — abre PARA BAIXO (os pills ficam no topo da tela) */
@@ -1585,39 +1668,332 @@ header {{
   transform: translateX(-50%);
   background: linear-gradient(180deg, #161d27 0%, #0d1117 100%);
   border: 1px solid #2b3950;
-  border-radius: 10px;
-  padding: 12px;
-  width: 384px;
+  border-radius: 8px;
+  padding: 14px;
+  width: min(520px, calc(100vw - 32px));
   white-space: normal;
   z-index: 20000;
   box-shadow: 0 18px 46px rgba(0,0,0,0.85), 0 0 0 1px rgba(88,166,255,0.10);
   pointer-events: none;
 }}
-.w-pill:hover .w-tip {{ display: block; }}
+.w-pill.open .w-tip {{ display: block; pointer-events: auto; }}
 .w-tip::before {{
   content: ""; position: absolute; top: -6px; left: 50%; transform: translateX(-50%) rotate(45deg);
   width: 10px; height: 10px; background: #161d27; border-left: 1px solid #2b3950; border-top: 1px solid #2b3950;
 }}
-.w-tip-head {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 9px; }}
-.w-tip-title {{ font-size: 0.72rem; font-weight: 900; color: #79c0ff; text-transform: uppercase; letter-spacing: 0.8px; }}
-.w-tip-role {{ color: #8b949e; font-size: 0.68rem; font-weight: 700; margin-top: 2px; }}
+.w-pill:first-child .w-tip {{ left: 0; transform: none; }}
+.w-pill:first-child .w-tip::before {{ left: 44px; transform: rotate(45deg); }}
+.w-pill:last-child .w-tip {{ left: auto; right: 0; transform: none; }}
+.w-pill:last-child .w-tip::before {{ left: auto; right: 44px; transform: rotate(45deg); }}
+.w-tip-head {{
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 14px;
+  margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid #263241;
+}}
+.w-tip-title {{ font-size: 0.74rem; font-weight: 900; color: #79c0ff; text-transform: uppercase; letter-spacing: 0.8px; }}
+.w-tip-role {{ color: #9aa4b2; font-size: 0.68rem; font-weight: 700; margin-top: 3px; }}
 .w-tip-weight {{
   min-width: 58px; text-align: right; color: #e6edf3; font-size: 1.15rem; font-weight: 900;
   font-variant-numeric: tabular-nums; line-height: 1;
 }}
 .w-tip-weight span {{ display: block; margin-top: 3px; color: #6b7280; font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.5px; }}
-.w-tip-desc  {{ font-size: 0.78rem; color: #d6dee8; line-height: 1.35; margin-bottom: 7px; }}
-.w-tip-detail {{ color: #8b949e; font-size: 0.72rem; line-height: 1.35; margin-bottom: 9px; }}
+.w-tip-desc  {{ font-size: 0.79rem; color: #d6dee8; line-height: 1.42; margin-bottom: 7px; }}
+.w-tip-detail {{ color: #9aa4b2; font-size: 0.72rem; line-height: 1.42; margin-bottom: 10px; }}
 .w-tip-good {{
-  border: 1px solid #1f6feb55; background: #1f6feb18; color: #9fd1ff;
-  border-radius: 7px; padding: 7px 8px; font-size: 0.71rem; font-weight: 800; margin-bottom: 10px; line-height: 1.25;
+  border: 1px solid #1f6feb55; background: #1f6feb16; color: #b7dcff;
+  border-radius: 7px; padding: 8px 9px; font-size: 0.71rem; font-weight: 700; margin-bottom: 11px; line-height: 1.35;
 }}
-.w-tip-metrics {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; align-items: stretch; }}
+.w-tip-good::before {{
+  content: "Leitura";
+  display: block; color: #79c0ff; font-size: 0.56rem; font-weight: 900;
+  text-transform: uppercase; letter-spacing: 0.7px; margin-bottom: 3px;
+}}
+.w-tip-metrics {{ display: grid; grid-template-columns: repeat(4, minmax(88px, 1fr)); gap: 6px; align-items: stretch; }}
+.w-tip-metrics::before {{
+  content: "Indicadores";
+  grid-column: 1 / -1; color: #6b7280; font-size: 0.56rem; font-weight: 900;
+  text-transform: uppercase; letter-spacing: 0.7px; margin-bottom: -1px;
+}}
 .w-tip-metrics span {{
   display: inline-flex; align-items: center; justify-content: center; min-width: 0;
-  background: #0d2618; border: 1px solid #1f6f3a; color: #79d98f;
-  border-radius: 10px; padding: 4px 6px; font-size: 0.62rem; font-weight: 800;
+  background: #0f2418; border: 1px solid #1f6f3a; color: #8de09f;
+  border-radius: 6px; padding: 5px 6px; font-size: 0.62rem; font-weight: 800;
   text-align: center; line-height: 1.15; word-break: break-word; hyphens: auto;
+}}
+/* chips com glossário: cursor de ajuda + sublinhado pontilhado discreto sinalizam
+   que há explicação ao passar o mouse (tooltip flutuante via data-tip). */
+.w-tip-metrics span.has-tip {{ cursor: help; text-decoration: underline dotted #1f6f3a 1px; text-underline-offset: 2px; }}
+/* tooltip flutuante (instantâneo, estilizado) — substitui o title nativo, que é
+   lento e pouco confiável. Um único elemento reposicionado por JS. */
+#chipTip {{
+  position: fixed; z-index: 30000; display: none; max-width: 260px;
+  background: #0d1117; border: 1px solid #2b3950; border-radius: 8px;
+  padding: 8px 10px; font-size: 0.66rem; font-weight: 600; line-height: 1.35;
+  color: #c8d3e0; box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+  pointer-events: none; white-space: normal;
+}}
+.weights-help-btn {{
+  width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid #31557c; background: #10213a; color: #9fd1ff;
+  border-radius: 6px; font-size: 0.78rem; font-weight: 900; cursor: pointer;
+  margin-right: 4px; flex-shrink: 0;
+}}
+.weights-help-btn:hover {{ border-color: #58a6ff; background: #16345c; color: #d7ecff; }}
+.weights-guide-overlay {{
+  position: fixed; inset: 0; z-index: 26000; display: none; align-items: center; justify-content: center;
+  background: rgba(1, 4, 9, 0.64); padding: 18px;
+}}
+.weights-guide {{
+  width: min(1320px, calc(100vw - 48px)); height: min(760px, calc(100vh - 48px));
+  display: grid; grid-template-rows: auto minmax(0, 1fr);
+  background: linear-gradient(180deg, #121923 0%, #0d1117 100%);
+  border: 1px solid #2b3950; border-radius: 10px; overflow: hidden;
+  box-shadow: 0 24px 80px rgba(0,0,0,0.86), 0 0 0 1px rgba(88,166,255,0.10);
+}}
+.wg-top {{
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 14px 16px; border-bottom: 1px solid #263241; background: #0f1620;
+}}
+.wg-title {{ min-width: 0; }}
+.wg-title strong {{ display: block; color: #e6edf3; font-size: 0.95rem; line-height: 1.15; }}
+.wg-title span {{ display: block; color: #8b949e; font-size: 0.72rem; margin-top: 3px; }}
+.wg-close {{
+  width: 30px; height: 30px; border: 0; border-radius: 6px; background: transparent;
+  color: #8b949e; cursor: pointer; font-size: 1.1rem;
+}}
+.wg-close:hover {{ color: #e6edf3; background: #21262d; }}
+.wg-shell {{ min-height: 0; display: grid; grid-template-columns: 160px 1fr; overflow: hidden; }}
+.wg-nav {{ padding: 14px 10px; border-right: 1px solid #263241; background: #0b1017; overflow-y: auto; }}
+.wg-tab {{
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  border: 1px solid transparent; background: transparent; color: #9aa4b2;
+  padding: 9px 10px; border-radius: 7px; cursor: pointer; font-size: 0.76rem; font-weight: 800;
+  text-align: left; margin-bottom: 5px;
+}}
+.wg-tab:hover {{ color: #d6dee8; background: #161b22; }}
+.wg-tab.active {{ color: #79c0ff; background: #1f6feb1f; border-color: #1f6feb55; }}
+.wg-body {{ min-width: 0; overflow: hidden; padding: 16px 24px 18px; }}
+.wg-section {{ display: none; }}
+.wg-section.active {{ display: grid; align-content: start; min-height: 0; }}
+.wg-kicker {{ color: #79c0ff; font-size: 0.72rem; font-weight: 900; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 7px; }}
+.wg-h2 {{ color: #e6edf3; font-size: 1.34rem; line-height: 1.18; margin-bottom: 9px; }}
+.wg-lead {{ color: #c8d3e0; font-size: 0.92rem; line-height: 1.48; max-width: 980px; margin-bottom: 12px; }}
+.wg-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 10px 0; }}
+.wg-card {{ border: 1px solid #263241; background: #0f1620; border-radius: 8px; padding: 11px 12px; }}
+.wg-card b {{ display: block; color: #e6edf3; font-size: 0.9rem; margin-bottom: 6px; }}
+.wg-card p {{ color: #9aa4b2; font-size: 0.8rem; line-height: 1.42; }}
+.wg-flow {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 10px 0; }}
+.wg-flow.single {{ grid-template-columns: minmax(0, 1fr); }}
+.wg-step {{ display: grid; grid-template-columns: 34px 1fr; gap: 12px; align-items: start; border: 1px solid #263241; background: #0f1620; border-radius: 8px; padding: 12px; }}
+.wg-step-num {{ width: 34px; height: 34px; border-radius: 7px; background: #1f6feb24; border: 1px solid #1f6feb66; color: #9fd1ff; display: inline-flex; align-items: center; justify-content: center; font-weight: 900; font-size: 0.86rem; }}
+.wg-step p {{ color: #b8c4d2; font-size: 0.84rem; line-height: 1.45; padding-top: 1px; }}
+.wg-why-main {{ min-width: 0; }}
+.wg-example-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }}
+.wg-example-card {{ border: 1px solid #1f6feb55; background: #10213a; border-radius: 8px; padding: 12px; min-width: 0; }}
+.wg-example-card span {{ display: block; color: #79c0ff; font-size: 0.65rem; font-weight: 900; text-transform: uppercase; letter-spacing: 0.7px; margin-bottom: 6px; }}
+.wg-example-card b {{ display: block; color: #e6edf3; font-size: 0.92rem; line-height: 1.22; margin-bottom: 6px; }}
+.wg-example-card p {{ color: #c9d7e8; font-size: 0.82rem; line-height: 1.42; }}
+.wg-weight-donut-card {{ display: grid; justify-items: center; gap: 10px; margin: 8px auto 12px; max-width: 700px; }}
+.wg-weight-donut-wrap {{ position: relative; width: min(240px, 56vw); aspect-ratio: 1; }}
+.wg-weight-donut {{ width: 100%; height: 100%; display: block; overflow: visible; }}
+.wg-weight-donut-bg {{ fill: none; stroke: #0b1017; stroke-width: 18; }}
+.wg-weight-arc {{ fill: none; stroke: var(--wg-color); stroke-width: 18; stroke-linecap: butt; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.55)); cursor: pointer; transition: opacity 0.16s ease, stroke-width 0.16s ease; }}
+.wg-weight-arc:hover, .wg-weight-arc.active {{ opacity: 1; stroke-width: 20; }}
+.wg-weight-arc.dimmed {{ opacity: 0.34; }}
+.wg-weight-donut-center {{
+  position: absolute;
+  inset: 43px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  border: 1px solid #263241;
+  border-radius: 999px;
+  background: radial-gradient(circle, #101923 0%, #0b1017 72%);
+}}
+.wg-weight-donut-center b {{ color: #e6edf3; font-size: 1.48rem; line-height: 1; font-weight: 900; font-variant-numeric: tabular-nums; }}
+.wg-weight-donut-center span {{ display: block; color: #79c0ff; font-size: 0.62rem; font-weight: 900; text-transform: uppercase; letter-spacing: 0.7px; margin-top: 5px; }}
+.wg-weight-panel {{ display: grid; gap: 10px; min-width: 0; width: 100%; }}
+.wg-weight-panel-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }}
+.wg-weight-panel-head span {{ color: #c8d3e0; font-size: 0.74rem; font-weight: 900; }}
+.wg-weight-panel-head b {{ color: #79c0ff; font-size: 0.74rem; font-weight: 900; font-variant-numeric: tabular-nums; }}
+.wg-weight-legend {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 12px; }}
+.wg-weight-item {{ min-width: 0; display: grid; grid-template-columns: 10px 1fr auto; align-items: center; gap: 7px; border: 1px solid transparent; background: transparent; border-radius: 7px; padding: 6px 7px; text-align: left; font-family: inherit; cursor: pointer; }}
+.wg-weight-item:hover, .wg-weight-item.active {{ border-color: #1f6feb66; background: #1f6feb18; }}
+.wg-weight-swatch {{ width: 10px; height: 10px; border-radius: 3px; background: var(--wg-color); box-shadow: 0 0 0 1px #ffffff22 inset; }}
+.wg-weight-name {{ color: #c8d3e0; font-size: 0.74rem; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.wg-weight-val {{ color: #79c0ff; font-size: 0.74rem; font-weight: 900; font-variant-numeric: tabular-nums; }}
+.wg-compare-controls {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0 14px; }}
+.wg-field {{ display: grid; gap: 5px; }}
+.wg-field span {{ color: #8b949e; font-size: 0.64rem; font-weight: 900; text-transform: uppercase; letter-spacing: 0.7px; }}
+.wg-field select {{
+  width: 100%; background: #0b1017; color: #e6edf3; border: 1px solid #30363d;
+  border-radius: 7px; padding: 8px 9px; font-size: 0.78rem;
+}}
+.wg-field select:focus {{ outline: none; border-color: #1f6feb; }}
+.wg-snapshot-control {{
+  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px;
+  border: 1px solid #263241; background: #0f1620; border-radius: 8px; padding: 10px 12px;
+  margin: 10px 0 10px;
+}}
+.wg-snap-btn {{
+  width: 28px; height: 28px; border: 1px solid #30363d; background: #161b22;
+  color: #c8d3e0; border-radius: 6px; cursor: pointer; font-weight: 900;
+}}
+.wg-snap-btn:hover {{ border-color: #58a6ff; color: #79c0ff; }}
+.wg-snap-mid {{ display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px; min-width: 0; }}
+.wg-snap-mid input[type=range] {{ width: 100%; }}
+.wg-snap-label {{ color: #79c0ff; font-size: 0.76rem; font-weight: 900; white-space: nowrap; font-variant-numeric: tabular-nums; }}
+.wg-snapshot-strip {{
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;
+  border: 1px solid #263241; background: #0b1017; border-radius: 8px;
+  padding: 8px; margin: 0 0 12px;
+}}
+.wg-snapshot-pill {{
+  min-width: 0; border: 1px solid #263241; background: #0f1620; border-radius: 7px;
+  padding: 8px 9px;
+}}
+.wg-snapshot-pill span {{
+  display: block; color: #6b7280; font-size: 0.54rem; font-weight: 900;
+  text-transform: uppercase; letter-spacing: 0.65px; margin-bottom: 3px;
+}}
+.wg-snapshot-pill b {{
+  display: block; color: #e6edf3; font-size: 0.8rem; line-height: 1.2;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}}
+.wg-snapshot-pill small {{ display: block; color: #8b949e; font-size: 0.68rem; line-height: 1.25; margin-top: 3px; }}
+.wg-scoreboard {{
+  display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 10px;
+  align-items: stretch; margin: 10px 0 10px;
+}}
+.wg-team-score {{ border: 1px solid #263241; background: #0f1620; border-radius: 8px; padding: 14px; min-width: 0; }}
+.wg-team-score.a {{ border-color: #1f6feb66; }}
+.wg-team-score.b {{ border-color: #f59e0b66; }}
+.wg-team-name {{ color: #e6edf3; font-size: 1rem; font-weight: 900; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.wg-team-meta {{ color: #8b949e; font-size: 0.68rem; font-weight: 800; margin-top: 2px; }}
+.wg-team-kpis {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 11px; }}
+.wg-kpi {{ border: 1px solid #263241; background: #0b1017; border-radius: 7px; padding: 8px; }}
+.wg-kpi span {{ display: block; color: #8b949e; font-size: 0.55rem; font-weight: 900; text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 3px; }}
+.wg-kpi b {{ color: #e6edf3; font-size: 1rem; font-weight: 900; font-variant-numeric: tabular-nums; }}
+.wg-score-delta {{
+  align-self: center; min-width: 86px; border: 1px solid #30363d; border-radius: 8px;
+  background: #0b1017; padding: 10px; text-align: center;
+}}
+.wg-score-delta span {{ display: block; color: #8b949e; font-size: 0.56rem; font-weight: 900; text-transform: uppercase; letter-spacing: 0.6px; }}
+.wg-score-delta b {{ display: block; color: #79c0ff; font-size: 1.22rem; font-weight: 900; margin-top: 3px; font-variant-numeric: tabular-nums; }}
+.wg-diagnosis {{
+  border: 1px solid #1f6feb66; background: #10213a; border-radius: 8px;
+  padding: 12px 13px; margin: 10px 0 12px;
+}}
+.wg-diagnosis-main {{ color: #d7ecff; font-size: 0.84rem; line-height: 1.45; }}
+.wg-diagnosis-main b {{ color: #fff; }}
+.wg-diagnosis-meta {{ display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }}
+.wg-diag-chip {{
+  border: 1px solid #31557c; background: #0b1828; color: #b7dcff;
+  border-radius: 6px; padding: 6px 8px; font-size: 0.68rem; font-weight: 800;
+}}
+.wg-diag-chip span {{ color: #79c0ff; text-transform: uppercase; letter-spacing: 0.55px; font-size: 0.56rem; margin-right: 5px; }}
+.wg-verdict {{
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 12px 0;
+}}
+.wg-verdict-card {{ border: 1px solid #263241; background: #0f1620; border-radius: 8px; padding: 11px; }}
+.wg-verdict-card span {{ display: block; color: #8b949e; font-size: 0.62rem; font-weight: 900; text-transform: uppercase; letter-spacing: 0.7px; margin-bottom: 4px; }}
+.wg-verdict-card b {{ display: block; color: #e6edf3; font-size: 0.86rem; line-height: 1.25; }}
+.wg-verdict-card p {{ color: #9aa4b2; font-size: 0.72rem; line-height: 1.38; margin-top: 5px; }}
+.wg-compare-table-wrap {{ margin-top: 12px; overflow-x: auto; }}
+.wg-compare-table {{
+  width: 100%; min-width: 760px; border-collapse: separate; border-spacing: 0 6px;
+  table-layout: fixed;
+}}
+.wg-compare-table th {{
+  color: #6b7280; font-size: 0.58rem; font-weight: 900; text-transform: uppercase;
+  letter-spacing: 0.6px; text-align: right; padding: 0 10px 2px;
+}}
+.wg-compare-table th:first-child {{ text-align: left; }}
+.wg-compare-table td {{
+  background: #0f1620; border-top: 1px solid #263241; border-bottom: 1px solid #263241;
+  color: #c8d3e0; font-size: 0.75rem; font-weight: 850; padding: 9px 10px;
+  text-align: right; font-variant-numeric: tabular-nums;
+}}
+.wg-compare-table td:first-child {{
+  text-align: left; border-left: 1px solid #263241; border-radius: 7px 0 0 7px;
+  color: #e6edf3; font-weight: 900;
+}}
+.wg-compare-table td:last-child {{ border-right: 1px solid #263241; border-radius: 0 7px 7px 0; }}
+.wg-compare-table tr.top td {{ background: #10213a; border-color: #1f6feb66; }}
+.wg-compare-weight {{ color: #79c0ff; }}
+.wg-compare-delta.pos {{ color: #79c0ff; }}
+.wg-compare-delta.neg {{ color: #f0c040; }}
+.wg-impact {{ display: grid; grid-template-columns: 1fr 58px; align-items: center; gap: 8px; min-width: 0; }}
+.wg-compare-track {{
+  position: relative; height: 7px; background: #0b1017; border: 1px solid #263241;
+  border-radius: 999px; overflow: hidden; min-width: 0;
+}}
+.wg-compare-track::before {{
+  content: ""; position: absolute; left: 50%; top: -1px; bottom: -1px;
+  width: 1px; background: #3b4654; z-index: 1;
+}}
+.wg-compare-fill {{ height: 100%; border-radius: 999px; }}
+.wg-compare-fill.a {{ margin-right: 50%; margin-left: auto; background: linear-gradient(90deg, #79c0ff, #58a6ff); }}
+.wg-compare-fill.b {{ margin-left: 50%; background: linear-gradient(90deg, #f0c040, #f59e0b); }}
+.wg-compare-val {{ color: #c8d3e0; font-size: 0.72rem; font-weight: 900; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+.wg-compare-note {{ color: #8b949e; font-size: 0.7rem; line-height: 1.42; margin-top: 8px; }}
+.wg-component-picker {{ display: flex; gap: 6px; flex-wrap: wrap; margin: 12px 0 14px; }}
+.wg-comp-btn {{
+  border: 1px solid #30363d; background: #161b22; color: #c8d3e0; border-radius: 6px;
+  padding: 6px 8px; font-size: 0.72rem; font-weight: 800; cursor: pointer;
+}}
+.wg-comp-btn:hover {{ border-color: #58a6ff; color: #79c0ff; }}
+.wg-comp-btn.active {{ border-color: #1f6feb; background: #1f6feb24; color: #9fd1ff; }}
+.wg-component-card {{ border: 1px solid #2b3950; background: #0f1620; border-radius: 8px; padding: 14px; }}
+.wg-component-head {{ display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid #263241; padding-bottom: 10px; margin-bottom: 10px; }}
+.wg-component-head h3 {{ color: #79c0ff; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.7px; }}
+.wg-component-head span {{ color: #8b949e; font-size: 0.7rem; font-weight: 800; }}
+.wg-component-weight {{ color: #e6edf3; font-size: 1.6rem; font-weight: 900; line-height: 1; text-align: right; font-variant-numeric: tabular-nums; }}
+.wg-component-card p {{ color: #b8c4d2; font-size: 0.78rem; line-height: 1.48; margin-bottom: 8px; }}
+.wg-factor-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; margin-top: 12px; }}
+.wg-factor-card {{ border: 1px solid #263241; background: #0b1017; border-radius: 8px; padding: 10px; min-width: 0; }}
+.wg-factor-card span {{ display: block; color: #79c0ff; font-size: 0.62rem; font-weight: 900; text-transform: uppercase; letter-spacing: 0.65px; margin-bottom: 5px; }}
+.wg-factor-card b {{ display: block; color: #e6edf3; font-size: 0.86rem; line-height: 1.2; margin-bottom: 5px; }}
+.wg-factor-card p {{ color: #9aa4b2; font-size: 0.72rem; line-height: 1.35; margin: 0; }}
+.wg-factor-note {{ border: 1px solid #31557c; background: #10213a; border-radius: 8px; padding: 10px 12px; color: #c9e6ff; font-size: 0.78rem; line-height: 1.42; margin-top: 12px; }}
+.wg-example {{
+  border: 1px solid #1f6feb55; background: #1f6feb14; color: #c9e6ff;
+  border-radius: 8px; padding: 10px 12px; font-size: 0.75rem; line-height: 1.38; margin: 10px 0 0;
+}}
+.wg-faq {{ display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; max-width: 1120px; }}
+.wg-faq-item {{ border: 1px solid #263241; background: #0f1620; border-radius: 8px; overflow: hidden; }}
+.wg-faq-q {{
+  width: 100%; display: grid; grid-template-columns: 34px 1fr; gap: 12px; align-items: start;
+  border: 0; background: transparent; color: #e6edf3; cursor: pointer;
+  font-family: inherit; text-align: left; padding: 12px;
+}}
+.wg-faq-q:hover {{ background: #121b27; }}
+.wg-faq-num {{ width: 34px; height: 34px; border-radius: 7px; background: #1f6feb24; border: 1px solid #1f6feb66; color: #9fd1ff; display: inline-flex; align-items: center; justify-content: center; font-weight: 900; font-size: 0.86rem; }}
+.wg-faq-title {{ color: #e6edf3; font-size: 0.94rem; font-weight: 900; line-height: 1.28; padding-top: 6px; }}
+.wg-faq-item.open .wg-faq-q {{ border-bottom: 1px solid #263241; background: #10213a; }}
+.wg-faq-item.open .wg-faq-title {{ color: #9fd1ff; }}
+.wg-faq-a {{ display: none; color: #c8d3e0; font-size: 0.86rem; line-height: 1.5; padding: 12px 14px 14px 58px; }}
+.wg-faq-item.open .wg-faq-a {{ display: block; }}
+.wg-link-btn {{ border: 0; background: transparent; color: #79c0ff; cursor: pointer; font: inherit; font-weight: 800; }}
+.wg-link-btn:hover {{ text-decoration: underline; text-underline-offset: 2px; }}
+@media (max-width: 760px) {{
+  .weights-guide-overlay {{ padding: 8px; align-items: stretch; }}
+  .weights-guide {{ width: calc(100vw - 16px); height: calc(100vh - 16px); }}
+  .wg-shell {{ grid-template-columns: 1fr; grid-template-rows: auto 1fr; }}
+  .wg-nav {{ display: flex; gap: 6px; overflow-x: auto; border-right: 0; border-bottom: 1px solid #263241; padding: 10px; }}
+  .wg-tab {{ width: auto; white-space: nowrap; margin-bottom: 0; }}
+  .wg-body {{ padding: 14px; overflow-y: auto; }}
+  .wg-grid {{ grid-template-columns: 1fr; }}
+  .wg-factor-grid {{ grid-template-columns: 1fr; }}
+  .wg-example-grid {{ grid-template-columns: 1fr; }}
+  .wg-flow {{ grid-template-columns: 1fr; }}
+  .wg-faq {{ grid-template-columns: 1fr; }}
+  .wg-weight-legend {{ grid-template-columns: 1fr 1fr; }}
+  .wg-snapshot-control {{ grid-template-columns: 1fr; }}
+  .wg-snapshot-strip {{ grid-template-columns: 1fr; }}
+  .wg-snap-mid {{ grid-template-columns: 1fr; }}
+  .wg-compare-controls, .wg-verdict, .wg-scoreboard {{ grid-template-columns: 1fr; }}
+  .wg-score-delta {{ width: 100%; }}
+  .wg-impact {{ grid-template-columns: 1fr; gap: 3px; }}
 }}
 
 /* header direita: play + slider */
@@ -1774,6 +2150,14 @@ input[type=range] {{
 .dot-done:hover {{ opacity: 1; transform: scale(1.4); }}
 /* ainda não disputado: vazio (só contorno) */
 .dot-pending {{ opacity: 0.45; cursor: default; }}
+/* finalizado no calendário, mas sem snapshot gerado no dashboard */
+.dot-missing {{
+  opacity: 0.95;
+  cursor: default;
+  background: transparent !important;
+  border-color: #f59e0b !important;
+  box-shadow: 0 0 6px 1px #f59e0b66;
+}}
 /* dot "apagado" por filtro de seleção (jogo sem o time em foco):
    continua visível (contorno perceptível), só não se destaca */
 .dot-faded {{ opacity: 0.4; }}
@@ -2035,6 +2419,17 @@ input[type=range] {{
 .tt-row.related-indirect {{ background: #2a2510; }}
 .tt-row.related-indirect .tt-label {{ color: #c9a84c; }}
 .tt-row.related-indirect .tt-val {{ color: #f0c040; }}
+/* marca ESTÁTICA: métrica que alimenta o score_geral (vs. apenas informativa).
+   Um ponto discreto antes do rótulo — não compete com o verde "entra no cálculo"
+   (que é relativo à métrica selecionada), apenas sinaliza "é insumo de qualidade". */
+.tt-row.score-input .tt-label::before {{
+  content: '▪';
+  color: #4a86d8;
+  font-size: 0.62rem;
+  margin-right: 5px;
+  vertical-align: middle;
+  opacity: 0.85;
+}}
 .tt-legend {{
   display: flex; gap: 14px; padding: 6px 10px 5px;
   border-top: 1px solid #21262d; margin-top: 2px;
@@ -2488,6 +2883,310 @@ input[type=range] {{
   flex-direction: column;
   gap: 3px;
 }}
+.point-compare {{
+  border: 1px solid #21262d;
+  border-radius: 9px;
+  background: linear-gradient(180deg, #0f1620 0%, #0a0f16 100%);
+  overflow: hidden;
+  margin-top: 8px;
+}}
+.point-compare.inline {{
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #21262d;
+  overflow: visible;
+}}
+.pcmp-head {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 10px;
+  border-bottom: 1px solid #21262d;
+}}
+.point-compare.inline .pcmp-head {{
+  display: block;
+  padding: 0 4px 8px;
+  border-bottom: 0;
+}}
+.pcmp-title {{
+  color: #8b949e;
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}}
+.trajectory-modal-body .pcmp-title {{
+  color: #e6edf3;
+  font-size: 0.78rem;
+  letter-spacing: 0.6px;
+}}
+.pcmp-sub {{ color: #8b949e; font-size: 0.68rem; white-space: nowrap; }}
+.point-compare.inline .pcmp-sub {{ margin-top: 8px; white-space: normal; line-height: 1.35; }}
+.pcmp-empty {{ color: #8b949e; font-size: 0.74rem; line-height: 1.42; padding: 12px; }}
+.point-compare.inline .pcmp-empty {{ padding: 4px; font-style: italic; }}
+.pcmp-scroll {{ overflow-x: auto; }}
+.point-compare-modal .pcmp-scroll {{ overflow-x: hidden; }}
+.point-compare.inline .pcmp-scroll {{
+  border: 1px solid #21262d;
+  border-radius: 8px;
+  background: #0f1620;
+}}
+.pcmp-table {{
+  width: 100%;
+  min-width: 520px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}}
+.pcmp-table th {{
+  color: #6b7280;
+  font-size: calc(0.58rem * var(--pcmp-scale, 1));
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.55px;
+  text-align: center;
+  padding: calc(7px * var(--pcmp-scale, 1)) calc(8px * var(--pcmp-scale, 1));
+  border-bottom: 1px solid #21262d;
+  background: #0b1017;
+}}
+.pcmp-table th:first-child {{ text-align: left; width: 128px; }}
+.pcmp-table td {{
+  color: #c8d3e0;
+  font-size: calc(0.72rem * var(--pcmp-scale, 1));
+  font-weight: 850;
+  text-align: center;
+  vertical-align: middle;
+  padding: calc(8px * var(--pcmp-scale, 1));
+  border-bottom: 1px solid #161d27;
+  font-variant-numeric: tabular-nums;
+}}
+.pcmp-table td:first-child {{
+  color: #e6edf3;
+  text-align: left;
+  font-weight: 900;
+}}
+.pcmp-table tr:last-child td {{ border-bottom: 0; }}
+.pcmp-metric-btn {{
+  all: unset;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  cursor: pointer;
+  color: #e6edf3;
+  font-weight: 900;
+}}
+.pcmp-metric-btn:hover {{ color: #79c0ff; }}
+.pcmp-sort-row td:first-child {{
+  background:
+    linear-gradient(90deg, rgba(88,166,255,0.28), rgba(88,166,255,0.11)) !important;
+  color: #f0f6fc;
+  box-shadow: inset 3px 0 0 #58a6ff;
+}}
+.pcmp-sort-row td {{
+  background:
+    linear-gradient(90deg, rgba(88,166,255,0.16), rgba(88,166,255,0.08)),
+    hsl(var(--rank-hue, 214) 58% 22% / var(--rank-alpha, 0.28)) !important;
+  border-top: 1px solid rgba(88,166,255,0.36);
+  border-bottom-color: rgba(88,166,255,0.36);
+}}
+.pcmp-sort-row .pcmp-value {{
+  color: #f0f6fc;
+}}
+.pcmp-sort-row .pcmp-order {{
+  border-color: rgba(121,192,255,0.62);
+}}
+.pcmp-sort-chip {{
+  flex-shrink: 0;
+  border: 1px solid rgba(88,166,255,0.42);
+  border-radius: 999px;
+  padding: 2px 5px;
+  color: #79c0ff;
+  font-size: 0.56rem;
+  font-weight: 950;
+  line-height: 1;
+  text-transform: uppercase;
+}}
+.pcmp-team-head {{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  max-width: 100%;
+}}
+.pcmp-team-dot {{ width: 8px; height: 8px; border-radius: 999px; flex-shrink: 0; }}
+.pcmp-team-name {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.pcmp-rank-cell {{
+  background:
+    linear-gradient(90deg, rgba(8,12,20,0.36), rgba(8,12,20,0.10)),
+    hsl(var(--rank-hue, 214) 58% 22% / var(--rank-alpha, 0.18)) !important;
+}}
+.pcmp-cell-main {{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: calc(7px * var(--pcmp-scale, 1));
+  width: 100%;
+  min-width: 0;
+}}
+.pcmp-value {{
+  color: #dbe7f5;
+  font-size: calc(0.74rem * var(--pcmp-scale, 1));
+  font-weight: 900;
+}}
+.pcmp-order {{
+  min-width: calc(24px * var(--pcmp-scale, 1));
+  padding: calc(2px * var(--pcmp-scale, 1)) calc(5px * var(--pcmp-scale, 1));
+  border-radius: 999px;
+  border: 1px solid #30363d;
+  background: rgba(13,17,23,0.72);
+  color: #9aa4b2;
+  font-size: calc(0.58rem * var(--pcmp-scale, 1));
+  font-weight: 950;
+  line-height: 1;
+  text-align: center;
+}}
+.pcmp-rank-cell.rk1 {{
+  box-shadow: inset 0 0 0 1px rgba(247,215,116,0.38);
+}}
+.pcmp-rank-cell.rk1 .pcmp-order {{
+  border-color: rgba(247,215,116,0.62);
+  background: rgba(247,215,116,0.16);
+  color: #ffe28a;
+}}
+.pcmp-rank-cell.rk2 .pcmp-order {{
+  border-color: rgba(190,203,219,0.48);
+  background: rgba(190,203,219,0.12);
+  color: #dbe7f5;
+}}
+.pcmp-rank-cell.rk3 .pcmp-order {{
+  border-color: rgba(232,165,90,0.48);
+  background: rgba(232,165,90,0.12);
+  color: #efbd82;
+}}
+.pcmp-rank-cell.rk-last .pcmp-value {{
+  color: #aeb8c6;
+}}
+.pcmp-note {{
+  color: #6b7280;
+  font-size: 0.66rem;
+  line-height: 1.35;
+  padding: 8px 10px 10px;
+  border-top: 1px solid #161d27;
+}}
+.point-compare.inline .pcmp-note {{
+  border-top: 0;
+  padding: 8px 4px 0;
+  font-style: italic;
+}}
+.trajectory-modal-body .point-compare {{ margin-top: 10px; }}
+.trajectory-modal-body .pcmp-table {{ min-width: 700px; }}
+.trajectory-modal-body .pcmp-table th:first-child {{ width: 160px; }}
+.point-compare-module {{
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #21262d;
+}}
+.pcmp-module-title {{
+  color: #8b949e;
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 10px;
+}}
+.pcmp-module-teams {{
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  min-height: 24px;
+  margin-bottom: 8px;
+}}
+.pcmp-module-summary {{
+  color: #58a6ff;
+  font-size: 0.82rem;
+  font-weight: 900;
+  margin-bottom: 10px;
+}}
+.pcmp-module-empty {{
+  color: #8b949e;
+  font-size: 0.74rem;
+  line-height: 1.42;
+  font-style: italic;
+  margin-bottom: 10px;
+}}
+.trajectory-modal.point-compare-modal {{
+  width: min(980px, calc(100vw - 120px));
+  height: auto;
+  min-width: 720px;
+  min-height: 0;
+  max-height: calc(100vh - 130px);
+}}
+.point-compare-modal .trajectory-modal-body {{
+  flex: 0 1 auto;
+  min-height: 0;
+}}
+.point-compare-modal.is-resized .trajectory-modal-body {{
+  flex: 1;
+}}
+.point-compare-modal.is-resized .point-compare {{
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}}
+.point-compare-modal.is-resized .pcmp-scroll {{
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}}
+.point-compare-modal.is-resized .pcmp-table {{
+  height: 100%;
+}}
+.point-compare-modal.is-resized .pcmp-note {{
+  flex: 0 0 auto;
+}}
+.point-compare-modal .trajectory-modal-title {{
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 2px;
+}}
+.point-compare-modal .trajectory-modal-title strong {{
+  color: #8b949e;
+  font-size: 0.68rem;
+}}
+.point-compare-modal .point-compare {{
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}}
+.point-compare-modal .pcmp-head {{
+  display: none;
+}}
+.point-compare-modal .pcmp-scroll {{
+  border: 1px solid #21262d;
+  border-radius: 9px;
+  background: #0f1620;
+}}
+.point-compare-modal .pcmp-table {{
+  min-width: 0;
+}}
+.point-compare-modal .pcmp-table th,
+.point-compare-modal .pcmp-table td {{
+  overflow: hidden;
+}}
+.point-compare-modal .pcmp-table th:first-child {{
+  width: clamp(96px, 14%, 150px);
+}}
+.point-compare-modal .trajectory-resize-handle {{
+  display: block;
+}}
 .trajectory-modal {{
   position: fixed;
   left: 260px;
@@ -2683,10 +3382,23 @@ input[type=range] {{
 }}
 .teams-search {{
   background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
-  color: #e6edf3; padding: 6px 12px; font-size: 0.82rem; width: 220px;
+  color: #e6edf3; padding: 6px 12px; font-size: 0.82rem; width: 260px;
 }}
 .teams-search:focus {{ outline: none; border-color: #1f6feb; }}
-.team-search-wrap {{ position: relative; flex: 0 0 auto; }}
+.team-search-wrap {{ position: relative; flex: 0 0 auto; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; max-width: 560px; }}
+.selected-team-chips {{ display: flex; align-items: center; gap: 5px; flex-wrap: wrap; max-width: 320px; }}
+.selected-team-chips:empty {{ display: none; }}
+.search-team-chip {{
+  display: inline-flex; align-items: center; gap: 5px; max-width: 150px;
+  border: 1px solid #1f6feb66; background: #10213a; color: #dbeafe;
+  border-radius: 6px; padding: 4px 6px; font-size: 0.7rem; font-weight: 800;
+}}
+.search-team-chip span {{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.search-team-chip button {{
+  border: 0; background: transparent; color: #8b949e; cursor: pointer;
+  padding: 0 1px; line-height: 1; font-size: 0.78rem;
+}}
+.search-team-chip button:hover {{ color: #e6edf3; }}
 .team-suggest {{
   display: none; position: absolute; top: calc(100% + 6px); left: 0;
   width: min(320px, calc(100vw - 24px)); max-height: 280px; overflow: auto;
@@ -2701,6 +3413,7 @@ input[type=range] {{
 }}
 .team-suggest-item:hover,
 .team-suggest-item.active {{ background: #1f6feb22; color: #79c0ff; }}
+.team-suggest-item.selected {{ background: #10213a; color: #dbeafe; }}
 .team-suggest-flag {{ font-size: 1rem; line-height: 1; }}
 .team-suggest-name {{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 800; }}
 .team-suggest-meta {{ color: #8b949e; font-size: 0.68rem; font-weight: 800; white-space: nowrap; }}
@@ -3074,6 +3787,9 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 .players-table .pt-shirt {{ text-align: center; width: 34px; color: #8b949e; font-variant-numeric: tabular-nums; }}
 .players-table .pt-name {{ color: #e6edf3; font-weight: 600; }}
 .players-table .pt-dim {{ color: #8b949e; }}
+.players-table .pt-team-link {{ color: #9db3cf; cursor: pointer; font-weight: 600; }}
+.players-table .pt-team-link:hover {{ color: #58a6ff; text-decoration: underline; text-underline-offset: 2px; }}
+.players-table .pt-team-active {{ color: #58a6ff; }}
 .players-table .pt-metric {{ background: #1f6feb12; color: #e6edf3; }}
 .players-table th.pt-metric {{ color: #58a6ff; }}
 .players-table th.pt-sort {{ cursor: pointer; user-select: none; }}
@@ -3178,7 +3894,7 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 .pcard.el-pop {{
   position: fixed; left: var(--el-pop-left, 16px); top: var(--el-pop-top, 16px);
   right: auto; transform: translate(var(--pc-x, 0px), var(--pc-y, 0px));
-  z-index: 10000; width: 260px; max-height: calc(100vh - 16px); overflow: auto;
+  z-index: 10000; width: 380px; max-height: calc(100vh - 16px); overflow: auto;
 }}
 .pcard.el-pop .pc-head {{ cursor: move; touch-action: none; }}
 .pcard.el-pop .pc-num {{ background: #1f6feb; }}
@@ -3187,7 +3903,7 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 @media (max-width: 760px) {{
   .el-leaders {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
   .el-player-grid {{ grid-template-columns: 1fr; }}
-  .pcard.el-pop {{ width: min(260px, calc(100vw - 16px)); }}
+  .pcard.el-pop {{ width: min(380px, calc(100vw - 16px)); }}
 }}
 
 /* ── aba Jogos: card de jogo (accordion) ── */
@@ -3459,7 +4175,7 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 
 /* ── card flutuante de dados do jogador (popover ancorado no jogador) ── */
 .pcard {{
-  position: absolute; left: 50%; z-index: 6; width: 248px; cursor: default;
+  position: absolute; left: 50%; z-index: 6; width: 380px; max-width: calc(100vw - 16px); cursor: default;
   background: linear-gradient(180deg, #161b22, #0d1117);
   border: 1px solid #30363d; border-radius: 12px;
   box-shadow: 0 16px 40px rgba(0,0,0,0.75); text-align: left; overflow: hidden;
@@ -3523,10 +4239,10 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 .pc-group {{ padding: 10px 12px 0; }}
 .pc-group:last-child {{ padding-bottom: 12px; }}
 .pc-gt {{ font-size: 0.62rem; color: #58a6ff; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; margin-bottom: 6px; }}
-.pc-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 5px 14px; }}
-.pc-stat {{ display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }}
-.pc-sl {{ font-size: 0.72rem; color: #8b949e; }}
-.pc-sv {{ font-size: 0.82rem; font-weight: 800; color: #e6edf3; font-variant-numeric: tabular-nums; }}
+.pc-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 20px; }}
+.pc-stat {{ display: flex; align-items: baseline; justify-content: space-between; gap: 10px; min-width: 0; }}
+.pc-sl {{ min-width: 0; font-size: 0.72rem; line-height: 1.16; color: #8b949e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; }}
+.pc-sv {{ flex-shrink: 0; font-size: 0.82rem; font-weight: 800; color: #e6edf3; font-variant-numeric: tabular-nums; }}
 .pc-empty {{ font-size: 0.74rem; color: #6b7280; padding: 12px; }}
 
 /* campo ocupa toda a largura em cima */
@@ -3610,6 +4326,22 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 </style>
 </head>
 <body>
+<div id="chipTip"></div>
+<div id="weightsGuide" class="weights-guide-overlay" style="display:none" onclick="if(event.target===this)closeWeightsGuide()">
+  <div class="weights-guide" role="dialog" aria-modal="true" aria-labelledby="weightsGuideTitle">
+    <div class="wg-top">
+      <div class="wg-title">
+        <strong id="weightsGuideTitle">Guia dos pesos do ranking</strong>
+        <span id="weightsGuideSub">Como os componentes mudam e afetam a leitura da Copa</span>
+      </div>
+      <button class="wg-close" onclick="closeWeightsGuide()" title="Fechar">✕</button>
+    </div>
+    <div class="wg-shell">
+      <nav class="wg-nav" id="weightsGuideNav"></nav>
+      <div class="wg-body" id="weightsGuideBody"></div>
+    </div>
+  </div>
+</div>
 
 <header>
   <div class="header-left">
@@ -3636,6 +4368,7 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 <!-- ══ BARRA DE FILTROS ÚNICA — idêntica e compartilhada pelas duas abas ══ -->
 <div class="controls" id="sharedControls">
   <div class="team-search-wrap">
+    <div id="selectedTeamChips" class="selected-team-chips"></div>
     <input type="text" id="teamSearch" class="teams-search" placeholder="Buscar/destacar seleção…" autocomplete="off" oninput="onFocusInput()" onfocus="renderTeamSuggestions()" onkeydown="onTeamSearchKey(event)">
     <div id="teamSuggestions" class="team-suggest"></div>
   </div>
@@ -3663,6 +4396,7 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
     <select id="filterStage" onchange="applyTeamFilters()"><option value="">Todas</option></select>
   </label>
   <label class="tb-check"><input type="checkbox" id="filterPlayed" onchange="applyTeamFilters()"> Só com jogos</label>
+  <label class="tb-check" title="Só seleções com cobertura de dados avançados (xG, xGP, duelos) no jogo atual"><input type="checkbox" id="filterAdvanced" onchange="applyTeamFilters()"> Só com dados avançados</label>
   <div style="flex:1"></div>
   <button class="btn" onclick="resetAllFilters()" title="Limpar filtros">✕ Limpar</button>
   <span class="teams-count" id="teamsCount"></span>
@@ -3730,6 +4464,23 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
     <div class="no-team">Clique em até 16 seleções para comparar a trajetória</div>
   </div>
   <div class="trajectory-resize-handle" id="trajectoryResizeHandle" title="Redimensionar mantendo proporção"></div>
+</div>
+
+<!-- ══ MODAL FLUTUANTE: comparação ponto a ponto ══ -->
+<div id="pointCompareModal" class="trajectory-modal point-compare-modal" style="display:none">
+  <div class="trajectory-modal-bar" id="pointCompareModalBar">
+    <div class="trajectory-modal-title">
+      <span>Comparação ponto a ponto</span>
+      <strong id="pointCompareModalSubtitle">—</strong>
+    </div>
+    <div class="trajectory-modal-actions">
+      <button class="modal-card-close" onclick="closePointCompareModal()" title="Fechar">✕</button>
+    </div>
+  </div>
+  <div class="trajectory-modal-body" id="pointCompareModalBody">
+    <div class="no-team">Fixe pelo menos 2 seleções na trajetória para comparar.</div>
+  </div>
+  <div class="trajectory-resize-handle" id="pointCompareResizeHandle" title="Redimensionar mantendo proporção"></div>
 </div>
 
 <!-- ══ VIEW: Seleções (grade de países) ══ -->
@@ -3863,6 +4614,7 @@ function _playersAtTeamSnapshot(team, n) {{
       return Object.assign({{}}, base, {{
         name: r.name,
         num: base.num ?? meta.shirt,
+        pos_code: base.pos_code,
         pos: base.pos || PERFIL_LABEL[r.perfil] || '—',
         pos_group: posGroup,
         pos_order: base.pos_order ?? _posOrderFromGroup(posGroup),
@@ -4076,6 +4828,32 @@ let dotPhaseFilter = '';
 
 const dotsEl = document.getElementById('progressDots');
 
+// Snapshots comparáveis por "jogo do time".
+// Para 2+ seleções, Jogo 1/2/3 fecha quando todas as seleções visíveis
+// chegaram naquela quantidade de jogos. Assim a comparação acompanha o recorte
+// escolhido, sem esperar as 48 seleções completarem a mesma rodada.
+function comparableTeamGameSnapshots(teams) {{
+  const out = {{}};
+  const comparableTeams = [...new Set((teams || []).filter(team => TEAMS_GRID.includes(team)))];
+  if (!comparableTeams.length) return out;
+  const maxGames = Math.max(...comparableTeams.map(team =>
+    Math.max(...jogos.map(n => ((SNAP_BY_TEAM[n] || {{}})[team] || {{}}).jogos || 0), 0)
+  ), 0);
+  const currentIdx = Math.max(0, jogoIndex(currentJogo));
+  for (let order = 1; order <= maxGames; order++) {{
+    for (let idx = 0; idx <= currentIdx; idx++) {{
+      const n = jogos[idx];
+      const byTeam = SNAP_BY_TEAM[n] || {{}};
+      const allReachedOrder = comparableTeams.every(team => byTeam[team] && (byTeam[team].jogos || 0) >= order);
+      if (allReachedOrder) {{
+        out[order] = n;
+        break;
+      }}
+    }}
+  }}
+  return out;
+}}
+
 // Ordens cronológicas dos jogos de um time (0-based): todas, 1ª e última.
 function teamGameOrders(team) {{
   return SNAPSHOT_META
@@ -4091,7 +4869,7 @@ function teamDebutOrder(team) {{
 // marker='first'|'last' dá um anel colorido no 1º/último jogo do time.
 function paintDot(el, m, color, debutOrder, marker) {{
   el.classList.remove('dot-done', 'dot-pending', 'dot-live', 'dot-faded',
-                      'dot-first', 'dot-last');
+                      'dot-missing', 'dot-first', 'dot-last');
 
   if (debutOrder != null && m.order < debutOrder) {{
     el.classList.add('dot-pending', 'dot-faded');
@@ -4106,6 +4884,9 @@ function paintDot(el, m, color, debutOrder, marker) {{
   }} else if (m.status === 'live') {{
     el.style.background = '#f85149';
     el.style.borderColor = 'transparent';
+  }} else if (m.status === 'missing') {{
+    el.style.background = 'transparent';
+    el.style.borderColor = '#f59e0b';
   }} else {{
     el.style.background = 'transparent';
     el.style.borderColor = color + '66';
@@ -4300,6 +5081,7 @@ function renderMainDots() {{
       const id = m.match_id.replace('copa_2026_jogo_', 'Jogo ');
       d.title = m.status === 'live' ? `${{id}} — AO VIVO`
               : m.status === 'done' ? `${{id}} — clique para ver`
+              : m.status === 'missing' ? `${{id}} — finalizado, snapshot ainda não gerado`
               : `${{id}} — ainda não disputado`;
       // só navega para jogos já processados (têm snapshot n)
       if (m.n != null) d.onclick = () => goToJogo(m.n);
@@ -4367,7 +5149,9 @@ function getRow(team) {{
 // ── sort teams: sortDir controla a direção manual do usuário
 function sortedTeams(frameTeams) {{
   // Aplica os filtros GLOBAIS (grupo/confederação/fase) também às barras da Race.
-  const filtered = frameTeams.filter(t => passesGlobalFilters(t.team));
+  const advOnly = document.getElementById('filterAdvanced') && document.getElementById('filterAdvanced').checked;
+  const filtered = frameTeams.filter(t =>
+    passesGlobalFilters(t.team) && (!advOnly || (t.advanced_coverage > 0)));
   // Ordena pela QUANTIDADE bruta: 'desc' = maior primeiro, 'asc' = menor primeiro.
   const asc = sortDir === 'asc';
   return filtered.sort((a, b) => {{
@@ -4384,9 +5168,67 @@ function toggleDir() {{
   renderBothViews();  // direção é compartilhada: vale na corrida E na grade
 }}
 
+// Card de explicação do componente (pills de peso): abre no CLIQUE, não no hover.
+// Um aberto por vez; clicar de novo fecha; clicar fora também fecha.
+function closeWeightPills() {{
+  document.querySelectorAll('.w-pill.open').forEach(p => p.classList.remove('open'));
+}}
+function toggleWeightPill(event, el) {{
+  event.stopPropagation();
+  const wasOpen = el.classList.contains('open');
+  closeWeightPills();
+  if (!wasOpen) el.classList.add('open');
+}}
+document.addEventListener('click', () => closeWeightPills());
+
+// Tooltip flutuante dos chips de glossário (data-tip). Delegado no document para
+// pegar chips renderizados dinamicamente; segue o mouse e some ao sair.
+(function initChipTip() {{
+  const tip = document.getElementById('chipTip');
+  if (!tip) return;
+  function show(el) {{
+    tip.textContent = el.getAttribute('data-tip') || '';
+    tip.style.display = 'block';
+    place(el);
+  }}
+  function place(el) {{
+    const r = el.getBoundingClientRect();
+    const tr = tip.getBoundingClientRect();
+    let left = r.left + r.width / 2 - tr.width / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - tr.width - 8));
+    let top = r.bottom + 6;
+    if (top + tr.height > window.innerHeight - 8) top = r.top - tr.height - 6;  // vira p/ cima se não couber
+    tip.style.left = left + 'px';
+    tip.style.top = top + 'px';
+  }}
+  function hide() {{ tip.style.display = 'none'; }}
+  document.addEventListener('mouseover', e => {{
+    const el = e.target.closest && e.target.closest('.has-tip[data-tip]');
+    if (el) show(el);
+  }});
+  document.addEventListener('mouseout', e => {{
+    const el = e.target.closest && e.target.closest('.has-tip[data-tip]');
+    if (el) hide();
+  }});
+}})();
+
 // aproveitamento e clean_sheet_rate estão em fração (0–1); posse_media já é %
 const PERCENT_FRAC = new Set(['aproveitamento', 'precisao_chute', 'precisao_passes']);
 const PERCENT_DIRECT = new Set(['posse_media']);
+// Métricas que podem ser NEGATIVAS — a barra é escalada por [min,max], não por
+// |valor| (senão um valor muito negativo viraria barra cheia). xGP = gols
+// evitados acima do esperado (negativo = defesa sofreu mais que o esperado).
+const SIGNED_METRICS = new Set(['xgp_por_jogo', 'saldo_gols']);
+// Métricas que ALIMENTAM o score_geral (insumos de qualidade), vs. as apenas
+// informativas (disciplina, estilo, totais brutos). Marca estática ▪ no painel.
+const SCORE_INPUT_METRICS = new Set([
+  'score_resultado', 'score_ataque', 'score_defesa', 'score_eficiencia',
+  'score_controle', 'score_forca_relativa',
+  'pontos', 'aproveitamento', 'saldo_gols', 'elo_rating',
+  'gols_por_jogo', 'xg_por_jogo', 'chutes_no_alvo_por_jogo', 'precisao_chute', 'key_passes_por_jogo',
+  'gols_contra_por_jogo', 'xgp_por_jogo', 'chutes_sofridos_por_jogo', 'shots_blocked_por_jogo', 'duels_won_por_jogo',
+  'posse_media', 'passes_por_jogo', 'precisao_passes', 'dribbles_won_por_jogo',
+]);
 // Eixos de estilo: escala 0-100 (como os scores) para as barras, mas SEM medalha
 // de pódio — estilo é descritivo, 50 não é "ruim" nem 90 é "melhor".
 const STYLE_AXES = new Set(['estilo_posse', 'estilo_pressao', 'estilo_verticalidade', 'estilo_largura']);
@@ -4430,6 +5272,537 @@ function formatVal(v, metric) {{
 // formatador da métrica para a grade Seleções (reusa formatVal da corrida)
 function _metricFmt(metric) {{ return v => formatVal(v, metric); }}
 
+const SCORE_INFO = {score_info_json};
+const WEIGHT_COMPONENTS = [
+  ['score_resultado', 'Resultado'],
+  ['score_ataque', 'Ataque'],
+  ['score_defesa', 'Defesa'],
+  ['score_eficiencia', 'Eficiência'],
+  ['score_controle', 'Controle'],
+  ['score_forca_relativa', 'Força Relativa'],
+];
+const WEIGHT_COLORS = {{
+  score_resultado: '#58a6ff',
+  score_ataque: '#f97316',
+  score_defesa: '#22c55e',
+  score_eficiencia: '#f0c040',
+  score_controle: '#a78bfa',
+  score_forca_relativa: '#fb7185',
+}};
+const COMPONENT_FACTORS = {{
+  score_resultado: [
+    ['Pontos', 'Campanha convertida', 'Vitórias e empates são o sinal mais direto de produção real.'],
+    ['Aproveitamento', 'Consistência', 'Mostra quanto do máximo possível a seleção transformou em tabela.'],
+    ['Saldo de gols', 'Margem do placar', 'Diferencia vitória controlada de jogo decidido no detalhe.'],
+    ['Gols marcados', 'Capacidade de resolver', 'Gols marcados sustentam resultado quando aparecem junto de pontos e saldo.'],
+  ],
+  score_ataque: [
+    ['Gols por jogo', 'Produção final', 'Mostra quanto o ataque já colocou no placar.'],
+    ['Gols esperados por jogo', 'Qualidade das chances', 'Ajuda a separar pressão perigosa de chute sem valor real.'],
+    ['Finalizações no alvo', 'Ameaça ao goleiro', 'Finalização no alvo indica que o volume está chegando perto do gol.'],
+    ['Finalizações totais', 'Volume ofensivo', 'Importa mais quando vem acompanhado de chances claras, alvo e gols.'],
+  ],
+  score_defesa: [
+    ['Gols sofridos', 'Dano permitido', 'É a base da defesa: sofrer pouco mantém a seleção viva no ranking.'],
+    ['Gols evitados por jogo', 'Proteção acima do esperado', 'Captura defesa e goleiro superando ou ficando abaixo do esperado.'],
+    ['Duelos ganhos', 'Controle dos confrontos', 'Mostra força em disputas diretas, bolas aéreas e segundas bolas.'],
+    ['Força do rival', 'Contexto da pressão', 'Segurar ataque forte vale mais que sobreviver contra rival inofensivo.'],
+  ],
+  score_eficiencia: [
+    ['Gols por finalização', 'Conversão', 'Mostra se a seleção transforma tentativas em gol sem precisar de volume enorme.'],
+    ['Gols contra gols esperados', 'Acima do esperado', 'Indica finalização clínica ou queda de rendimento quando fica abaixo das chances criadas.'],
+    ['Precisão das finalizações', 'Pontaria', 'Chutar no alvo aumenta a chance de converter e força defesa/rebote.'],
+    ['Passes-chave', 'Último passe', 'Mede criação de finalizações, ligando construção a chance concreta.'],
+  ],
+  score_controle: [
+    ['Posse de bola', 'Ritmo do jogo', 'Ajuda a entender quem dita território e reduz fases de instabilidade.'],
+    ['Passes por jogo', 'Circulação', 'Volume de passes indica capacidade de sustentar ataques e descansar com bola.'],
+    ['Precisão dos passes', 'Segurança', 'Passe certo evita transição contra e mantém a estrutura da equipe.'],
+    ['Dribles certos', 'Quebra de linha', 'Drible efetivo transforma posse em progressão quando rompe marcação.'],
+  ],
+  score_forca_relativa: [
+    ['Rating Elo', 'Força estimada', 'Resume evolução da seleção considerando resultados e dificuldade.'],
+    ['Margem de vitória', 'Tamanho do resultado', 'Ganhar bem contra rival competitivo melhora a leitura da campanha.'],
+    ['Força dos adversários', 'Dificuldade do caminho', 'O mesmo placar vale mais quando vem contra uma seleção mais forte.'],
+    ['Sequência de resultados', 'Sustentação', 'Resultados repetidos reduzem a chance de uma leitura baseada em jogo isolado.'],
+  ],
+}};
+const WEIGHT_GUIDE_TABS = [
+  ['overview', 'Visão geral'],
+  ['why', 'Por que muda?'],
+  ['impact', 'Impacto'],
+  ['component', 'Componentes'],
+  ['faq', 'FAQ'],
+];
+const WEIGHT_GUIDE_FAQ = [
+  {{
+    q: 'Os pesos mudam por opinião ou por dado?',
+    a: 'Mudam por dado. Resultado e Força Relativa têm uma regra de design mais estável; Ataque, Defesa, Eficiência e Controle são recalibrados conforme os jogos finalizados mostram quais sinais explicam melhor o desempenho real — pontos + saldo de gols + saldo de xG (quão merecido foi o resultado).'
+  }},
+  {{
+    q: 'Por que recalibrar a cada jogo?',
+    a: 'Porque a Copa começa com pouca amostra. Um jogo novo pode revelar que, naquele momento do torneio, defesa está separando melhor as seleções do que posse, ou que eficiência está explicando mais o placar do que volume ofensivo. A recalibração evita congelar uma suposição ruim.'
+  }},
+  {{
+    q: 'Isso muda o passado?',
+    a: 'O dashboard mostra cada snapshot com os pesos daquele momento da análise. A leitura correta é temporal: após cada jogo, o modelo reavalia o que já sabe e recalcula o ranking com a evidência disponível até ali.'
+  }},
+  {{
+    q: 'Um peso baixo significa que o componente não importa?',
+    a: 'Não. Significa que, naquele recorte, ele explicou menos a diferença de desempenho entre as seleções do que os outros componentes. Controle, por exemplo, pode ser importante para estilo, mas ter peso baixo se a posse não estiver virando vantagem no placar.'
+  }},
+  {{
+    q: 'Como isso influencia a nota geral?',
+    a: 'A nota geral é uma média ponderada. Se Ataque pesa 18%, uma melhora ofensiva mexe mais no score do que mexeria com Ataque a 8%. O peso define a força de cada lente dentro da leitura final.'
+  }},
+  {{
+    q: 'Por que Resultado pesa tanto?',
+    a: 'Porque ranking de torneio precisa respeitar o placar. Métricas de processo ajudam a explicar e antecipar qualidade, mas a campanha real continua sendo o eixo mais sólido da classificação.'
+  }},
+  {{
+    q: 'E a Força Relativa?',
+    a: 'Ela contextualiza contra quem a seleção jogou. No início, todo mundo parte próximo no Elo, então o peso prático é menor. Conforme rivais fortes e fracos se separam, esse componente ganha mais capacidade de explicar campanhas difíceis.'
+  }},
+];
+let weightsGuideTab = 'overview';
+let weightsGuideComponent = 'score_resultado';
+let weightsGuideWeightFocus = null;
+let weightsCompareA = '';
+let weightsCompareB = '';
+let weightsGuideJogo = null;
+
+function _guideJogo() {{
+  return DATA[weightsGuideJogo] ? weightsGuideJogo : currentJogo;
+}}
+function _guideFrame() {{
+  return DATA[_guideJogo()] || DATA[lastJogo()] || {{}};
+}}
+function _guideWeight(key) {{
+  const p = _guideFrame().pesos || {{}};
+  return p[key] === undefined ? null : p[key];
+}}
+function _guideMatchLabel() {{
+  const frame = _guideFrame();
+  const n = _guideJogo();
+  const pos = sliderValueForJogo(n);
+  const match = frame.source_match_n || (frame.match_n ? String(frame.match_n).padStart(3, '0') : '');
+  return `Jogo ${{pos || 'atual'}}${{match ? ` · ${{match}}` : ''}}`;
+}}
+function _guideSnapshotControlHtml() {{
+  const n = _guideJogo();
+  const pos = sliderValueForJogo(n);
+  return `<div class="wg-snapshot-control">
+    <button type="button" class="wg-snap-btn" onclick="stepWeightsGuideSnapshot(-1)" title="Snapshot anterior">‹</button>
+    <div class="wg-snap-mid">
+      <input type="range" min="1" max="${{N}}" value="${{pos}}" oninput="setWeightsGuideSnapshot(jogoFromSliderValue(this.value))">
+      <div class="wg-snap-label">${{_guideMatchLabel()}}</div>
+    </div>
+    <button type="button" class="wg-snap-btn" onclick="stepWeightsGuideSnapshot(1)" title="Próximo snapshot">›</button>
+  </div>`;
+}}
+function _availableCompareTeams() {{
+  const frame = _guideFrame();
+  return (frame.teams || []).filter(t => t && t.team).map(t => t.team);
+}}
+function _ensureCompareTeams() {{
+  const teams = _availableCompareTeams();
+  const preferred = [...trajectoryTeams, selectedTeam].filter(Boolean);
+  if (!teams.includes(weightsCompareA)) weightsCompareA = preferred.find(t => teams.includes(t)) || teams[0] || '';
+  if (!teams.includes(weightsCompareB) || weightsCompareB === weightsCompareA) {{
+    weightsCompareB = preferred.find(t => teams.includes(t) && t !== weightsCompareA)
+      || teams.find(t => t !== weightsCompareA)
+      || '';
+  }}
+}}
+function _weightPctText(value) {{
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '0';
+  return Number.isInteger(n) ? String(n) : n.toFixed(1).replace(/\\.0$/, '');
+}}
+function _guideWeightRows() {{
+  return WEIGHT_COMPONENTS
+    .map(c => ({{ key: c[0], label: c[1], value: Number(_guideWeight(c[0]) || 0), color: WEIGHT_COLORS[c[0]] || '#58a6ff' }}))
+    .filter(r => r.value > 0);
+}}
+function _sumGuideWeights(keys) {{
+  return keys.reduce((sum, key) => sum + Number(_guideWeight(key) || 0), 0);
+}}
+function _weightBarsHtml() {{
+  const rows = _guideWeightRows();
+  const total = rows.reduce((sum, r) => sum + r.value, 0);
+  if (!rows.length || total <= 0) return '<div class="wg-example">Pesos ainda não carregados para este snapshot.</div>';
+  const focused = rows.find(r => r.key === weightsGuideWeightFocus) || null;
+  const centerValue = focused ? _weightPctText(focused.value) : _weightPctText(total);
+  const centerLabel = focused ? focused.label : 'Total';
+  const radius = 42;
+  const circ = 2 * Math.PI * radius;
+  let offset = 0;
+  const arcs = rows.map(r => {{
+    const pct = Math.max(0, r.value / total);
+    const len = pct * circ;
+    const label = `${{r.label}} · ${{_weightPctText(r.value)}}%`;
+    const stateCls = focused ? (focused.key === r.key ? ' active' : ' dimmed') : '';
+    const arc = `<circle class="wg-weight-arc${{stateCls}}" cx="50" cy="50" r="${{radius}}" pathLength="${{circ.toFixed(3)}}" stroke-dasharray="${{len.toFixed(3)}} ${{circ.toFixed(3)}}" stroke-dashoffset="${{(-offset).toFixed(3)}}" style="--wg-color:${{r.color}}" transform="rotate(-90 50 50)" tabindex="0" role="button" onclick="setWeightDonutFocus('${{r.key}}')" onkeydown="if(event.key==='Enter'||event.key===' '){{event.preventDefault();setWeightDonutFocus('${{r.key}}')}}"><title>${{label}}</title></circle>`;
+    offset += len;
+    return arc;
+  }}).join('');
+  const legend = rows.map(r => `
+    <button type="button" class="wg-weight-item${{focused && focused.key === r.key ? ' active' : ''}}" title="${{r.label}} · ${{_weightPctText(r.value)}}%" onclick="setWeightDonutFocus('${{r.key}}')">
+      <span class="wg-weight-swatch" style="--wg-color:${{r.color}}"></span>
+      <span class="wg-weight-name">${{r.label}}</span>
+      <span class="wg-weight-val">${{_weightPctText(r.value)}}%</span>
+    </button>`).join('');
+  const aria = rows.map(r => `${{r.label}} ${{_weightPctText(r.value)}}%`).join(', ');
+  return `<div class="wg-weight-donut-card">
+    <div class="wg-weight-donut-wrap">
+      <svg class="wg-weight-donut" viewBox="0 0 100 100" role="img" aria-label="Distribuição dos pesos do ranking: ${{aria}}">
+        <circle class="wg-weight-donut-bg" cx="50" cy="50" r="${{radius}}"></circle>
+        ${{arcs}}
+      </svg>
+      <div class="wg-weight-donut-center"><div><b>${{centerValue}}%</b><span>${{centerLabel}}</span></div></div>
+    </div>
+    <div class="wg-weight-panel">
+      <div class="wg-weight-panel-head"><span>Distribuição dos pesos</span><b>${{rows.length}} componentes</b></div>
+      <div class="wg-weight-legend">${{legend}}</div>
+    </div>
+  </div>`;
+}}
+function _componentPickerHtml() {{
+  return `<div class="wg-component-picker">${{WEIGHT_COMPONENTS.map(c => `
+    <button class="wg-comp-btn${{weightsGuideComponent === c[0] ? ' active' : ''}}" onclick="setWeightsGuideComponent('${{c[0]}}')">${{c[1]}}</button>
+  `).join('')}}</div>`;
+}}
+function _componentGuideHtml() {{
+  const key = weightsGuideComponent;
+  const label = (WEIGHT_COMPONENTS.find(c => c[0] === key) || [key, key])[1];
+  const info = SCORE_INFO[key] || {{}};
+  const weight = _guideWeight(key);
+  const factors = COMPONENT_FACTORS[key] || [];
+  const factorHtml = factors.map(([metric, title, copy]) => `
+    <div class="wg-factor-card">
+      <span>${{metric}}</span>
+      <b>${{title}}</b>
+      <p>${{copy}}</p>
+    </div>`).join('');
+  return `${{_componentPickerHtml()}}
+    <div class="wg-component-card">
+      <div class="wg-component-head">
+        <div>
+          <h3>${{info.title || label}}</h3>
+          <span>${{info.role || 'Componente da nota'}}</span>
+        </div>
+        <div class="wg-component-weight">${{weight ?? '—'}}%</div>
+      </div>
+      <p>${{info.desc || ''}}</p>
+      <p>${{info.detail || ''}}</p>
+      ${{info.good ? `<div class="wg-example"><b>Como ler:</b> ${{info.good}}.</div>` : ''}}
+      ${{factorHtml ? `<div class="wg-factor-grid">${{factorHtml}}</div>` : ''}}
+      <div class="wg-factor-note"><b>Cuidado de leitura:</b> nenhum item decide sozinho. O componente fica forte quando os sinais contam a mesma história — por exemplo, volume com qualidade, defesa com pouco dano sofrido, ou resultado com contexto de rival.</div>
+    </div>`;
+}}
+function _faqHtml() {{
+  return `<div class="wg-faq">${{WEIGHT_GUIDE_FAQ.map((item, i) => `
+    <div class="wg-faq-item${{i === 0 ? ' open' : ''}}">
+      <button type="button" class="wg-faq-q" onclick="toggleWeightsFaq(this)">
+        <span class="wg-faq-num">${{i + 1}}</span>
+        <span class="wg-faq-title">${{item.q}}</span>
+      </button>
+      <div class="wg-faq-a">${{item.a}}</div>
+    </div>
+  `).join('')}}</div>`;
+}}
+function _fmtSigned(v, digits = 1) {{
+  if (v === null || v === undefined || Number.isNaN(v)) return '—';
+  const s = Math.abs(v).toFixed(digits);
+  return `${{v > 0 ? '+' : v < 0 ? '-' : ''}}${{s}}`;
+}}
+function _teamOptionHtml(team) {{
+  const flag = TEAM_FLAGS[team] || (TEAMS_DETAIL[team] || {{}}).flag || '';
+  const snap = teamEntryAt(team, _guideJogo());
+  const rank = (SNAP_RANK[_guideJogo()] || {{}})[team];
+  const suffix = rank ? ` · #${{rank}}` : snap && snap.score_geral != null ? ` · ${{snap.score_geral.toFixed(1)}}` : '';
+  return `${{flag}} ${{team}}${{suffix}}`;
+}}
+function _compareTeamSelectHtml(id, label, value) {{
+  const teams = _availableCompareTeams();
+  return `<label class="wg-field"><span>${{label}}</span>
+    <select id="${{id}}" onchange="setWeightsCompareTeam('${{id}}', this.value)">
+      ${{teams.map(t => `<option value="${{_esc(t)}}" ${{t === value ? 'selected' : ''}}>${{_esc(_teamOptionHtml(t))}}</option>`).join('')}}
+    </select>
+  </label>`;
+}}
+function _weightedCompareRows(a, b) {{
+  const neutralWeight = 100 / WEIGHT_COMPONENTS.length;
+  return WEIGHT_COMPONENTS.map(([key, label]) => {{
+    const weight = _guideWeight(key) ?? 0;
+    const av = a[key];
+    const bv = b[key];
+    const delta = (av ?? 0) - (bv ?? 0);
+    const weighted = delta * weight / 100;
+    const neutral = delta * neutralWeight / 100;
+    const shift = weighted - neutral;
+    return {{ key, label, weight, av, bv, delta, weighted, neutral, shift }};
+  }});
+}}
+function _weightedTeamScore(t, neutral = false) {{
+  const neutralWeight = 100 / WEIGHT_COMPONENTS.length;
+  if (!neutral && t.score_geral != null) return t.score_geral;
+  return WEIGHT_COMPONENTS.reduce((sum, [key]) => {{
+    const weight = neutral ? neutralWeight : (_guideWeight(key) ?? 0);
+    return sum + ((t[key] ?? 0) * weight / 100);
+  }}, 0);
+}}
+function _snapshotWeightMapHtml() {{
+  const teams = (_guideFrame().teams || []).filter(t => t && t.team);
+  if (!teams.length) return '';
+  const effects = teams.map(t => {{
+    const weighted = _weightedTeamScore(t, false);
+    const neutral = _weightedTeamScore(t, true);
+    return {{ team: t.team, flag: t.flag || TEAM_FLAGS[t.team] || '', estilo: t.estilo_jogo || 'Sem estilo definido', effect: weighted - neutral }};
+  }}).sort((a, b) => b.effect - a.effect);
+  const top = effects[0];
+  const low = effects[effects.length - 1];
+  const byStyle = {{}};
+  effects.forEach(x => {{
+    if (!byStyle[x.estilo]) byStyle[x.estilo] = {{ estilo: x.estilo, effect: 0, n: 0 }};
+    byStyle[x.estilo].effect += x.effect;
+    byStyle[x.estilo].n += 1;
+  }});
+  const style = Object.values(byStyle)
+    .map(x => Object.assign(x, {{ avg: x.effect / Math.max(1, x.n) }}))
+    .sort((a, b) => b.avg - a.avg)[0];
+  return `<div class="wg-snapshot-strip">
+    <div class="wg-snapshot-pill"><span>Favorecida no snapshot</span><b>${{top.flag}} ${{top.team}}</b><small>${{_fmtSigned(top.effect)}} vs. régua neutra</small></div>
+    <div class="wg-snapshot-pill"><span>Mais cobrada pela régua</span><b>${{low.flag}} ${{low.team}}</b><small>-${{Math.abs(low.effect).toFixed(1)}} vs. régua neutra</small></div>
+    <div class="wg-snapshot-pill"><span>Estilo favorecido</span><b>${{style.estilo}}</b><small>Média ${{_fmtSigned(style.avg)}} por seleção</small></div>
+  </div>`;
+}}
+function _compareNarrative(rows, aTeam, bTeam, a, b) {{
+  const actualDelta = (a.score_geral ?? 0) - (b.score_geral ?? 0);
+  const weightedDelta = actualDelta;
+  const neutralDelta = rows.reduce((s, r) => s + r.neutral, 0);
+  const weightEffect = weightedDelta - neutralDelta;
+  const winner = actualDelta >= 0 ? aTeam : bTeam;
+  const loser = actualDelta >= 0 ? bTeam : aTeam;
+  const decisive = rows.slice().sort((x, y) => Math.abs(y.weighted) - Math.abs(x.weighted))[0];
+  const shiftRow = rows.slice().sort((x, y) => Math.abs(y.shift) - Math.abs(x.shift))[0];
+  const favored = Math.abs(weightEffect) < 0.15 ? 'Neutro' : (weightEffect > 0 ? aTeam : bTeam);
+  const favoredWhy = !shiftRow || Math.abs(weightEffect) < 0.15
+    ? 'Os pesos atuais não mudam muito a leitura contra pesos iguais.'
+    : `${{shiftRow.label}} pesa ${{shiftRow.weight.toFixed(0)}}% e ${{weightEffect > 0 ? aTeam : bTeam}} está melhor posicionado nessa lente.`;
+  const flip = Math.sign(weightedDelta || actualDelta) !== Math.sign(neutralDelta || actualDelta) && Math.abs(neutralDelta) > 0.15;
+  return {{ actualDelta, weightedDelta, neutralDelta, weightEffect, winner, loser, decisive, favored, favoredWhy, flip }};
+}}
+function _compareGuideHtml() {{
+  _ensureCompareTeams();
+  const aTeam = weightsCompareA;
+  const bTeam = weightsCompareB;
+  if (!aTeam || !bTeam) return '<div class="wg-example">Ainda não há duas seleções com dados neste snapshot para comparar.</div>';
+  const a = teamEntryAt(aTeam, _guideJogo());
+  const b = teamEntryAt(bTeam, _guideJogo());
+  if (!a || !b) return '<div class="wg-example">Escolha duas seleções que já tenham entrado no ranking neste snapshot.</div>';
+  const rows = _weightedCompareRows(a, b);
+  const story = _compareNarrative(rows, aTeam, bTeam, a, b);
+  const maxAbs = Math.max(0.01, ...rows.map(r => Math.abs(r.weighted)));
+  const sortedRows = rows.slice().sort((x, y) => Math.abs(y.weighted) - Math.abs(x.weighted));
+  const styleA = a.estilo_jogo ? ` · ${{a.estilo_jogo}}` : '';
+  const styleB = b.estilo_jogo ? ` · ${{b.estilo_jogo}}` : '';
+  const rankA = (SNAP_RANK[_guideJogo()] || {{}})[aTeam];
+  const rankB = (SNAP_RANK[_guideJogo()] || {{}})[bTeam];
+  const neutralA = _weightedTeamScore(a, true);
+  const neutralB = _weightedTeamScore(b, true);
+  const currentA = _weightedTeamScore(a, false);
+  const currentB = _weightedTeamScore(b, false);
+  const effectA = currentA - neutralA;
+  const effectB = currentB - neutralB;
+  const rowHtml = sortedRows.map((r, idx) => {{
+    const side = r.weighted >= 0 ? 'a' : 'b';
+    const width = Math.max(3, Math.abs(r.weighted) / maxAbs * 50);
+    const who = r.weighted >= 0 ? aTeam : bTeam;
+    return `<tr class="${{idx === 0 ? 'top' : ''}}">
+      <td>${{r.label}}</td>
+      <td class="wg-compare-weight">${{r.weight.toFixed(0)}}%</td>
+      <td>${{(r.av ?? 0).toFixed(1)}}</td>
+      <td>${{(r.bv ?? 0).toFixed(1)}}</td>
+      <td class="wg-compare-delta ${{r.delta >= 0 ? 'pos' : 'neg'}}">${{_fmtSigned(r.delta)}}</td>
+      <td><div class="wg-impact" title="Impacto no score final: ${{who}} ${{_fmtSigned(Math.abs(r.weighted))}}">
+        <div class="wg-compare-track"><div class="wg-compare-fill ${{side}}" style="width:${{width}}%"></div></div>
+        <div class="wg-compare-val">${{r.weighted >= 0 ? 'A' : 'B'}} ${{_fmtSigned(Math.abs(r.weighted))}}</div>
+      </div></td>
+    </tr>`;
+  }}).join('');
+  return `
+    <div class="wg-compare-controls">
+      ${{_compareTeamSelectHtml('weightsCompareA', 'Seleção A', aTeam)}}
+      ${{_compareTeamSelectHtml('weightsCompareB', 'Seleção B', bTeam)}}
+    </div>
+    <div class="wg-scoreboard">
+      <div class="wg-team-score a">
+        <div class="wg-team-name">${{TEAM_FLAGS[aTeam] || ''}} ${{aTeam}}</div>
+        <div class="wg-team-meta">Seleção A${{rankA ? ` · #${{rankA}}` : ''}}${{styleA}}</div>
+        <div class="wg-team-kpis">
+          <div class="wg-kpi"><span>Score atual</span><b>${{currentA.toFixed(1)}}</b></div>
+          <div class="wg-kpi"><span>Score neutro</span><b>${{neutralA.toFixed(1)}}</b></div>
+          <div class="wg-kpi"><span>Efeito pesos</span><b>${{_fmtSigned(effectA)}}</b></div>
+        </div>
+      </div>
+      <div class="wg-score-delta"><span>Diferença</span><b>${{_fmtSigned(story.actualDelta)}}</b></div>
+      <div class="wg-team-score b">
+        <div class="wg-team-name">${{TEAM_FLAGS[bTeam] || ''}} ${{bTeam}}</div>
+        <div class="wg-team-meta">Seleção B${{rankB ? ` · #${{rankB}}` : ''}}${{styleB}}</div>
+        <div class="wg-team-kpis">
+          <div class="wg-kpi"><span>Score atual</span><b>${{currentB.toFixed(1)}}</b></div>
+          <div class="wg-kpi"><span>Score neutro</span><b>${{neutralB.toFixed(1)}}</b></div>
+          <div class="wg-kpi"><span>Efeito pesos</span><b>${{_fmtSigned(effectB)}}</b></div>
+        </div>
+      </div>
+    </div>
+    <div class="wg-diagnosis">
+      <div class="wg-diagnosis-main"><b>${{story.winner}}</b> lidera contra <b>${{story.loser}}</b> por ${{_fmtSigned(Math.abs(story.actualDelta))}} ponto(s). A régua atual favorece <b>${{story.favored === 'Neutro' ? 'uma leitura quase neutra' : story.favored}}</b> em relação a pesos iguais.${{story.flip ? ' Com pesos iguais, a leitura mudaria de lado ou ficaria praticamente invertida.' : ''}}</div>
+      <div class="wg-diagnosis-meta">
+        <div class="wg-diag-chip"><span>Lente decisiva</span>${{story.decisive.label}}</div>
+        <div class="wg-diag-chip"><span>Por quê</span>${{story.favoredWhy}}</div>
+        <div class="wg-diag-chip"><span>Perfis</span>${{aTeam}}${{styleA}} · ${{bTeam}}${{styleB}}</div>
+      </div>
+    </div>
+    <div class="wg-compare-table-wrap">
+      <table class="wg-compare-table">
+        <colgroup>
+          <col style="width: 22%">
+          <col style="width: 9%">
+          <col style="width: 10%">
+          <col style="width: 10%">
+          <col style="width: 10%">
+          <col style="width: 39%">
+        </colgroup>
+        <thead><tr><th>Componente</th><th>Peso</th><th>A pts</th><th>B pts</th><th>Delta</th><th>Impacto no score</th></tr></thead>
+        <tbody>${{rowHtml}}</tbody>
+      </table>
+    </div>
+    <div class="wg-compare-note">“A pts” e “B pts” são as notas de 0 a 100 em cada componente. “Impacto” é a diferença multiplicada pelo peso atual; azul favorece a Seleção A e amarelo favorece a Seleção B. Score neutro usa 16,7% para cada componente.</div>`;
+}}
+function toggleWeightsFaq(btn) {{
+  const item = btn.closest('.wg-faq-item');
+  if (!item) return;
+  const wasOpen = item.classList.contains('open');
+  const root = item.parentElement;
+  root.querySelectorAll('.wg-faq-item.open').forEach(el => el.classList.remove('open'));
+  if (!wasOpen) item.classList.add('open');
+}}
+function _guideSectionHtml(tab) {{
+  if (tab === 'overview') return `
+    <div class="wg-kicker">Pesos atuais · ${{_guideMatchLabel()}}</div>
+    <div class="wg-h2">O ranking combina placar, processo e contexto.</div>
+    <p class="wg-lead">Cada peso diz quanto uma lente entra na nota geral naquele momento do torneio. O placar ancora a análise; os componentes de processo ajudam a separar desempenho sustentável de resultado ocasional; a força relativa ajusta a dificuldade do caminho.</p>
+    ${{_weightBarsHtml()}}
+    <div class="wg-grid">
+      <div class="wg-card"><b>Não é uma tabela fixa</b><p>Os pesos acompanham o que os jogos já mostraram. Conforme a amostra cresce, o modelo entende melhor quais sinais estão explicando o saldo real.</p></div>
+      <div class="wg-card"><b>Comparação justa no tempo</b><p>Após cada partida, o snapshot usa a evidência disponível até aquele ponto. A leitura vira uma história da Copa, não só uma foto final.</p></div>
+      <div class="wg-card"><b>Processo importa, mas com limite</b><p>Chutar, controlar e defender bem ajudam; vencer e construir saldo continuam tendo prioridade porque ranking de torneio precisa respeitar o resultado.</p></div>
+    </div>`;
+  if (tab === 'why') return `
+    <div class="wg-kicker">Recalibração</div>
+    <div class="wg-h2">Os pesos variam porque o torneio muda a evidência.</div>
+    <p class="wg-lead">No começo, há poucos jogos e muito ruído: uma goleada, uma expulsão ou um adversário fraco podem distorcer métricas. A cada jogo finalizado, os componentes de processo são comparados com desempenho real — <b>pontos</b>, <b>saldo de gols</b> e <b>saldo de xG</b> — para ajustar o quanto cada lente deve pesar.</p>
+    <div class="wg-flow single">
+      <div class="wg-step"><span class="wg-step-num">1</span><p><b>Entra evidência nova.</b><br>Placar, volume ofensivo, qualidade das chances, defesa, controle e força do rival entram no snapshot.</p></div>
+      <div class="wg-step"><span class="wg-step-num">2</span><p><b>O modelo compara sinais.</b><br>Ele mede quais componentes estão mais alinhados com desempenho real, não só com uma posse bonita ou um placar isolado.</p></div>
+      <div class="wg-step"><span class="wg-step-num">3</span><p><b>Processo é recalibrado.</b><br>Ataque, Defesa, Eficiência e Controle sobem ou descem conforme explicam melhor pontos, saldo e xG.</p></div>
+      <div class="wg-step"><span class="wg-step-num">4</span><p><b>A leitura fica temporal.</b><br>Resultado e Força Relativa preservam a lógica de torneio; o restante acompanha o que a Copa já mostrou.</p></div>
+    </div>
+    <div class="wg-example-grid">
+      <div class="wg-example-card"><span>Quando controle cai</span><b>Posse sem dano perde voz.</b><p>Se a bola fica muito tempo com uma seleção, mas isso não vira chance clara, xG ou saldo, Controle explica estilo e não vantagem real.</p></div>
+      <div class="wg-example-card"><span>Quando defesa sobe</span><b>Evitar chance começa a separar times.</b><p>Se quem concede pouco xG, poucos chutes perigosos e poucos gols começa a abrir saldo, Defesa ganha peso porque está explicando resultado.</p></div>
+      <div class="wg-example-card"><span>Quando eficiência pesa</span><b>Finalizar melhor que o volume importa.</b><p>Se duas seleções chutam parecido, mas uma converte chances melhores e erra menos decisões no terço final, Eficiência passa a contar mais.</p></div>
+    </div>`;
+  if (tab === 'impact') return `
+    <div class="wg-kicker">Influência na análise</div>
+    <div class="wg-h2">Peso é a força de cada pergunta dentro da nota final.</div>
+    <p class="wg-lead">A nota geral funciona como uma média ponderada dos componentes. Por isso, a mesma melhora em uma métrica pode mudar muito ou pouco a posição dependendo do peso atual daquela lente.</p>
+    <div class="wg-flow single">
+      <div class="wg-step"><span class="wg-step-num">1</span><p><b>No ranking.</b><br>Componentes com maior peso movem mais as barras e a ordem das seleções. Um Ataque a 18% tem mais impacto que um Ataque a 8%.</p></div>
+      <div class="wg-step"><span class="wg-step-num">2</span><p><b>Na interpretação.</b><br>O peso mostra qual narrativa está mais forte naquele ponto: campanha, defesa, criação, eficiência, controle ou dificuldade do caminho.</p></div>
+      <div class="wg-step"><span class="wg-step-num">3</span><p><b>Na comparação.</b><br>Seleções parecidas em pontos podem se separar por processo. Seleções bonitas de ver, mas pouco efetivas, perdem força se processo não vira placar.</p></div>
+    </div>
+    <div class="wg-example-grid">
+      <div class="wg-example-card"><span>Quando o peso é alto</span><b>A mesma diferença vale mais.</b><p>Se Ataque pesa 18%, abrir 10 pontos no ataque rende mais score final do que abrir os mesmos 10 pontos em uma lente de 7%.</p></div>
+      <div class="wg-example-card"><span>Quando o peso é baixo</span><b>Boa métrica não garante subida.</b><p>Uma seleção pode controlar bem o jogo, mas subir pouco se Controle estiver baixo e esse domínio não estiver virando chance, gol ou saldo.</p></div>
+      <div class="wg-example-card"><span>Quando comparar times</span><b>Olhe a lente que separa.</b><p>Entre duas seleções parecidas em pontos, a posição costuma sair da lente com maior peso: resultado, defesa, ataque, eficiência ou força do rival.</p></div>
+    </div>`;
+  if (tab === 'component') return `
+    <div class="wg-kicker">Componentes</div>
+    <div class="wg-h2">Explore cada lente do ranking.</div>
+    <p class="wg-lead">Clique em um componente para ver o peso atual, o que ele mede e como ele deve ser interpretado dentro da análise.</p>
+    ${{_componentGuideHtml()}}`;
+  return `
+    <div class="wg-kicker">Perguntas frequentes</div>
+    <div class="wg-h2">Dúvidas comuns sobre pesos dinâmicos.</div>
+    <p class="wg-lead">Use estas perguntas como guia de leitura quando um peso subir, cair ou parecer contraintuitivo durante a Copa.</p>
+    ${{_faqHtml()}}`;
+}}
+function renderWeightsGuide() {{
+  const modal = document.getElementById('weightsGuide');
+  const nav = document.getElementById('weightsGuideNav');
+  const body = document.getElementById('weightsGuideBody');
+  const sub = document.getElementById('weightsGuideSub');
+  if (!modal || !nav || !body) return;
+  if (sub) sub.textContent = `Pesos do snapshot selecionado · ${{_guideMatchLabel()}}`;
+  nav.innerHTML = WEIGHT_GUIDE_TABS.map(t =>
+    `<button class="wg-tab${{weightsGuideTab === t[0] ? ' active' : ''}}" onclick="switchWeightsGuideTab('${{t[0]}}')">${{t[1]}}</button>`
+  ).join('');
+  body.innerHTML = `<section class="wg-section active">${{_guideSectionHtml(weightsGuideTab)}}</section>`;
+}}
+function openWeightsGuide(tab = 'overview', componentKey = null) {{
+  if (tab) weightsGuideTab = tab;
+  if (componentKey) weightsGuideComponent = componentKey;
+  closeWeightPills();
+  const modal = document.getElementById('weightsGuide');
+  if (!modal) return;
+  if (modal.style.display === 'none' || !weightsGuideJogo) weightsGuideJogo = currentJogo;
+  modal.style.display = 'flex';
+  renderWeightsGuide();
+}}
+function closeWeightsGuide() {{
+  const modal = document.getElementById('weightsGuide');
+  if (modal) modal.style.display = 'none';
+}}
+function switchWeightsGuideTab(tab) {{
+  weightsGuideTab = tab;
+  renderWeightsGuide();
+}}
+function setWeightsGuideComponent(key) {{
+  weightsGuideTab = 'component';
+  weightsGuideComponent = key;
+  renderWeightsGuide();
+}}
+function setWeightDonutFocus(key) {{
+  weightsGuideWeightFocus = weightsGuideWeightFocus === key ? null : key;
+  renderWeightsGuide();
+}}
+function setWeightsGuideSnapshot(n) {{
+  n = Number(n);
+  if (!DATA[n]) return;
+  weightsGuideJogo = n;
+  _ensureCompareTeams();
+  renderWeightsGuide();
+}}
+function stepWeightsGuideSnapshot(dir) {{
+  const n = _guideJogo();
+  const next = dir > 0 ? nextJogo(n) : prevJogo(n);
+  if (next != null) setWeightsGuideSnapshot(next);
+}}
+function setWeightsCompareTeam(id, team) {{
+  if (id === 'weightsCompareA') weightsCompareA = team;
+  if (id === 'weightsCompareB') weightsCompareB = team;
+  if (weightsCompareA && weightsCompareA === weightsCompareB) {{
+    const teams = _availableCompareTeams();
+    const other = teams.find(t => t !== weightsCompareA);
+    if (id === 'weightsCompareA') weightsCompareB = other || '';
+    else weightsCompareA = other || '';
+  }}
+  renderWeightsGuide();
+}}
+
 function renderJogo(n) {{
   const frame = DATA[n];
   if (!frame) return;
@@ -4447,7 +5820,6 @@ function renderJogo(n) {{
 
   // weights pills com tooltip explicativo
   const p = frame.pesos || {{}};
-  const SCORE_INFO = {score_info_json};
   const pillDefs = [
     ['Resultado',     'score_resultado',    p.score_resultado],
     ['Ataque',        'score_ataque',       p.score_ataque],
@@ -4458,27 +5830,15 @@ function renderJogo(n) {{
     ['Disciplina',    'score_disciplina',   p.score_disciplina],
   ];
   const pillsHtml = pillDefs.filter(([,,v]) => v !== undefined).map(([label, key, v]) => {{
-    const info = SCORE_INFO[key] || {{}};
-    const metricas = (info.metricas || []).map(m => `<span>${{m}}</span>`).join('');
-    return `<div class="w-pill">
+    return `<button type="button" class="w-pill" onclick="openWeightsGuide('component', '${{key}}')" title="Abrir explicação de ${{label}}">
       <span class="w-name">${{label}}</span>
       <span class="w-val">${{v}}%</span>
-      <div class="w-tip">
-        <div class="w-tip-head">
-          <div>
-            <div class="w-tip-title">${{info.title || label}}</div>
-            <div class="w-tip-role">${{info.role || 'Componente da nota'}}</div>
-          </div>
-          <div class="w-tip-weight">${{v}}%<span>peso atual</span></div>
-        </div>
-        <div class="w-tip-desc">${{info.desc || ''}}</div>
-        ${{info.detail ? `<div class="w-tip-detail">${{info.detail}}</div>` : ''}}
-        ${{info.good ? `<div class="w-tip-good">${{info.good}}</div>` : ''}}
-        ${{metricas ? `<div class="w-tip-metrics">${{metricas}}</div>` : ''}}
-      </div>
-    </div>`;
+    </button>`;
   }}).join('');
-  document.getElementById('weightsPills').innerHTML = pillsHtml || '<span style="font-size:0.7rem;color:#6b7280">Pesos carregando…</span>';
+  const helpHtml = `<button type="button" class="weights-help-btn" onclick="openWeightsGuide('overview')" title="Entenda pesos dinâmicos">?</button>`;
+  document.getElementById('weightsPills').innerHTML = pillsHtml ? helpHtml + pillsHtml : '<span style="font-size:0.7rem;color:#6b7280">Pesos carregando…</span>';
+  closeWeightPills();  // re-render fecha qualquer card aberto (evita ficar preso ao trocar de jogo)
+  if (document.getElementById('weightsGuide')?.style.display !== 'none') renderWeightsGuide();
 
   // dots: marca o snapshot em tela como "current" (régua principal + réguas por time).
   Object.entries(dotRefs).forEach(([j, ref]) => {{
@@ -4505,6 +5865,14 @@ function renderJogo(n) {{
   const maxRef = PERCENT_FRAC.has(currentMetric) ? 1
                : (PERCENT_DIRECT.has(currentMetric) || currentMetric.startsWith('score_') || STYLE_AXES.has(currentMetric)) ? 100
                : (maxV || 1);
+  // Métricas COM SINAL (podem ser negativas): xGP, saldo de gols. A barra por
+  // |valor| faria um -1.76 virar barra cheia (parecendo ótimo). Aqui mapeamos
+  // linearmente de [min, max] → [3%, 100%], então negativos ficam curtos e o
+  // comprimento reflete a ordem real. O ranking/sort já está correto à parte.
+  const isSigned = SIGNED_METRICS.has(currentMetric) && vals.some(v => v < 0);
+  const signedMin = isSigned ? Math.min(...vals) : 0;
+  const signedMax = isSigned ? Math.max(...vals) : 0;
+  const signedSpan = (signedMax - signedMin) || 1;
 
   // hide all — pool armazena {{ row, rankEl, nameEl, fillEl, valEl, tipEl }}
   Object.values(pool).forEach(p => {{ p.row.style.opacity = '0'; p.row.style.pointerEvents = 'none'; }});
@@ -4521,6 +5889,9 @@ function renderJogo(n) {{
     let pct;
     if (v === null || v === undefined) {{
       pct = 0;
+    }} else if (isSigned) {{
+      // mapeia [min,max] → [3,100]; o pior (mais negativo) fica curto, não cheio
+      pct = (3 + (v - signedMin) / signedSpan * 97).toFixed(2);
     }} else {{
       // proporcional ao valor real: score 0–100 → % direto; bruto → fração do máximo
       pct = (Math.abs(v) / maxRef * 100).toFixed(2);
@@ -4570,6 +5941,7 @@ function renderJogo(n) {{
 
   renderSidebar(n);
   renderTrajectoryModal();
+  renderPointCompareModal();
   refreshAllCards();
 }}
 
@@ -4598,7 +5970,7 @@ function trajectoryPoint(team, j, metric, dir) {{
   if (!frame) return null;
   const entry = (SNAP_BY_TEAM[j] || {{}})[team];
   if (!entry || entry[metric] === null || entry[metric] === undefined) return null;
-  const universe = trajectoryUniverse(frame, team);
+  const universe = trajectoryAxis === 'team' ? (frame.teams || []) : trajectoryUniverse(frame, team);
   const mr = metricRank(metric, universe, team, dir);
   if (!mr) return null;
   return {{ jogo: j, value: entry[metric], rank: mr.rank, total: mr.total, teamGames: entry.jogos || 0 }};
@@ -4613,12 +5985,32 @@ function trajectorySeries(team, metric, dir) {{
   let lastGames = 0;
   all.forEach(p => {{
     const games = p.teamGames || 0;
-    if (games > lastGames) {{
+    if (p.jogo <= currentJogo && games > lastGames) {{
       byGame.push(Object.assign({{}}, p, {{ teamOrder: games }}));
       lastGames = games;
     }}
   }});
   return byGame;
+}}
+
+function trajectorySeriesByTeam(teams, metric, dir) {{
+  const out = {{}};
+  teams.forEach(team => {{ out[team] = trajectorySeries(team, metric, dir); }});
+  if (trajectoryAxis !== 'team' || teams.length < 2) return out;
+
+  const aligned = {{}};
+  teams.forEach(team => {{ aligned[team] = []; }});
+  Object.entries(comparableTeamGameSnapshots(teams)).forEach(([teamOrder, snapshot]) => {{
+    const order = Number(teamOrder);
+    const n = Number(snapshot);
+    teams.forEach(team => {{
+      const p = trajectoryPoint(team, n, metric, dir);
+      if (p && (p.teamGames || 0) >= order) {{
+        aligned[team].push(Object.assign({{}}, p, {{ teamOrder: order }}));
+      }}
+    }});
+  }});
+  return aligned;
 }}
 
 function trajectoryCurrentPoint(series) {{
@@ -4913,6 +6305,209 @@ function renderTrajectorySummary(teams, seriesByTeam, metric, dir) {{
   return `<div class="trajectory-summary">${{rows}}</div>`;
 }}
 
+const POINT_COMPARE_METRICS = [
+  ['score_geral', 'Score'],
+  ['score_resultado', 'Resultado'],
+  ['score_ataque', 'Ataque'],
+  ['score_defesa', 'Defesa'],
+  ['score_eficiencia', 'Eficiência'],
+  ['score_controle', 'Controle'],
+  ['score_forca_relativa', 'Força Relativa'],
+];
+
+let pointCompareSortMetric = null;
+
+function pointCompareMetricLabel(metric) {{
+  const item = POINT_COMPARE_METRICS.find(([key]) => key === metric);
+  return item ? item[1] : null;
+}}
+
+function pointCompareValue(team, metric) {{
+  const entry = teamEntryAt(team, currentJogo);
+  return entry && entry[metric] !== null && entry[metric] !== undefined ? entry[metric] : null;
+}}
+
+function pointCompareRankStyle(order, total) {{
+  if (!order || !total) return '--rank-hue:214;--rank-alpha:0.08';
+  const denom = Math.max(total - 1, 1);
+  const strength = total <= 1 ? 1 : 1 - ((order - 1) / denom);
+  const hue = order === 1 ? 45 : order === 2 ? 210 : order === 3 ? 28 : 214;
+  const alpha = (0.10 + strength * 0.30).toFixed(3);
+  return `--rank-hue:${{hue}};--rank-alpha:${{alpha}}`;
+}}
+
+function pointCompareRankClass(order, total) {{
+  if (order === 1) return 'rk1';
+  if (order === 2) return 'rk2';
+  if (order === 3) return 'rk3';
+  if (total > 3 && order === total) return 'rk-last';
+  return '';
+}}
+
+function pointCompareSortedTeams(teams) {{
+  const metric = pointCompareMetricLabel(pointCompareSortMetric) ? pointCompareSortMetric : null;
+  const uniqTeams = [...new Set((teams || []).filter(t => teamEntryAt(t, currentJogo)))];
+  if (!metric) return uniqTeams;
+  return uniqTeams.slice().sort((a, b) => {{
+    const av = pointCompareValue(a, metric);
+    const bv = pointCompareValue(b, metric);
+    const aMissing = av === null || av === undefined;
+    const bMissing = bv === null || bv === undefined;
+    if (aMissing && bMissing) return a.localeCompare(b);
+    if (aMissing) return 1;
+    if (bMissing) return -1;
+    if (bv !== av) return bv - av;
+    return a.localeCompare(b);
+  }});
+}}
+
+function setPointCompareSort(metric) {{
+  if (!pointCompareMetricLabel(metric)) return;
+  pointCompareSortMetric = metric;
+  renderPointCompareModal();
+}}
+
+function renderPointCompare(teams, inline = false) {{
+  const uniqTeams = pointCompareSortedTeams(teams);
+  const title = 'Comparação ponto a ponto';
+  const cls = inline ? 'point-compare inline' : 'point-compare';
+  if (uniqTeams.length < 2) {{
+    return `<div class="${{cls}}">
+      <div class="pcmp-head"><div class="pcmp-title">${{title}}</div><div class="pcmp-sub">J${{currentJogo}}</div></div>
+      <div class="pcmp-empty">Fixe pelo menos 2 seleções na trajetória para comparar os pontos de cada componente lado a lado.</div>
+    </div>`;
+  }}
+
+  const minWidth = 160 + uniqTeams.length * 122;
+  const tableStyle = inline ? ` style="min-width:${{minWidth}}px"` : '';
+  const header = `<tr><th>Componente</th>${{uniqTeams.map(team => {{
+    const flag = TEAM_FLAGS[team] || '';
+    const color = trajectoryColor(team);
+    const name = team;
+    return `<th title="${{_esc(team)}}"><span class="pcmp-team-head"><span class="pcmp-team-dot" style="background:${{color}}"></span><span class="pcmp-team-name">${{flag}} ${{_esc(name)}}</span></span></th>`;
+  }}).join('')}}</tr>`;
+
+  const rows = POINT_COMPARE_METRICS.map(([metric, label]) => {{
+    const values = uniqTeams.map(team => {{
+      return pointCompareValue(team, metric);
+    }});
+    const ranked = uniqTeams.map((team, i) => ({{ team, value: values[i] }}))
+      .filter(x => x.value !== null && x.value !== undefined)
+      .sort((a, b) => b.value - a.value);
+    const orderByTeam = {{}};
+    let lastValue = null;
+    let lastOrder = 0;
+    ranked.forEach((item, idx) => {{
+      const order = lastValue !== null && item.value === lastValue ? lastOrder : idx + 1;
+      orderByTeam[item.team] = order;
+      lastValue = item.value;
+      lastOrder = order;
+    }});
+    const comparableCount = ranked.length;
+    const cells = uniqTeams.map((team, i) => {{
+      const v = values[i];
+      const mr = metricRank(metric, DATA[currentJogo].teams || [], team, 'desc');
+      const title = mr ? ` title="${{_esc(team)}}: #${{mr.rank}}${{mr.tied ? '=' : ''}} no ranking geral de ${{label}}"` : '';
+      const order = orderByTeam[team] || null;
+      const cls = pointCompareRankClass(order, comparableCount);
+      const style = pointCompareRankStyle(order, comparableCount);
+      const orderLabel = order ? `${{order}}º` : '—';
+      return `<td class="pcmp-rank-cell ${{cls}}" style="${{style}}"${{title}}>
+        <span class="pcmp-cell-main"><span class="pcmp-value">${{formatVal(v, metric)}}</span><span class="pcmp-order">${{orderLabel}}</span></span>
+      </td>`;
+    }}).join('');
+    const active = metric === pointCompareSortMetric;
+    const sortChip = active ? '<span class="pcmp-sort-chip">ordem</span>' : '';
+    return `<tr class="${{active ? 'pcmp-sort-row' : ''}}"><td><button class="pcmp-metric-btn" onclick="setPointCompareSort('${{metric}}')" title="Ordenar seleções por ${{label}}"><span>${{label}}</span>${{sortChip}}</button></td>${{cells}}</tr>`;
+  }}).join('');
+
+  return `<div class="${{cls}}">
+    <div class="pcmp-head">
+      <div class="pcmp-title">${{title}}</div>
+      <div class="pcmp-sub">Snapshot J${{currentJogo}} · ${{uniqTeams.length}} seleções</div>
+    </div>
+    <div class="pcmp-scroll">
+      <table class="pcmp-table"${{tableStyle}}>
+        <thead>${{header}}</thead>
+        <tbody>${{rows}}</tbody>
+      </table>
+    </div>
+    <div class="pcmp-note">Clique em uma métrica para ordenar os países por aquela linha. Cada célula mostra a pontuação no snapshot atual e a ordem entre as seleções escolhidas; passe o mouse para ver a posição no ranking geral.</div>
+  </div>`;
+}}
+
+function renderPointCompareTeamChips(teams) {{
+  const uniqTeams = [...new Set((teams || []).filter(Boolean))];
+  if (!uniqTeams.length) return '<span class="trajectory-empty-chip">Nenhuma seleção fixa</span>';
+  return uniqTeams.map(team => {{
+    const flag = TEAM_FLAGS[team] || '';
+    const color = trajectoryColor(team);
+    return `<span class="traj-chip" title="${{_esc(team)}}">
+      <span class="traj-chip-dot" style="background:${{color}}"></span>
+      <span class="traj-chip-name">${{flag}} ${{_esc(team)}}</span>
+    </span>`;
+  }}).join('');
+}}
+
+function renderPointCompareModule(teams) {{
+  const uniqTeams = [...new Set((teams || []).filter(Boolean))];
+  const metric = trajectoryMetricKey();
+  const metricLabel = METRIC_LABELS[metric] || metric;
+  const summary = uniqTeams.length
+    ? `${{uniqTeams.length}} seleção${{uniqTeams.length !== 1 ? 'es' : ''}} · ${{metricLabel}}`
+    : 'Nenhuma seleção fixa';
+  const body = uniqTeams.length >= 2
+    ? `<button class="traj-open-btn" onclick="openPointCompareModal()">Abrir painel flutuante</button>
+       <div class="pcmp-module-empty">${{uniqTeams.length}} seleções prontas para comparar ponto a ponto.</div>`
+    : `<button class="traj-open-btn" onclick="openPointCompareModal()">Abrir painel flutuante</button>
+       <div class="pcmp-module-empty">Fixe pelo menos 2 seleções para comparar os componentes lado a lado.</div>`;
+  return `<div class="point-compare-module">
+    <div class="pcmp-module-title">Comparação ponto a ponto</div>
+    <div class="pcmp-module-teams">${{renderPointCompareTeamChips(uniqTeams)}}</div>
+    <div class="pcmp-module-summary">${{summary}}</div>
+    ${{body}}
+  </div>`;
+}}
+
+function renderPointCompareModal() {{
+  const modal = document.getElementById('pointCompareModal');
+  const bodyEl = document.getElementById('pointCompareModalBody');
+  const subEl = document.getElementById('pointCompareModalSubtitle');
+  if (!modal || !bodyEl || !subEl) return;
+  const teams = trajectoryTeams.length ? trajectoryTeams.slice() : (selectedTeam ? [selectedTeam] : []);
+  const metric = trajectoryMetricKey();
+  const metricLabel = METRIC_LABELS[metric] || metric;
+  const sortLabel = pointCompareMetricLabel(pointCompareSortMetric);
+  subEl.textContent = teams.length
+    ? `${{teams.length}} seleção${{teams.length !== 1 ? 'es' : ''}} · Snapshot J${{currentJogo}} · ${{metricLabel}}${{sortLabel ? ` · ordem: ${{sortLabel}}` : ''}}`
+    : 'sem seleções fixadas';
+  bodyEl.innerHTML = renderPointCompare(teams, false);
+  applyPointCompareScale(modal);
+}}
+
+function openPointCompareModal() {{
+  const modal = document.getElementById('pointCompareModal');
+  if (!modal) return;
+  if (!modal.style.width) modal.style.width = Math.min(980, window.innerWidth - 140) + 'px';
+  if (!modal.dataset.resized) modal.style.height = 'auto';
+  modal.style.display = 'flex';
+  renderPointCompareModal();
+  applyPointCompareScale(modal);
+  if (!modal.dataset.positioned) {{
+    modal.style.left = Math.max(12, (window.innerWidth - (modal.offsetWidth || 980)) / 2) + 'px';
+    modal.style.top = Math.max(12, (window.innerHeight - (modal.offsetHeight || 360)) / 2) + 'px';
+    modal.style.right = 'auto';
+    modal.style.bottom = 'auto';
+    modal.dataset.positioned = '1';
+  }}
+  keepPointCompareModalInViewport();
+}}
+
+function closePointCompareModal() {{
+  const modal = document.getElementById('pointCompareModal');
+  if (modal) modal.style.display = 'none';
+}}
+
 function renderSidebar(n) {{
   const nameEl = document.getElementById('sidebarTeam');
   const bodyEl = document.getElementById('sidebarBody');
@@ -4922,7 +6517,7 @@ function renderSidebar(n) {{
 
   if (!teams.length) {{
     nameEl.textContent = '—';
-    bodyEl.innerHTML = '<button class="traj-open-btn" onclick="openTrajectoryModal()">Abrir painel flutuante</button><div class="no-team">Clique em até 16 seleções para comparar a trajetória.</div>';
+    bodyEl.innerHTML = '<button class="traj-open-btn" onclick="openTrajectoryModal()">Abrir painel flutuante</button><div class="no-team">Clique em até 16 seleções para comparar a trajetória.</div>' + renderPointCompareModule([]);
     return;
   }}
 
@@ -4930,7 +6525,8 @@ function renderSidebar(n) {{
   const metricLabel = METRIC_LABELS[metric] || metric;
   nameEl.textContent = teams.length === 1 ? teams[0] : `${{teams.length}} seleções · ${{metricLabel}}`;
   bodyEl.innerHTML = `<button class="traj-open-btn" onclick="openTrajectoryModal()">Abrir painel flutuante</button>
-    <div class="no-team">${{teams.length}} seleção${{teams.length !== 1 ? 'es' : ''}} · ${{metricLabel}}</div>`;
+    <div class="no-team">${{teams.length}} seleção${{teams.length !== 1 ? 'es' : ''}} · ${{metricLabel}}</div>
+    ${{renderPointCompareModule(teams)}}`;
 }}
 
 function renderTrajectoryModal() {{
@@ -4954,8 +6550,7 @@ function renderTrajectoryModal() {{
     return;
   }}
 
-  const seriesByTeam = {{}};
-  teams.forEach(team => {{ seriesByTeam[team] = trajectorySeries(team, metric, dir); }});
+  const seriesByTeam = trajectorySeriesByTeam(teams, metric, dir);
   const focusTeams = [...trajectoryFocusTeams].filter(t => teams.includes(t));
   const chartTeams = focusTeams.length ? focusTeams : teams;
   bodyEl.innerHTML = `<div class="trajectory-panel">
@@ -4991,7 +6586,10 @@ function closeTrajectoryModal() {{
 let trajectoryDrag = null;
 let trajectoryResize = null;
 let trajectorySidebarDrag = null;
+let pointCompareDrag = null;
+let pointCompareResize = null;
 const TRAJECTORY_MODAL_RATIO = 16 / 9;
+const POINT_COMPARE_MODAL_RATIO = 3.25;
 
 function clampTrajectoryModalSize(w, h) {{
   const minW = Math.min(760, window.innerWidth - 24);
@@ -5004,6 +6602,37 @@ function clampTrajectoryModalSize(w, h) {{
     outW = outH * TRAJECTORY_MODAL_RATIO;
   }}
   return {{ w: outW, h: outH }};
+}}
+
+function clampPointCompareModalSize(w) {{
+  const minW = Math.min(720, window.innerWidth - 24);
+  const maxW = Math.max(minW, window.innerWidth - 24);
+  const maxH = Math.max(260, window.innerHeight - 24);
+  let outW = Math.max(minW, Math.min(w, maxW, maxH * POINT_COMPARE_MODAL_RATIO));
+  let outH = outW / POINT_COMPARE_MODAL_RATIO;
+  if (outH > maxH) {{
+    outH = maxH;
+    outW = outH * POINT_COMPARE_MODAL_RATIO;
+  }}
+  return {{ w: outW, h: outH }};
+}}
+
+function applyPointCompareScale(modal, size = null) {{
+  if (!modal) return;
+  const rect = size || modal.getBoundingClientRect();
+  const scaleFromWidth = rect.w ? rect.w / 980 : rect.width / 980;
+  const scaleFromHeight = rect.h ? rect.h / 320 : rect.height / 320;
+  const table = modal.querySelector('.pcmp-table');
+  const colCount = Math.max(1, (table ? table.querySelectorAll('thead th').length - 1 : 3));
+  const width = rect.w || rect.width || 980;
+  const usableColWidth = Math.max(1, (width - 118) / colCount);
+  const fitScale = Math.max(0.78, Math.min(1, usableColWidth / 92));
+  const scale = Math.max(0.78, Math.min(1.42, Math.min(scaleFromWidth, scaleFromHeight, fitScale)));
+  if (modal.style && typeof modal.style.setProperty === 'function') {{
+    modal.style.setProperty('--pcmp-scale', scale.toFixed(3));
+  }} else if (modal.style) {{
+    modal.style['--pcmp-scale'] = scale.toFixed(3);
+  }}
 }}
 
 function keepTrajectoryModalInViewport() {{
@@ -5059,6 +6688,103 @@ function endTrajectoryDrag() {{
 }}
 
 document.getElementById('trajectoryModalBar')?.addEventListener('mousedown', startTrajectoryDrag);
+
+function keepPointCompareModalInViewport() {{
+  const modal = document.getElementById('pointCompareModal');
+  if (!modal) return;
+  const rect = modal.getBoundingClientRect();
+  const margin = 8;
+  const left = Math.max(margin, Math.min(rect.left, window.innerWidth - margin - rect.width));
+  const top = Math.max(margin, Math.min(rect.top, window.innerHeight - margin - rect.height));
+  modal.style.left = left + 'px';
+  modal.style.top = top + 'px';
+  modal.style.right = 'auto';
+  modal.style.bottom = 'auto';
+}}
+
+function startPointCompareDrag(e) {{
+  const modal = document.getElementById('pointCompareModal');
+  if (!modal || e.button !== 0) return;
+  if (e.target.closest('button, select')) return;
+  e.preventDefault();
+  const rect = modal.getBoundingClientRect();
+  pointCompareDrag = {{
+    startX: e.clientX,
+    startY: e.clientY,
+    left: rect.left,
+    top: rect.top,
+  }};
+  document.addEventListener('mousemove', movePointCompareDrag);
+  document.addEventListener('mouseup', endPointCompareDrag);
+}}
+
+function movePointCompareDrag(e) {{
+  if (!pointCompareDrag) return;
+  const modal = document.getElementById('pointCompareModal');
+  if (!modal) return;
+  const margin = 8;
+  const w = modal.offsetWidth || 640;
+  const h = modal.offsetHeight || 380;
+  let left = pointCompareDrag.left + e.clientX - pointCompareDrag.startX;
+  let top = pointCompareDrag.top + e.clientY - pointCompareDrag.startY;
+  left = Math.max(margin, Math.min(left, window.innerWidth - margin - w));
+  top = Math.max(margin, Math.min(top, window.innerHeight - margin - h));
+  modal.style.left = left + 'px';
+  modal.style.top = top + 'px';
+  modal.style.right = 'auto';
+  modal.style.bottom = 'auto';
+}}
+
+function endPointCompareDrag() {{
+  pointCompareDrag = null;
+  document.removeEventListener('mousemove', movePointCompareDrag);
+  document.removeEventListener('mouseup', endPointCompareDrag);
+}}
+
+document.getElementById('pointCompareModalBar')?.addEventListener('mousedown', startPointCompareDrag);
+
+function startPointCompareResize(e) {{
+  const modal = document.getElementById('pointCompareModal');
+  if (!modal || e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const rect = modal.getBoundingClientRect();
+  pointCompareResize = {{
+    startX: e.clientX,
+    startY: e.clientY,
+    width: rect.width,
+    height: rect.height,
+  }};
+  document.addEventListener('mousemove', movePointCompareResize);
+  document.addEventListener('mouseup', endPointCompareResize);
+}}
+
+function movePointCompareResize(e) {{
+  if (!pointCompareResize) return;
+  const modal = document.getElementById('pointCompareModal');
+  if (!modal) return;
+  const dx = e.clientX - pointCompareResize.startX;
+  const dy = e.clientY - pointCompareResize.startY;
+  const desiredW = pointCompareResize.width + dx;
+  const desiredH = pointCompareResize.height + dy;
+  const useHeight = Math.abs(dy / Math.max(pointCompareResize.height, 1)) > Math.abs(dx / Math.max(pointCompareResize.width, 1));
+  const rawW = useHeight ? desiredH * POINT_COMPARE_MODAL_RATIO : desiredW;
+  const size = clampPointCompareModalSize(rawW);
+  modal.style.width = size.w + 'px';
+  modal.style.height = size.h + 'px';
+  applyPointCompareScale(modal, size);
+  modal.dataset.resized = '1';
+  modal.classList.add('is-resized');
+  keepPointCompareModalInViewport();
+}}
+
+function endPointCompareResize() {{
+  pointCompareResize = null;
+  document.removeEventListener('mousemove', movePointCompareResize);
+  document.removeEventListener('mouseup', endPointCompareResize);
+}}
+
+document.getElementById('pointCompareResizeHandle')?.addEventListener('mousedown', startPointCompareResize);
 
 function startTrajectoryResize(e) {{
   const modal = document.getElementById('trajectoryModal');
@@ -5157,8 +6883,7 @@ function trajectorySliderPoints(team) {{
   const teams = trajectoryTeams.length ? trajectoryTeams.slice() : (selectedTeam ? [selectedTeam] : []);
   const focusTeams = [...trajectoryFocusTeams].filter(t => teams.includes(t));
   const chartTeams = focusTeams.length ? focusTeams : teams;
-  const visible = {{}};
-  chartTeams.forEach(t => {{ visible[t] = trajectorySeries(t, metric, dir); }});
+  const visible = trajectorySeriesByTeam(chartTeams, metric, dir);
   const maxTeamOrder = Math.max(...Object.values(visible).flat().map(p => p.teamOrder || 0), 1);
   const padX = 64, w = 920;
   const xFor = j => {{
@@ -5218,8 +6943,14 @@ function changeMetric(metric) {{
 function selectTeam(t) {{
   selectedTeam = t;
   if (t) addTrajectoryTeam(t, false);
+  renderSelectedTeamChips();
   syncDotRows();
   renderJogo(currentJogo);
+  if (activeTab === 'teams') renderTeamsGrid();
+  if (activeTab === 'players') {{
+    playerPage = 1;
+    renderPlayersGrid();
+  }}
 }}
 
 function setTrajectoryMetric(metric) {{
@@ -5255,6 +6986,7 @@ function addTrajectoryTeam(team, rerender = true) {{
     trajectoryTeams.push(team);
   }}
   selectedTeam = team;
+  renderSelectedTeamChips();
   if (rerender) {{
     syncDotRows();
     renderBothViews();
@@ -5265,6 +6997,7 @@ function removeTrajectoryTeam(team) {{
   trajectoryTeams = trajectoryTeams.filter(t => t !== team);
   trajectoryFocusTeams.delete(team);
   if (selectedTeam === team) selectedTeam = trajectoryTeams[trajectoryTeams.length - 1] || '';
+  renderSelectedTeamChips();
   syncDotRows();
   renderBothViews();
 }}
@@ -5274,28 +7007,41 @@ function toggleTrajectoryTeam(team) {{
   else addTrajectoryTeam(team);
 }}
 
+function activeTeamFilters() {{
+  if (trajectoryTeams.length) return trajectoryTeams.slice();
+  return selectedTeam && TEAMS_DETAIL[selectedTeam] ? [selectedTeam] : [];
+}}
+
+function renderSelectedTeamChips() {{
+  const el = document.getElementById('selectedTeamChips');
+  if (!el) return;
+  const escJs = s => (s || '').replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'");
+  el.innerHTML = activeTeamFilters().map(team => {{
+    const flag = TEAM_FLAGS[team] || (TEAMS_DETAIL[team] || {{}}).flag || '🏳️';
+    return `<span class="search-team-chip" title="${{_esc(team)}}"><span>${{flag}} ${{_esc(team)}}</span><button type="button" onclick="removeSearchTeam('${{escJs(team)}}')" title="Remover">×</button></span>`;
+  }}).join('');
+}}
+
+function removeSearchTeam(team) {{
+  removeTrajectoryTeam(team);
+  renderTeamSuggestions();
+}}
+
 // Re-renderiza a view ativa (grades são time-aware e dependem dos mesmos
 // controles compartilhados de busca, métrica, direção e filtros).
 function renderBothViews() {{
+  renderSelectedTeamChips();
   renderJogo(currentJogo);
   if (activeTab === 'teams') renderTeamsGrid();
   if (activeTab === 'players') renderPlayersGrid();
 }}
 
-// Busca/foco compartilhado: na grade filtra por nome; na corrida, se o texto
-// casar EXATAMENTE com um time, destaca a barra dele.
+// Busca compartilhada: o texto filtra sugestões; a escolha vira chip multi-seleção.
 function onFocusInput() {{
-  const raw = document.getElementById('teamSearch').value.trim();
-  const exact = TEAMS_GRID.find(t => _norm(t) === _norm(raw));
-  selectedTeam = exact || '';
   teamPage = 1;
+  playerPage = 1;
   renderTeamSuggestions();
-  syncDotRows();
   renderBothViews();
-  if (activeTab === 'players') {{
-    playerPage = 1;
-    renderPlayersGrid();
-  }}
 }}
 
 function _teamSuggestLabel(team) {{
@@ -5329,10 +7075,11 @@ function renderTeamSuggestions() {{
   box.innerHTML = scored.map((team, i) => {{
     const flag = TEAM_FLAGS[team] || (TEAMS_DETAIL[team] || {{}}).flag || '🏳️';
     const meta = _teamSuggestLabel(team);
-    return `<button type="button" class="team-suggest-item${{i === teamSuggestIndex ? ' active' : ''}}" onmousedown="event.preventDefault();chooseTeamSuggestion('${{escJs(team)}}')">
+    const isSelected = activeTeamFilters().includes(team);
+    return `<button type="button" class="team-suggest-item${{i === teamSuggestIndex ? ' active' : ''}}${{isSelected ? ' selected' : ''}}" onmousedown="event.preventDefault();chooseTeamSuggestion('${{escJs(team)}}')">
       <span class="team-suggest-flag">${{flag}}</span>
       <span class="team-suggest-name">${{_esc(team)}}</span>
-      <span class="team-suggest-meta">${{_esc(meta)}}</span>
+      <span class="team-suggest-meta">${{isSelected ? 'selecionado' : _esc(meta)}}</span>
     </button>`;
   }}).join('');
   box.classList.add('open');
@@ -5346,10 +7093,16 @@ function hideTeamSuggestions() {{
 
 function chooseTeamSuggestion(team) {{
   const input = document.getElementById('teamSearch');
-  if (input) input.value = team;
-  addTrajectoryTeam(team, false);
+  if (trajectoryTeams.includes(team)) removeTrajectoryTeam(team);
+  else addTrajectoryTeam(team, false);
+  if (input) {{
+    input.value = '';
+    input.focus();
+  }}
   teamPage = 1;
-  hideTeamSuggestions();
+  playerPage = 1;
+  renderSelectedTeamChips();
+  renderTeamSuggestions();
   syncDotRows();
   renderBothViews();
 }}
@@ -5465,7 +7218,8 @@ function buildCardBody(team) {{
       const isActive   = key === currentMetric;
       const isRelated  = !isActive && related.has(key);
       const isIndirect = !isActive && !isRelated && indirect.has(key);
-      const cls = isActive ? ' active' : isRelated ? ' related' : isIndirect ? ' related-indirect' : '';
+      const cls = (isActive ? ' active' : isRelated ? ' related' : isIndirect ? ' related-indirect' : '')
+                + (SCORE_INPUT_METRICS.has(key) ? ' score-input' : '');
       const isNeg = val !== null && val !== undefined && val < 0;
       // badge segue a MESMA direção da barra (sortDir): inverte junto com o botão
       const mr = metricRank(key, allTeams, team, sortDir);
@@ -5486,10 +7240,11 @@ function buildCardBody(team) {{
   }});
   const hasRelated  = related.size > 0;
   const hasIndirect = indirect.size > 0;
-  const legendHtml  = (hasRelated || hasIndirect) ? `<div class="tt-legend">
+  const legendHtml  = `<div class="tt-legend">
+    <span class="tt-legend-item"><span style="color:#4a86d8;font-size:0.62rem">▪</span> alimenta o score</span>
     ${{hasRelated  ? '<span class="tt-legend-item"><span class="tt-legend-dot" style="background:#4ade80"></span>entra no cálculo</span>' : ''}}
     ${{hasIndirect ? '<span class="tt-legend-item"><span class="tt-legend-dot" style="background:#f0c040"></span>correlação indireta</span>' : ''}}
-  </div>` : '';
+  </div>`;
   // o cabeçalho (bandeira/nome/ranking) vai na barra de arrastar, não aqui
   return `<div class="tt-grid">${{colsHtml}}</div>${{legendHtml}}`;
 }}
@@ -5687,9 +7442,16 @@ document.addEventListener('keydown', e => {{
   if (e.key === 'Escape' && document.getElementById('trajectoryModal').style.display !== 'none') {{
     closeTrajectoryModal(); return;
   }}
+  if (e.key === 'Escape' && document.getElementById('pointCompareModal').style.display !== 'none') {{
+    closePointCompareModal(); return;
+  }}
+  if (e.key === 'Escape' && document.getElementById('weightsGuide').style.display !== 'none') {{
+    closeWeightsGuide(); return;
+  }}
   // controles da race só valem na aba race, com modal fechado e fora de inputs
   if (activeTab !== 'race') return;
   if (document.getElementById('teamModal').style.display !== 'none') return;
+  if (document.getElementById('weightsGuide').style.display !== 'none') return;
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (e.key === ' ') {{ e.preventDefault(); togglePlay(); }}
   if (e.key === 'ArrowRight') {{
@@ -5719,7 +7481,7 @@ function switchTab(tab) {{
   // filtro de Posição só na aba Jogadores; placeholder da busca muda por contexto
   document.getElementById('fieldPos').style.display = tab === 'players' ? '' : 'none';
   document.getElementById('teamSearch').placeholder =
-    tab === 'players' ? 'Buscar/destacar jogador…' : 'Buscar/destacar seleção…';
+    tab === 'players' ? 'Buscar jogador ou adicionar seleção…' : 'Buscar/adicionar seleção…';
   // a métrica disponível muda entre seleções e jogadores
   syncMetricOptions(tab);
   if (tab === 'teams') {{
@@ -5886,6 +7648,7 @@ function resetAllFilters() {{
   document.getElementById('filterConfed').value = '';
   document.getElementById('filterStage').value = '';
   document.getElementById('filterPlayed').checked = false;
+  const adv = document.getElementById('filterAdvanced'); if (adv) adv.checked = false;
   teamFilters.group = ''; teamFilters.confed = ''; teamFilters.stage = '';
   const pos = document.getElementById('filterPos'); if (pos) pos.value = '';
   playerFilters.pos = '';
@@ -5913,12 +7676,14 @@ function renderTeamsPager(totalPages) {{
 function renderTeamsGrid() {{
   const grid = document.getElementById('teamsGrid');
   const q = _norm(document.getElementById('teamSearch').value.trim());
+  const teamFocuses = activeTeamFilters();
   // ordenação/destaque pela MÉTRICA COMPARTILHADA (a mesma da corrida).
   const sortKey = currentMetric;
   const fGroup = document.getElementById('filterGroup').value;
   const fConfed = document.getElementById('filterConfed').value;
   const fStage = document.getElementById('filterStage').value;
   const fPlayed = document.getElementById('filterPlayed').checked;
+  const fAdvanced = document.getElementById('filterAdvanced').checked;
   const dir = sortDir;  // direção COMPARTILHADA com a corrida
 
   // — DETALHE NO MOMENTO selecionado: a grade reflete o jogo da barra de tempo.
@@ -5932,9 +7697,11 @@ function renderTeamsGrid() {{
   // Grupo/Confed/Fase vêm do estado GLOBAL (compartilhado com a Race).
   let teams = TEAMS_GRID.filter(t => {{
     const d = detAt[t];
+    if (teamFocuses.length && !teamFocuses.includes(t)) return false;
     if (q && !_norm(t).includes(q)) return false;
     if (!passesGlobalFilters(t)) return false;
     if (fPlayed && (d.n_jogos || 0) === 0) return false;
+    if (fAdvanced && !(snap[t] && snap[t].advanced_coverage > 0)) return false;
     return true;
   }});
 
@@ -6075,6 +7842,7 @@ function renderPlayersGrid() {{
   const host = document.getElementById('playersGrid');
   if (!host) return;
   const q = _norm(document.getElementById('teamSearch').value.trim());
+  const teamFocuses = activeTeamFilters();
   const dir = sortDir;
   const metric = PLAYER_METRIC_LABELS[currentMetric] ? currentMetric : 'score_geral';
   const snap = PSNAP_BY_SLUG[currentJogo] || {{}};
@@ -6084,6 +7852,7 @@ function renderPlayersGrid() {{
   let players = PLAYER_SLUGS.filter(slug => {{
     const r = snap[slug];
     const meta = PLAYER_META[slug] || {{}};
+    if (teamFocuses.length && !teamFocuses.includes(meta.team)) return false;
     if (q && !_norm(meta.name).includes(q) && !_norm(meta.team).includes(q)) return false;
     if (!playerPasses(slug, r)) return false;
     if (document.getElementById('filterPlayed').checked && (!r || !(r.jogos > 0))) return false;
@@ -6100,8 +7869,9 @@ function renderPlayersGrid() {{
     return dir === 'asc' ? va - vb : vb - va;
   }});
 
-  document.getElementById('teamsCount').textContent =
-    players.length + ' de ' + PLAYER_SLUGS.length + ' jogadores';
+  document.getElementById('teamsCount').textContent = teamFocuses.length
+    ? players.length + ' jogadores · ' + (teamFocuses.length === 1 ? teamFocuses[0] : teamFocuses.length + ' seleções')
+    : players.length + ' de ' + PLAYER_SLUGS.length + ' jogadores';
 
   // ranking da métrica DENTRO do conjunto filtrado (Xº de N)
   const ranked = players.map(s => ({{ s, v: pv(s) }})).filter(x => x.v != null)
@@ -6159,7 +7929,7 @@ function renderPlayersGrid() {{
     let tds = `<td class="pt-rank">${{rk}}</td>` +
       `<td class="pt-shirt">${{meta.shirt != null ? meta.shirt : ''}}</td>` +
       `<td class="pt-name">${{flag}} ${{meta.name}}</td>` +
-      `<td class="pt-dim">${{meta.team}}</td>` +
+      `<td><span class="pt-team-link${{teamFocuses.includes(meta.team) ? ' pt-team-active' : ''}}" onclick="event.stopPropagation(); selectTeamFromPlayerRow('${{meta.team.replace(/'/g, "\\'")}}')">${{meta.team}}</span></td>` +
       `<td class="pt-dim">${{(PERFIL_LABEL[perfil]||perfil||'').slice(0,3)}}</td>`;
     if (metricCol) {{
       const mv = r ? r[metricCol] : null;
@@ -6203,6 +7973,11 @@ function renderPlayersPager(totalPages) {{
     btns += `<button class="pager-btn${{p === playerPage ? ' active' : ''}}" onclick="goPlayerPage(${{p}})">${{p}}</button>`;
   btns += `<button class="pager-btn" onclick="goPlayerPage(${{playerPage + 1}})" ${{playerPage === totalPages ? 'disabled' : ''}}>›</button>`;
   pager.innerHTML = btns + `<span class="pager-info">página ${{playerPage}} de ${{totalPages}}</span>`;
+}}
+
+function selectTeamFromPlayerRow(team) {{
+  if (!TEAMS_DETAIL[team]) return;
+  selectTeam(team);
 }}
 
 // histórico do jogador: progressão score/jogos por snapshot (do PLAYER_DATA)
@@ -6323,6 +8098,17 @@ let expandedGame = null;  // índice do jogo expandido na aba Jogos (accordion)
 function openTeamModal(team) {{
   const d = teamDetailAt(team, currentJogo);
   if (!d) return;
+  if (selectedTeam !== team) {{
+    selectedTeam = team;
+    addTrajectoryTeam(team, false);
+    syncDotRows();
+    renderJogo(currentJogo);
+    if (activeTab === 'teams') renderTeamsGrid();
+    if (activeTab === 'players') {{
+      playerPage = 1;
+      renderPlayersGrid();
+    }}
+  }}
   modalTeam = team;
   modalTab = 'scores';
   expandedGame = null;
@@ -6549,19 +8335,120 @@ function focusPlayer(name) {{
 }}
 
 // monta o card flutuante com as stats do jogador na partida.
-// Mantém só métricas básicas/comparáveis; criação avançada (passes-chave/xA)
-// depende de cobertura parcial da 365Scores e fica fora deste popover.
-const _STAT_GROUPS = [
-  ['Ataque', [
-    ['goals', 'Gols'], ['assists', 'Assistências'],
-    ['shots', 'Finalizações'], ['on_target', 'No alvo'],
-  ]],
-  ['Posse & defesa', [
-    ['pass_acc', 'Acerto de passe', v => v + '%'], ['saves', 'Defesas'],
-    ['fouls_committed', 'Faltas'], ['fouls_drawn', 'Faltas sofridas'],
-    ['offsides', 'Impedimentos'],
-  ]],
-];
+// Cada perfil mostra um pacote próprio, para comparação limpa entre jogadores da mesma função.
+const _fmt2 = v => Number(v || 0).toFixed(2);
+const _fmtPct = v => v == null ? '—' : v + '%';
+const _PC_LABEL_HELP = {{
+  'Faltas comet.': 'Faltas cometidas',
+  'Amarelos': 'Cartões amarelos',
+  'Vermelhos': 'Cartões vermelhos',
+  'xGP': 'xGP (gols evitados): gols evitados acima do esperado pelo goleiro/defesa',
+  'Pênaltis def.': 'Pênaltis defendidos',
+  'Bolas altas': 'Bolas altas seguradas',
+  'Socos': 'Bolas socadas pelo goleiro',
+  'Cortes def.': 'Cortes defensivos',
+  'Chutes bloq.': 'Chutes bloqueados',
+  'Bolas recup.': 'Bolas recuperadas',
+  'xA': 'xA (assistências esperadas)',
+  'Passes p/ chute': 'Passes para chute',
+  'Gr. chances criadas': 'Grandes chances criadas',
+  'xG': 'xG (gols esperados)',
+  'xGOT': 'xGOT (qualidade do chute no alvo)',
+  'Gr. chances em gol': 'Grandes chances em gol',
+  'Gr. chances perdidas': 'Grandes chances perdidas',
+}};
+function _pcTitleAttr(lbl, help) {{
+  const title = help || _PC_LABEL_HELP[lbl] || '';
+  return title ? ` title="${{_esc(title)}}"` : '';
+}}
+const _DISCIPLINE_GAME_GROUP = ['Disciplina', [
+  ['fouls_committed', 'Faltas comet.', null, true],
+  ['fouls_drawn', 'Faltas sofridas', null, true],
+  ['yellow', 'Amarelos', null, true],
+  ['red', 'Vermelhos', null, true],
+]];
+function _playerRoleFromPos(pos) {{
+  const p = String(pos || '').toUpperCase();
+  if (p === 'G' || p === 'GK' || p.includes('GOAL') || p.includes('GOLEIRO')) return 'goleiro';
+  if (p.includes('CF') || p.includes('FW') || p.includes('FORWARD') || p.includes('WINGER') || p.includes('ATACANTE') || p.includes('CENTROAVANTE') || p.includes('PONTA') || /^F/.test(p) || /^ST/.test(p) || p === 'LF' || p === 'RF' || p === 'LW' || p === 'RW' || p === 'RCF' || p === 'SS') return 'atacante';
+  if (p.includes('DM') || p.includes('CM') || p.includes('AM') || p.includes('MID') || p.includes('MEIA') || p.includes('VOLANTE') || p === 'M' || p === 'MF' || p === 'LM' || p === 'RM') return 'meio';
+  return 'defensor';
+}}
+const _STAT_GROUPS_BY_ROLE = {{
+  goleiro: [
+    ['Goleiro', [
+      ['saves', 'Defesas feitas', null, true],
+      ['goals_conceded', 'Gols sofridos', null, true],
+    ]],
+    ['Ações do goleiro', [
+      ['xgp', 'xGP', _fmt2, true],
+      ['penalties_saved', 'Pênaltis def.', null, true],
+      ['high_claims', 'Bolas altas', null, true],
+      ['punches', 'Socos', null, true],
+    ]],
+    ['Distribuição', [
+      ['pass_acc', 'Acerto de passe', _fmtPct, true],
+    ]],
+  ],
+  defensor: [
+    ['Defesa', [
+      ['tackles_won', 'Desarmes', null, true],
+      ['interceptions', 'Interceptações', null, true],
+      ['clearances', 'Cortes def.', null, true],
+      ['shots_blocked', 'Chutes bloq.', null, true],
+    ]],
+    ['Cobertura', [
+      ['ball_recovery', 'Bolas recup.', null, true],
+      ['duels_won', 'Duelos ganhos', null, true],
+    ]],
+    ['Apoio', [
+      ['assists', 'Assistências', null, true],
+      ['xa', 'xA', _fmt2, true],
+      ['key_passes', 'Passes p/ chute', null, true],
+      ['goals', 'Gols', null, true],
+    ]],
+  ],
+  meio: [
+    ['Criação', [
+      ['assists', 'Assistências', null, true],
+      ['xa', 'xA', _fmt2, true],
+      ['key_passes', 'Passes p/ chute', null, true],
+      ['big_chances_created', 'Gr. chances criadas', null, true],
+    ]],
+    ['Controle', [
+      ['pass_acc', 'Acerto de passe', _fmtPct],
+      ['dribbles_won', 'Dribles ganhos', null, true],
+      ['ball_recovery', 'Bolas recup.', null, true],
+      ['tackles_won', 'Desarmes', null, true],
+    ]],
+    ['Finalização', [
+      ['goals', 'Gols', null, true],
+      ['xg', 'xG', _fmt2, true],
+      ['shots', 'Finalizações', null, true],
+      ['on_target', 'Chutes no alvo', null, true],
+    ]],
+  ],
+  atacante: [
+    ['Finalização', [
+      ['goals', 'Gols', null, true],
+      ['shots', 'Finalizações', null, true],
+      ['on_target', 'Chutes no alvo', null, true],
+      ['xg', 'xG', _fmt2, true],
+    ]],
+    ['Chances', [
+      ['xgot', 'xGOT', _fmt2, true],
+      ['big_chances_scored', 'Gr. chances em gol', null, true],
+      ['big_chances_missed', 'Gr. chances perdidas', null, true],
+      ['offsides', 'Impedimentos', null, true],
+    ]],
+    ['Criação', [
+      ['assists', 'Assistências', null, true],
+      ['xa', 'xA', _fmt2, true],
+      ['key_passes', 'Passes p/ chute', null, true],
+      ['dribbles_won', 'Dribles ganhos', null, true],
+    ]],
+  ],
+}};
 function _playerCardHtml(p, vside, hside) {{
   const st = p.stats || {{}};
   // tags de contexto (gol/cartão/entrada-saída)
@@ -6572,10 +8459,14 @@ function _playerCardHtml(p, vside, hside) {{
   if (p.exited) ctx.push(`<span class="pc-tag out">↓ Saiu ${{p.exited}}'</span>`);
   if (p.entered) ctx.push(`<span class="pc-tag in">↑ Entrou ${{p.entered}}'</span>`);
 
-  // grupos de stats — só renderiza grupo que tiver ao menos um valor
-  const groups = _STAT_GROUPS.map(([title, rows]) => {{
-    const cells = rows.filter(([k]) => st[k] != null)
-      .map(([k, lbl, fmt]) => `<div class="pc-stat"><span class="pc-sl">${{lbl}}</span><span class="pc-sv">${{fmt ? fmt(st[k]) : st[k]}}</span></div>`)
+  const role = _playerRoleFromPos(p.pos_code || p.pos);
+  const groupDefs = [...(_STAT_GROUPS_BY_ROLE[role] || _STAT_GROUPS_BY_ROLE.defensor), _DISCIPLINE_GAME_GROUP];
+  const groups = groupDefs.map(([title, rows]) => {{
+    const cells = rows.filter(([k, , , always]) => always || st[k] != null)
+      .map(([k, lbl, fmt, , help]) => {{
+        const raw = st[k] != null ? st[k] : 0;
+        return `<div class="pc-stat"><span class="pc-sl"${{_pcTitleAttr(lbl, help)}}>${{lbl}}</span><span class="pc-sv">${{fmt ? fmt(raw) : raw}}</span></div>`;
+      }})
       .join('');
     return cells ? `<div class="pc-group"><div class="pc-gt">${{title}}</div><div class="pc-grid">${{cells}}</div></div>` : '';
   }}).join('');
@@ -6613,10 +8504,6 @@ function _rosterPlayerCardHtml(p) {{
     if (v == null || !Number.isFinite(Number(v))) return null;
     return digits ? Number(v).toFixed(digits) : String(Math.round(Number(v)));
   }};
-  const metric = (key, digits = 0) => {{
-    const v = n(key);
-    return Math.abs(v) > 0 ? fmt(v, digits) : null;
-  }};
   const ctx = [];
   if (n('gols')) ctx.push(`<span class="pc-tag goal">⚽ ${{n('gols')}} gol${{n('gols') > 1 ? 's' : ''}}</span>`);
   if (n('gols_contra')) ctx.push(`<span class="pc-tag vermelho">🥅 ${{n('gols_contra')}} gol${{n('gols_contra') > 1 ? 's' : ''}} contra</span>`);
@@ -6625,8 +8512,8 @@ function _rosterPlayerCardHtml(p) {{
 
   const group = (title, rows) => {{
     const cells = rows
-      .filter(([, v]) => v != null)
-      .map(([lbl, v]) => `<div class="pc-stat"><span class="pc-sl">${{lbl}}</span><span class="pc-sv">${{v}}</span></div>`)
+      .filter(([, key, , always]) => always || p[key] != null)
+      .map(([lbl, key, digits = 0, , help]) => `<div class="pc-stat"><span class="pc-sl"${{_pcTitleAttr(lbl, help)}}>${{lbl}}</span><span class="pc-sv">${{fmt(n(key), digits)}}</span></div>`)
       .join('');
     return cells ? `<div class="pc-group"><div class="pc-gt">${{title}}</div><div class="pc-grid">${{cells}}</div></div>` : '';
   }};
@@ -6650,32 +8537,87 @@ function _rosterPlayerCardHtml(p) {{
     : '';
   const gamesCtx = `<span class="pc-tag neutral">${{gameCount}} jogo${{gameCount === 1 ? '' : 's'}}</span>`;
   const role = p.pos_group || 'Sem posição';
-  const advancedRows = (() => {{
-    if (role === 'Goleiros') return [
-      ['xGP', metric('xgp', 2)], ['Pênaltis def.', metric('penaltis_defendidos')],
-      ['Bolas altas', metric('bolas_altas')], ['Socos', metric('socos')],
-    ];
-    if (role === 'Defensores') return [
-      ['Desarmes', metric('desarmes')], ['Interceptações', metric('interceptacoes')],
-      ['Cortes', metric('cortes')], ['Recuperações', metric('recuperacoes')],
-      ['Duelos ganhos', metric('duelos')], ['Bloqueios', metric('bloqueios')],
-    ];
-    if (role === 'Meias') return [
-      ['xG', metric('xg', 2)], ['xA', metric('xa', 2)],
-      ['Passes-chave', metric('passes_chave')], ['Chances criadas', metric('gr_chances_criadas')],
-      ['Recuperações', metric('recuperacoes')], ['Dribles', metric('dribles')],
-    ];
-    if (role === 'Atacantes') return [
-      ['xG', metric('xg', 2)], ['xGOT', metric('xgot', 2)], ['xA', metric('xa', 2)],
-      ['Chances convert.', metric('gr_chances_convertidas')], ['Chances perdidas', metric('gr_chances_perdidas')],
-      ['Dribles', metric('dribles')],
-    ];
-    return [
-      ['xG', metric('xg', 2)], ['xA', metric('xa', 2)],
-      ['Passes-chave', metric('passes_chave')], ['Recuperações', metric('recuperacoes')],
-      ['Desarmes', metric('desarmes')], ['Defesas', metric('defesas')],
-    ];
-  }})();
+  const disciplineGroup = ['Disciplina', [
+    ['Faltas comet.', 'faltas', 0, true],
+    ['Faltas sofridas', 'faltas_sofridas', 0, true],
+    ['Amarelos', 'amarelos', 0, true],
+    ['Vermelhos', 'vermelhos', 0, true],
+  ]];
+  const roleGroups = {{
+    'Goleiros': [
+      ['Goleiro', [
+        ['Defesas feitas', 'defesas', 0, true],
+        ['Gols sofridos', 'gols_contra', 0, true],
+      ]],
+      ['Ações do goleiro', [
+        ['xGP', 'xgp', 2, true],
+        ['Pênaltis def.', 'penaltis_defendidos', 0, true],
+        ['Bolas altas', 'bolas_altas', 0, true],
+        ['Socos', 'socos', 0, true],
+      ]],
+    ],
+    'Defensores': [
+      ['Defesa', [
+        ['Desarmes', 'desarmes', 0, true],
+        ['Interceptações', 'interceptacoes', 0, true],
+        ['Cortes def.', 'cortes', 0, true],
+        ['Chutes bloq.', 'bloqueios', 0, true],
+      ]],
+      ['Cobertura', [
+        ['Bolas recup.', 'recuperacoes', 0, true],
+        ['Duelos ganhos', 'duelos', 0, true],
+      ]],
+      ['Apoio', [
+        ['Assistências', 'assist', 0, true],
+        ['xA', 'xa', 2, true],
+        ['Passes p/ chute', 'passes_chave', 0, true],
+        ['Gols', 'gols', 0, true],
+      ]],
+    ],
+    'Meias': [
+      ['Criação', [
+        ['Assistências', 'assist', 0, true],
+        ['xA', 'xa', 2, true],
+        ['Passes p/ chute', 'passes_chave', 0, true],
+        ['Gr. chances criadas', 'gr_chances_criadas', 0, true],
+      ]],
+      ['Controle', [
+        ['Dribles ganhos', 'dribles', 0, true],
+        ['Bolas recup.', 'recuperacoes', 0, true],
+        ['Desarmes', 'desarmes', 0, true],
+        ['Interceptações', 'interceptacoes', 0, true],
+      ]],
+      ['Finalização', [
+        ['Gols', 'gols', 0, true],
+        ['xG', 'xg', 2, true],
+        ['Finalizações', 'chutes', 0, true],
+        ['Chutes no alvo', 'no_alvo', 0, true],
+      ]],
+    ],
+    'Atacantes': [
+      ['Finalização', [
+        ['Gols', 'gols', 0, true],
+        ['Finalizações', 'chutes', 0, true],
+        ['Chutes no alvo', 'no_alvo', 0, true],
+        ['xG', 'xg', 2, true],
+      ]],
+      ['Chances', [
+        ['xGOT', 'xgot', 2, true],
+        ['Gr. chances em gol', 'gr_chances_convertidas', 0, true],
+        ['Gr. chances perdidas', 'gr_chances_perdidas', 0, true],
+        ['Impedimentos', 'impedimentos', 0, true],
+      ]],
+      ['Criação', [
+        ['Assistências', 'assist', 0, true],
+        ['xA', 'xa', 2, true],
+        ['Passes p/ chute', 'passes_chave', 0, true],
+        ['Dribles ganhos', 'dribles', 0, true],
+      ]],
+    ],
+  }};
+  const groupsHtml = [...(roleGroups[role] || roleGroups['Defensores']), disciplineGroup]
+    .map(([title, rows]) => group(title, rows))
+    .join('');
   return `<div class="pcard el-pop" style="--el-pop-left:${{anchor.left}}px;--el-pop-top:${{anchor.top}}px;--pc-x:${{off.x || 0}}px;--pc-y:${{off.y || 0}}px" onclick="event.stopPropagation()">
     <div class="pc-head" onpointerdown="startPlayerCardDrag(event, '${{keyEsc}}')">
       <span class="pc-num">${{p.num ?? ''}}</span>
@@ -6683,16 +8625,7 @@ function _rosterPlayerCardHtml(p) {{
       <button class="pc-close" onclick="event.stopPropagation();showRosterPlayer('${{closeName}}')">✕</button>
     </div>
     <div class="pc-meta">${{ratingHtml}}<div class="pc-meta-side"><div class="pc-ctx">${{gamesCtx}}${{ratingCtx}}</div>${{ctxHtml}}</div></div>
-    ${{group('Ataque', [
-      ['Gols', n('gols')], ['Assistências', n('assist')],
-      ['Finalizações', n('chutes')], ['No alvo', n('no_alvo')],
-    ])}}
-    ${{group('Posse & defesa', [
-      ['Defesas', n('defesas')], ['Amarelos', n('amarelos')],
-      ['Vermelhos', n('vermelhos')], ['Faltas', n('faltas')],
-      ['Faltas sofridas', n('faltas_sofridas')], ['Impedimentos', n('impedimentos')],
-    ])}}
-    ${{group('Avançadas', advancedRows)}}
+    ${{groupsHtml || '<div class="pc-empty">Sem estatísticas detalhadas.</div>'}}
   </div>`;
 }}
 
@@ -6869,13 +8802,17 @@ function renderLineupView(g) {{
     .filter(p => openPlayerCards.has(p.name))
     .map(p => _playerCardHtml(p, 'above', 'c'))
     .join('');
+  // cabeçalho na mesma orientação do campo: mandante à esquerda, visitante à direita.
+  // O time visto mantém a cor (lv1-home/vermelho); só troca de lado se jogou fora.
+  const seenHead = `<span class="lv1-home">${{homeFlag}} <b>${{modalTeam}}</b> ${{g.formation ? `<span class="pitch-form-inline">${{g.formation}}</span>` : ''}}</span>`;
+  const oppHead = `<span class="lv1-away">${{g.opp_formation ? `<span class="pitch-form-inline">${{g.opp_formation}}</span>` : ''}} <b>${{g.opp}}</b> ${{g.opp_flag}}</span>`;
+  const headHtml = g.home ? (seenHead + oppHead) : (oppHead + seenHead);
   return `<div class="lv1">
     <div class="lv1-center">
       <div class="lv1-head">
-        <span class="lv1-home">${{homeFlag}} <b>${{modalTeam}}</b> ${{g.formation ? `<span class="pitch-form-inline">${{g.formation}}</span>` : ''}}</span>
-        <span class="lv1-away">${{g.opp_formation ? `<span class="pitch-form-inline">${{g.opp_formation}}</span>` : ''}} <b>${{g.opp}}</b> ${{g.opp_flag}}</span>
+        ${{headHtml}}
       </div>
-      ${{renderPitch(g.pitch, g.opp_pitch, isHi, allPlayers)}}
+      ${{renderPitch(g.pitch, g.opp_pitch, isHi, allPlayers, g.home)}}
     </div>
     <div class="lv1-bottom">
       <div class="lv1-subs">
@@ -6895,7 +8832,7 @@ function renderLineupView(g) {{
 // UM campo HORIZONTAL com os dois times. Time visto na metade esquerda (gol à esq,
 // ataca p/ centro); adversário na metade direita, espelhado (gol à dir).
 // coords originais por jogador: x=lado (0..100), y=profundidade (8=gol..92=ataque).
-function renderPitch(homePitch, awayPitch, isHi, allPlayers = []) {{
+function renderPitch(homePitch, awayPitch, isHi, allPlayers = [], isHomeGame = true) {{
   const splitName = (full) => {{
     const parts = (full || '').trim().split(/\\s+/);
     if (parts.length <= 1) return parts[0] || '';
@@ -6908,14 +8845,16 @@ function renderPitch(homePitch, awayPitch, isHi, allPlayers = []) {{
   const playerByName = Object.fromEntries((allPlayers || []).filter(p => p && p.name).map(p => [p.name, p]));
 
   // horizontal: profundidade (y) → eixo X; lado (x) → eixo Y (top).
-  // home: metade esquerda (left 2..48%); away: metade direita espelhada (98..52%).
-  const dot = (p, who) => {{
+  // `who` é a COR (home=seleção vista/vermelho, away=adversário/azul); `side` é o
+  // LADO físico do campo ('left'/'right'), orientado pelo mando real do confronto:
+  // o mandante sempre ocupa a metade esquerda (gol à esq), o visitante a direita.
+  const dot = (p, who, side) => {{
     const partner = p.sub_with ? playerByName[p.sub_with] : null;
     const pairKey = partner ? _subPairKey(p.name, partner.name) : '';
     const activeName = partner ? (fieldSubOverrides[pairKey] || p.name) : p.name;
     const visible = partner && activeName === partner.name ? {{ ...partner, x: p.x, y: p.y, sub_slot_from: p.name }} : p;
     const half = (p.y / 100) * 46;
-    const left = who === 'home' ? (2 + half) : (98 - half);
+    const left = side === 'left' ? (2 + half) : (98 - half);
     const top = p.x;
     const visibleEsc = esc(visible.name);
     const aEsc = esc(p.name);
@@ -6933,8 +8872,12 @@ function renderPitch(homePitch, awayPitch, isHi, allPlayers = []) {{
       <div class="pitch-name">${{splitName(visible.name)}}</div>
     </div>`;
   }};
-  const dots = (homePitch || []).map(p => dot(p, 'home')).join('')
-    + (awayPitch || []).map(p => dot(p, 'away')).join('');
+  // homePitch é sempre a seleção VISTA (cor home/vermelho), awayPitch o adversário.
+  // Se a seleção vista jogou em casa, ela fica à esquerda; se jogou fora, à direita.
+  const seenSide = isHomeGame ? 'left' : 'right';
+  const oppSide = isHomeGame ? 'right' : 'left';
+  const dots = (homePitch || []).map(p => dot(p, 'home', seenSide)).join('')
+    + (awayPitch || []).map(p => dot(p, 'away', oppSide)).join('');
   // marcações horizontais: meio (vertical), círculo, áreas/gols nas laterais
   const lines = `<div class="pitch-lines">
     <div class="pl-line plh-half"></div>
