@@ -9,6 +9,7 @@ import pytest
 from fifa_analytics.analytics.scores import (
     _classify_style,
     _player_profile,
+    _run_elo_simulation,
     _sample_confidence,
     _style_affinities,
     _zscore_to_100,
@@ -910,3 +911,46 @@ def test_gk_saves_do_not_promote_defender_to_gk_pool():
     assert cb2["perfil"] == "defensor"
     # CB1 tem mais fouls_drawn e menos gols sofridos — deve liderar
     assert cb1["score_geral"] > cb2["score_geral"]
+
+
+# ---------------------------------------------------------------------------
+# Elo — invariantes do cálculo
+# ---------------------------------------------------------------------------
+
+def _elo_game(team_a, team_b, ga, gb, xga=1.0, xgb=1.0, sota=4, sotb=4, possa=50):
+    return pd.DataFrame([
+        {"match_id": "m1", "team": team_a, "date": "2026-01-01", "goals_for": ga,
+         "shots_on_target": sota, "possession": possa, "team_xg": xga, "xg_against": xgb},
+        {"match_id": "m1", "team": team_b, "date": "2026-01-01", "goals_for": gb,
+         "shots_on_target": sotb, "possession": 100 - possa, "team_xg": xgb, "xg_against": xga},
+    ])
+
+
+def test_elo_winner_never_loses_rating_even_as_strong_favorite():
+    """Favorito forte que vence equilibrado NÃO pode perder Elo (regra básica)."""
+    df = _elo_game("Favorito", "Zebra", 1, 0)
+    # favorito com +400 de rating: expected alto, vitória equilibrada
+    ratings, _ = _run_elo_simulation(df, initial_ratings={"Favorito": 1900, "Zebra": 1500})
+    assert ratings["Favorito"] >= 1900  # venceu → nunca perde
+    assert ratings["Zebra"] <= 1500     # perdeu → nunca ganha
+
+
+def test_elo_zero_sum():
+    """O Elo é zero-sum: o que A ganha, B perde (total conservado)."""
+    df = _elo_game("A", "B", 3, 1, xga=2.5, xgb=0.8)
+    ratings, _ = _run_elo_simulation(df)
+    assert ratings["A"] + ratings["B"] == pytest.approx(3000.0)
+
+
+def test_elo_blowout_earns_more_than_narrow_win():
+    """Goleada dominante (com xG alto) rende mais Elo que vitória mínima."""
+    blowout, _ = _run_elo_simulation(_elo_game("A", "B", 7, 1, xga=4.2, xgb=0.5))
+    narrow, _ = _run_elo_simulation(_elo_game("C", "D", 1, 0, xga=1.2, xgb=0.9))
+    assert (blowout["A"] - 1500) > (narrow["C"] - 1500)
+
+
+def test_elo_higher_xg_earns_more_for_same_score():
+    """Mesmo placar (2-0), quem criou MAIS (xG maior) ganha mais Elo — domínio real."""
+    dominant, _ = _run_elo_simulation(_elo_game("A", "B", 2, 0, xga=2.8, xgb=0.3))
+    lucky, _ = _run_elo_simulation(_elo_game("C", "D", 2, 0, xga=1.0, xgb=0.9))
+    assert (dominant["A"] - 1500) > (lucky["C"] - 1500)

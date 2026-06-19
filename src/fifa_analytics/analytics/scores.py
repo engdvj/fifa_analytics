@@ -69,11 +69,11 @@ ELO_INITIAL_RATING = 1500.0
 # porque o torneio tem só 3-7 jogos por time — cada resultado precisa pesar
 # mais para o rating se diferenciar dentro de uma amostra tão pequena.
 ELO_K_FACTOR = 40.0
-# Teto do multiplicador de margem de gols. ln(perf_diff+1)+1 cresce sem limite
-# e chega a ~4x numa goleada com domínio total — o teto evita que bater muito
-# num adversário fraco renda Elo desproporcional. 2.5 mantém o realce de
-# vitórias dominantes (≈ +150% sobre uma vitória mínima) sem explodir.
-ELO_MARGIN_CAP = 2.5
+# Teto do multiplicador de margem (1 + 0.6*sqrt(saldo_efetivo), onde saldo_efetivo
+# = média do saldo de gols e de xG). O sqrt já dá retornos decrescentes; o teto é
+# só uma rede contra outliers extremos (saldo+xG muito grandes). 3.0 ≈ goleada de
+# ~saldo 11 — acima disso não escala mais. Valores típicos: 2-0=1.78, 7-1=2.33.
+ELO_MARGIN_CAP = 3.0
 
 # Maior número médio de jogos por time para o qual vale a pena pré-calcular
 # o teto teórico de variância do Elo — a fase de grupos tem 3 jogos por
@@ -534,13 +534,34 @@ def _run_elo_simulation(
         performance_diff = abs(perf_a - perf_b)
         expected_a = 1.0 / (1.0 + 10 ** ((rating_b - rating_a) / 400.0))
 
-        # Multiplicador de margem (goleada conta mais), com TETO. Sem teto,
-        # ln(perf_diff+1) chega a ~4x numa goleada com domínio total (ex.:
-        # Alemanha 7×1, perf_diff ~24), inflando o Elo de forma desproporcional —
-        # bater muito num fraco não deve render quase o quádruplo de uma vitória
-        # simples. O teto em ELO_MARGIN_CAP limita esse ganho: a margem ainda
-        # importa (vitória dominante > sofrida), mas satura num ponto razoável.
-        margin_multiplier = min(np.log(performance_diff + 1) + 1, ELO_MARGIN_CAP)
+        # Piso/teto de monotonicidade: o sistema de bandas faz a vitória valer no
+        # máximo [2/3, 1]. Um favorito forte (expected_a > 2/3) que vence de forma
+        # equilibrada teria score_a < expected_a → delta NEGATIVO (venceria e
+        # PERDERIA Elo), o que viola a regra básica do Elo. Quem venceu nunca pode
+        # perder rating (e não escolhe enfrentar um fraco); quem perdeu nunca pode
+        # ganhar. Garante isso sem mexer nas bandas: na vitória, score_a ≥ expected_a;
+        # na derrota, score_a ≤ expected_a.
+        if goals_a > goals_b:
+            score_a = max(score_a, expected_a)
+        elif goals_a < goals_b:
+            score_a = min(score_a, expected_a)
+
+        # Multiplicador de margem: quão DOMINANTE foi a vitória. Antes vinha de um
+        # índice abstrato (gols×3+chutes+posse) numa curva log que saturava cedo —
+        # toda vitória batia no teto, então golear 7-1 rendia quase o mesmo que
+        # vencer 2-0 (México ≈ Alemanha). Agora vem do SALDO efetivo = média do
+        # saldo de gols (resultado) e do saldo de xG (merecimento — filtra
+        # sorte/azar de finalização): vencer 2-0 com xG 1.4 (México) domina menos
+        # que golear 7-1 com xG 4.2 (Alemanha). sqrt dá retornos decrescentes
+        # (rendimento marginal cai conforme a goleada cresce) sem precisar de teto
+        # rígido; o cap só evita explosão em outliers extremos.
+        saldo_gols = goals_a - goals_b
+        xg_a = float(a.get("team_xg", 0) or 0)
+        xg_b = float(b.get("team_xg", 0) or 0)
+        saldo_xg = xg_a - xg_b
+        # do lado do VENCEDOR (a margem é simétrica via |.|); só o lado positivo conta
+        saldo_efetivo = abs(0.5 * saldo_gols + 0.5 * saldo_xg)
+        margin_multiplier = min(1.0 + 0.6 * np.sqrt(saldo_efetivo), ELO_MARGIN_CAP)
         delta = ELO_K_FACTOR * margin_multiplier * (score_a - expected_a)
 
         ratings[team_a] = rating_a + delta
@@ -959,11 +980,17 @@ def build_team_scores(
 
     # score_forca_relativa: contextualiza o resultado pela qualidade do
     # adversário enfrentado — vencer a Alemanha vale mais que vencer Curaçao.
-    # Único componente que não é "por jogo" isolado: o Elo acumula o efeito
-    # de toda a sequência de jogos do time (quem jogou, em que ordem, com
-    # que margem), por isso o z-score aqui mede força relativa acumulada,
-    # não uma média simples como os outros componentes.
-    scores["score_forca_relativa"] = _zscore_to_100(scores["elo_rating"]).round(1)
+    # Usa a força POR JOGO (desvio do Elo em relação ao inicial, dividido pelos
+    # jogos), NÃO o Elo acumulado cru — senão jogar mais vezes inflava o ranking
+    # de força (ex.: México liderava o Elo só por ter jogado 2× enquanto Alemanha
+    # jogou 1×, apesar de a Alemanha ter +44 Elo/jogo contra +40 do México). A
+    # confiança da amostra (poucos jogos → puxa ao neutro) entra via _apply_
+    # confidence, igual aos componentes de processo: 1 jogo dominante vale, mas
+    # vale menos que 2-3 jogos consistentes.
+    _elo_dev_por_jogo = _safe_divide(scores["elo_rating"] - ELO_INITIAL_RATING, scores["jogos"])
+    scores["score_forca_relativa"] = _apply_confidence(
+        _zscore_to_100(_elo_dev_por_jogo), _amostra_conf
+    ).round(1)
 
     # score_disciplina: índice de violência — faltas e cartões por jogo.
     # Nota alta = time disciplinado. Vermelho vale mais que amarelo (impacto
