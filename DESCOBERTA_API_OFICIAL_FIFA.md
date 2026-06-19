@@ -98,6 +98,31 @@ Devolve só o **layout dos widgets** (lista um bloco `powerRanking` com properti
 
 ---
 
+## Caçadas futuras: outras competições (para depois)
+
+A descoberta da FIFA não foi entregue — foi **caçada** (bundle → chunks lazy → endpoints escondidos). A mesma técnica pode render em outras competições. A FIFA não é responsável por ligas/Champions (organização em camadas: **FIFA** = seleções/Mundial; **confederações** = UEFA/CONMEBOL; **ligas nacionais** = CBF/LaLiga/PL). Cada uma tem seu próprio provedor.
+
+**Sondagem inicial já feita (2026-06-19):**
+
+| Alvo | Status | Nota |
+|---|---|---|
+| **UEFA / Champions League** | 🟢 Prioritário | `https://comp.uefa.com/v2/competitions` responde 200 (aberto, 306 competições incl. Champions, Nations League, Ligue 1). Mesmo padrão de SPA da FIFA → **alta chance** de ter stats avançados num chunk lazy, tipo o fdh-api. Fonte oficial equivalente à FIFA pra Champions. **Caçar primeiro.** |
+| **La Liga / Premier / Bundesliga** | 🟡 Incerto, vale tentar | Cada uma tem site-SPA próprio. Ligas ricas costumam ter painéis Opta/AWS de stats avançados — caçar pode revelar endpoints abertos. |
+| **StatsBomb Open Data** | 🟡 Só histórico | `https://raw.githubusercontent.com/statsbomb/open-data/master/data/competitions.json` (grátis, GitHub). Event data nível pro, mas só temporadas históricas (Champions/La Liga até ~2019/20). Ótimo p/ treinar modelo, inútil ao vivo. |
+| **football-data.org** | 🟡 Básico c/ key | Free tier cobre 5 grandes ligas + Champions + **Brasileirão Série A**, mas só dados básicos (jogos/tabela/artilheiro), sem xG/tracking. Rate limit baixo. |
+| **Brasileirão (avançado, ao vivo)** | 🔴 Difícil | CBF sem API pública decente. Métricas avançadas são pagas (Sofascore/Opta). Caçar provavelmente só acha o básico. |
+
+**Ressalva honesta:** o que tornou a FIFA excepcional foi ter os dados **caros** (tracking físico, 16 fases) abertos e ao vivo — isso é incomum, meio sorte. Nas ligas, o básico costuma estar aberto; o avançado nem sempre. Mas não dá pra saber sem caçar — foi o que provou a FIFA.
+
+**Método de caça (o que funcionou, reaplicar):**
+1. Abrir o site-SPA, achar `main.<hash>.js` e o env com a base da API.
+2. Extrair o mapa `id→hash` dos chunks lazy (logo antes de `.chunk.js` no main).
+3. Baixar todos os chunks; `grep` por `statistics`/`ranking`/`stats`/`fetch`/baseURL.
+4. Reconstruir os endpoints (templates `${...}`) e testar com `User-Agent` de browser.
+5. Mapear o id interno (na FIFA foi o `IdIFES`, escondido em `Properties`) — outras fontes têm o equivalente.
+
+---
+
 ## Decisão-mãe do projeto (definida com o usuário, 2026-06-19)
 
 A alma do projeto é **narrativa + motor de score próprio JUNTOS**, sobre dados oficiais — acompanhar a evolução de cada time **e** traduzir isso em números organizados de um jeito personalizado. **Não** é "só consumir a FIFA" nem "construir tudo do zero competindo com a FIFA".
