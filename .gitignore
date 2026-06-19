@@ -20,6 +20,10 @@ outputs/*
 .env.*
 !.env.example
 
+# SQLite (dev/testes)
+*.db
+*.sqlite3
+
 reports/fragments/*
 reports/final/*
 reports/tournament/*

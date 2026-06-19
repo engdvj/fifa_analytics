@@ -127,6 +127,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fifa_analytics")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    fifa_coletar = subparsers.add_parser(
+        "fifa-coletar",
+        help="Coleta a fonte oficial FIFA (v3 + fdh) e grava o gold (parquet).",
+    )
+    fifa_coletar.add_argument(
+        "--todos",
+        action="store_true",
+        help="Tenta stats de todos os jogos com IdIFES, não só os finalizados.",
+    )
+
     sample = subparsers.add_parser("amostra", aliases=["sample"], help="Executa a pipeline local de amostra.")
     sample.add_argument(
         "--match-id",
@@ -272,7 +282,12 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    if args.command in {"amostra", "sample"}:
+    if args.command == "fifa-coletar":
+        from fifa_analytics.fifa import pipeline as fifa_pipeline
+
+        result = fifa_pipeline.run(only_finished=not args.todos)
+        _print_result(result)
+    elif args.command in {"amostra", "sample"}:
         result = run_sample_pipeline(match_id=args.match_id)
         _print_result(result)
     elif args.command in {"wikipedia", "wiki"}:
