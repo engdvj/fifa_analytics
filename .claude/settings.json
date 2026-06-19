@@ -12,7 +12,8 @@
       "Bash(ps -eo pid,args)",
       "Bash(git prune *)",
       "Bash(git gc *)",
-      "Bash(git fsck *)"
+      "Bash(git fsck *)",
+      "WebFetch(domain:www.fifa.com)"
     ],
     "deny": [
       "Bash(git push --force:*)",
