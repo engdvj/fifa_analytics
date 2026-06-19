@@ -282,6 +282,15 @@ def _normalize_stage(value: str | None) -> str | None:
         "semi": "semifinal",
         "third_place": "terceiro_lugar",
         "final": "final",
+        # códigos curtos que a API do worldcup26.ir usa de fato (games.json type):
+        # mapeados pro MESMO vocabulário longo da ESPN p/ o canônico ficar
+        # consistente entre fontes (senão wc2026='r32' conflita com ESPN=
+        # 'dezesseis_avos' no mesmo jogo quando o mata-mata for coletado).
+        "r32": "dezesseis_avos",
+        "r16": "oitavas_de_final",
+        "qf": "quartas_de_final",
+        "sf": "semifinal",
+        "third": "terceiro_lugar",
     }
     return mapping.get(str(value or "").lower(), value)
 

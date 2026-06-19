@@ -24,7 +24,13 @@ from fifa_analytics.utils.time import utc_now_iso
 
 
 SOURCE_PRIORITY = ["worldcup2026", "espn", "wikipedia"]
-EVENT_SOURCE_PRIORITY = ["espn", "365scores", "worldcup2026", "wikipedia"]
+# Eventos (timeline): worldcup2026 FORA de propósito. Ele é a fonte operacional
+# (placar/status/match_id), mas seus EVENTOS são ruidosos — erra minuto (Larin
+# 11' quando ESPN+365 dizem 78') e autor/tipo (Khoukhi gol vs Muheim gol-contra),
+# e em 0 jogos é a única fonte de evento (ESPN sempre cobre). Mantê-lo só
+# introduzia gols-fantasma que estouravam o placar (jogos 3 e 8). ESPN é a
+# primária; 365scores completa o que a ESPN não consolidou a tempo.
+EVENT_SOURCE_PRIORITY = ["espn", "365scores", "wikipedia"]
 _CANONICAL_DATASET_DEDUPE_KEYS: dict[tuple[str, str], list[str]] = {
     ("fact_team_match_stats", "team_stats"): ["match_id", "team"],
     ("lineups", "lineups"): ["match_id", "team", "player_name"],
@@ -1096,7 +1102,9 @@ def _source_ids_for_manifest(match_sources: pd.DataFrame) -> dict[str, str]:
 
 
 _KNOCKOUT_STAGE_LABELS = {
-    "r32": "r32", "r16": "r16", "qf": "qf", "sf": "sf", "third": "terceiro_lugar", "final": "final",
+    "dezesseis_avos": "dezesseis_avos", "oitavas_de_final": "oitavas_de_final",
+    "quartas_de_final": "quartas_de_final", "semifinal": "semifinal",
+    "terceiro_lugar": "terceiro_lugar", "final": "final",
 }
 
 

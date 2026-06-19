@@ -164,7 +164,7 @@ for n in jogos:
         "source_match_n": match_source_n,
         "home": home, "away": away, "score": score_str,
         "home_flag": home_flag, "away_flag": away_flag,
-        "pesos": {k: round(v * 100) for k, v in pesos.items()},
+        "pesos": {k: round(float(v) * 100, 1) for k, v in pesos.items()},
         "teams": teams,
     }
 
@@ -596,8 +596,9 @@ for _, _r in _grupos_fg.iterrows():
 # Stage/round legíveis reaproveitando os rótulos definidos mais abaixo seria
 # circular (ainda não existem aqui); usamos um mapa local enxuto.
 _STAGE_LABEL = {
-    "fase_de_grupos": "Fase de Grupos", "r32": "Oitavas", "r16": "Quartas",
-    "qf": "Semifinais", "sf": "Semifinais", "third": "Disputa 3º Lugar", "final": "Final",
+    "fase_de_grupos": "Fase de Grupos", "dezesseis_avos": "16-avos de Final",
+    "oitavas_de_final": "Oitavas de Final", "quartas_de_final": "Quartas de Final",
+    "semifinal": "Semifinais", "terceiro_lugar": "Disputa 3º Lugar", "final": "Final",
 }
 
 # Snapshot mais recente por time (último jogo processado) — para o resumo de scores
@@ -1287,25 +1288,25 @@ teams_detail_json = json.dumps(teams_detail, ensure_ascii=False)
 matches = matches_df
 
 STAGE_META = {
-    "fase_de_grupos": {"label": "Fase de Grupos", "color": "#3b82f6"},
-    "r32":            {"label": "Oitavas de Final", "color": "#8b5cf6"},
-    "r16":            {"label": "Quartas de Final", "color": "#f59e0b"},
-    "qf":             {"label": "Semifinais",       "color": "#ef4444"},
-    "sf":             {"label": "Semifinais",       "color": "#ef4444"},
-    "third":          {"label": "Disputa 3º Lugar", "color": "#6b7280"},
-    "final":          {"label": "Final",            "color": "#f5c542"},
+    "fase_de_grupos":   {"label": "Fase de Grupos",    "color": "#3b82f6"},
+    "dezesseis_avos":   {"label": "16-avos de Final",  "color": "#8b5cf6"},
+    "oitavas_de_final": {"label": "Oitavas de Final",  "color": "#a855f7"},
+    "quartas_de_final": {"label": "Quartas de Final",  "color": "#f59e0b"},
+    "semifinal":        {"label": "Semifinais",        "color": "#ef4444"},
+    "terceiro_lugar":   {"label": "Disputa 3º Lugar",  "color": "#6b7280"},
+    "final":            {"label": "Final",             "color": "#f5c542"},
 }
 
 ROUND_LABELS = {
     ("fase_de_grupos", 1): "Grupos · Rodada 1",
     ("fase_de_grupos", 2): "Grupos · Rodada 2",
     ("fase_de_grupos", 3): "Grupos · Rodada 3",
-    ("r32",  4): "Oitavas de Final",
-    ("r16",  5): "Quartas de Final",
-    ("qf",   6): "Semifinais",
-    ("sf",   7): "Semifinais",
-    ("third",8): "Disputa 3º Lugar",
-    ("final",9): "Final",
+    ("dezesseis_avos",   4): "16-avos de Final",
+    ("oitavas_de_final", 5): "Oitavas de Final",
+    ("quartas_de_final", 6): "Quartas de Final",
+    ("semifinal",        7): "Semifinais",
+    ("terceiro_lugar",   8): "Disputa 3º Lugar",
+    ("final",            9): "Final",
 }
 
 # match_id → número do snapshot real, se já processado. Usa o DATA gerado a
@@ -1351,6 +1352,17 @@ for _ord, (_, mrow) in enumerate(matches_sorted.iterrows()):
         "status": dot_status,
         "teams": _teams,
     })
+
+round_end_orders = {}
+phase_end_orders = {}
+for item in snapshot_meta:
+    if item.get("stage") == "fase_de_grupos":
+        round_end_orders[item["round"]] = item["order"]
+    else:
+        phase_end_orders[item["stage"]] = item["order"]
+for item in snapshot_meta:
+    item["round_end"] = item.get("stage") == "fase_de_grupos" and item["order"] == round_end_orders.get(item["round"])
+    item["phase_end"] = item.get("stage") != "fase_de_grupos" and item["order"] == phase_end_orders.get(item["stage"])
 
 snapshot_meta_json = json.dumps(snapshot_meta, ensure_ascii=False)
 snapshot_order_json = json.dumps([m["n"] for m in snapshot_meta if m["n"] is not None], ensure_ascii=False)
@@ -2139,6 +2151,7 @@ input[type=range] {{
   justify-content: center;    /* bolinhas centralizadas no container (largura = do texto) */
 }}
 .dot {{
+  position: relative;
   width: var(--dot); height: var(--dot);
   border-radius: 50%;
   transition: transform 0.2s, opacity 0.2s, box-shadow 0.2s;
@@ -2166,6 +2179,26 @@ input[type=range] {{
 .dot-first, .dot-last {{ opacity: 1; }}
 .dot-first {{ box-shadow: 0 0 7px 1px #35c46fcc; }}
 .dot-last  {{ box-shadow: 0 0 7px 1px #f5c542cc; }}
+.dot-round-end, .dot-phase-end {{
+  opacity: 1;
+  box-shadow: 0 0 0 1px #ffffff88, 0 0 9px 2px #f5c542aa;
+}}
+.dot-round-end::after, .dot-phase-end::after {{
+  content: "⚽";
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -52%);
+  font-size: calc(var(--dot) * 1.25); line-height: 1;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.85));
+  pointer-events: none;
+}}
+.dot-phase-end::after {{ content: "🏆"; }}
+.dot-round-end.dot-pending,
+.dot-phase-end.dot-pending {{
+  box-shadow: 0 0 0 1px #6b728088, 0 0 7px 1px #6b728055;
+}}
+.dot-round-end.dot-pending::after,
+.dot-phase-end.dot-pending::after {{
+  filter: grayscale(1) opacity(0.62) drop-shadow(0 1px 2px rgba(0,0,0,0.85));
+}}
 /* acontecendo agora: vermelho pulsante */
 .dot-live {{
   opacity: 1; cursor: default;
@@ -3389,8 +3422,11 @@ input[type=range] {{
 .selected-team-chips {{ display: flex; align-items: center; gap: 5px; flex-wrap: wrap; max-width: 320px; }}
 .selected-team-chips:empty {{ display: none; }}
 .search-team-chip {{
+  --chip-color: #58a6ff;
   display: inline-flex; align-items: center; gap: 5px; max-width: 150px;
-  border: 1px solid #1f6feb66; background: #10213a; color: #dbeafe;
+  border: 1px solid color-mix(in srgb, var(--chip-color) 70%, #30363d);
+  background: color-mix(in srgb, var(--chip-color) 18%, #10213a);
+  color: #dbeafe;
   border-radius: 6px; padding: 4px 6px; font-size: 0.7rem; font-weight: 800;
 }}
 .search-team-chip span {{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
@@ -3424,6 +3460,35 @@ input[type=range] {{
   color: #e6edf3; padding: 5px 8px; font-size: 0.78rem;
 }}
 .tb-field select:focus {{ outline: none; border-color: #1f6feb; }}
+.tb-field.has-suggestion select {{
+  border-color: #58a6ff88;
+  box-shadow: 0 0 0 1px #1f6feb22 inset, 0 0 0 2px #1f6feb14;
+  background-image: var(--suggest-gradient);
+  background-repeat: no-repeat;
+  background-position: left bottom;
+  background-size: 100% 3px;
+}}
+.tb-field option[data-suggested="1"] {{
+  color: #79c0ff;
+  font-weight: 800;
+}}
+.filter-hints {{
+  display: inline-flex; align-items: center; gap: 4px; max-width: 190px;
+  overflow: hidden; white-space: nowrap;
+}}
+.filter-hints:empty {{ display: none; }}
+.filter-hint {{
+  --hint-color: #58a6ff;
+  display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 76px;
+  color: #dbeafe; background: color-mix(in srgb, var(--hint-color) 18%, #0d1117);
+  border: 1px solid color-mix(in srgb, var(--hint-color) 72%, #30363d);
+  border-radius: 999px; padding: 2px 6px; font-size: 0.62rem; font-weight: 900;
+}}
+.filter-hint-dot {{
+  width: 7px; height: 7px; border-radius: 999px; flex: 0 0 auto; background: var(--hint-color);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--hint-color) 25%, transparent);
+}}
+.filter-hint-text {{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
 .tb-dir {{ padding: 5px 9px; font-size: 0.85rem; }}
 .tb-check {{ display: flex; align-items: center; gap: 5px; font-size: 0.74rem; color: #8b949e; cursor: pointer; }}
 .tb-check input {{ accent-color: #1f6feb; cursor: pointer; }}
@@ -3434,14 +3499,28 @@ input[type=range] {{
   gap: 30px; align-content: start;
 }}
 .team-card {{
+  --focus-color: #58a6ff;
   background: #0d1117; border: 1px solid #21262d; border-radius: 16px;
   padding: 22px 24px; cursor: pointer;
   transition: border-color 0.15s, transform 0.1s, background 0.15s, box-shadow 0.15s;
 }}
 /* card do time em FOCO (busca/destacar compartilhado) */
 .team-card.tc-focus {{
-  border-color: #58a6ff; background: #11161f;
-  box-shadow: 0 0 0 1px #58a6ff66, 0 8px 26px rgba(31,111,235,0.18);
+  border-color: var(--focus-color);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--focus-color) 14%, transparent), transparent 52%),
+    #11161f;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--focus-color) 68%, transparent),
+    0 0 28px color-mix(in srgb, var(--focus-color) 26%, transparent),
+    0 12px 32px rgba(0,0,0,0.28);
+}}
+.team-card.tc-focus .tc-rank {{
+  color: var(--focus-color);
+  background: color-mix(in srgb, var(--focus-color) 18%, #0d1117);
+}}
+.team-card.tc-focus .tc-metric {{
+  border-top-color: color-mix(in srgb, var(--focus-color) 32%, #161b22);
 }}
 .team-card:hover {{
   border-color: #1f6feb; background: #11161f; transform: translateY(-2px);
@@ -3538,7 +3617,7 @@ input[type=range] {{
 .rs-hero {{
   position: relative;
   display: flex; align-items: center; gap: 18px;
-  padding: 18px 20px; border-radius: 12px; margin-bottom: 16px;
+  padding: 18px 84px 18px 20px; border-radius: 12px; margin-bottom: 16px;
   background: linear-gradient(135deg, #1f6feb1f, #0d1117 70%);
   border: 1px solid #1f6feb33;
 }}
@@ -3556,7 +3635,28 @@ input[type=range] {{
   border-radius: 10px; padding: 11px 14px; box-shadow: 0 10px 30px rgba(0,0,0,0.6);
 }}
 .rs-lamp:hover .rs-lamp-tip, .rs-lamp:focus .rs-lamp-tip {{ display: block; }}
-.rs-hero-flag {{ font-size: 3rem; line-height: 1; flex-shrink: 0; }}
+.rs-hero-shirt {{
+  position: relative; width: 72px; height: 58px; flex: 0 0 72px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: #e6edf3; font-size: 1.15rem; font-weight: 950; font-variant-numeric: tabular-nums;
+  isolation: isolate;
+}}
+.rs-hero-shirt::before {{
+  content: ""; position: absolute; inset: 2px 0 0; z-index: 0;
+  background: linear-gradient(180deg, var(--shirt-main, #2f81f7), var(--shirt-main, #2f81f7) 62%, var(--shirt-dark, #1158c7));
+  border: 1px solid var(--shirt-border, #58a6ff70);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10), 0 8px 20px rgba(0,0,0,0.28);
+  clip-path: polygon(18% 7%, 34% 0, 43% 10%, 57% 10%, 66% 0, 82% 7%, 100% 34%, 82% 49%, 75% 33%, 75% 100%, 25% 100%, 25% 33%, 18% 49%, 0 34%);
+}}
+.rs-hero-shirt::after {{
+  content: ""; position: absolute; top: 5px; left: 31px; width: 10px; height: 8px; z-index: 1;
+  border-radius: 0 0 999px 999px; border: 1px solid var(--shirt-border, rgba(13,17,23,0.75)); border-top: 0;
+  background: var(--shirt-border, #0d1117);
+}}
+.rs-hero-shirt .shirt-number {{
+  position: relative; z-index: 2; margin-top: 8px; color: var(--shirt-text, #e6edf3);
+  text-shadow: none;
+}}
 .rs-hero-info {{ min-width: 0; }}
 .rs-hero-top {{ display: flex; align-items: center; gap: 10px; }}
 .rs-hero-name {{ font-size: 1.4rem; font-weight: 900; color: #e6edf3; line-height: 1.1; }}
@@ -3566,6 +3666,16 @@ input[type=range] {{
 }}
 .rs-hero-nick {{ font-size: 0.92rem; color: #58a6ff; font-weight: 600; margin-top: 3px; }}
 .rs-hero-meta {{ font-size: 0.82rem; color: #8b949e; margin-top: 5px; }}
+.rs-team-flag-link {{
+  position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 48px; height: 38px; border-radius: 9px;
+  border: 1px solid #263241; background: #0d1117; text-decoration: none;
+  font-size: 1.75rem; line-height: 1; transition: border-color .12s, background .12s, transform .12s;
+}}
+.rs-team-flag-link:hover {{
+  border-color: #58a6ff; background: #1f6feb18; transform: translateY(-50%) scale(1.04);
+}}
 
 .rs-cols {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: stretch; }}
 @media (max-width: 620px) {{ .rs-cols {{ grid-template-columns: 1fr; }} }}
@@ -3584,6 +3694,63 @@ input[type=range] {{
 .rs-kv:last-of-type {{ border-bottom: none; }}
 .rs-k {{ font-size: 0.84rem; color: #8b949e; }}
 .rs-v {{ font-size: 1.15rem; font-weight: 800; color: #e6edf3; font-variant-numeric: tabular-nums; }}
+.pm-kpi-row {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: -4px 0 14px; }}
+.pm-kpi {{
+  min-width: 0; border: 1px solid #263241; border-radius: 10px; padding: 11px 12px;
+  background: #0d1117;
+}}
+.pm-kpi span {{
+  display: block; color: #8b949e; font-size: 0.68rem; font-weight: 800;
+  text-transform: uppercase; letter-spacing: 0.55px; margin-bottom: 6px;
+}}
+.pm-kpi b {{ display: block; color: #e6edf3; font-size: 1.16rem; font-weight: 900; line-height: 1; font-variant-numeric: tabular-nums; }}
+.pm-role-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: stretch; }}
+.pm-role-grid.two {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+.pm-role-card {{
+  min-width: 0; border: 1px solid #21262d; border-radius: 12px; padding: 14px;
+  background: #0d1117; display: flex; flex-direction: column;
+}}
+.pm-role-title {{
+  color: #58a6ff; font-size: 0.72rem; font-weight: 900; text-transform: uppercase;
+  letter-spacing: 0.7px; margin-bottom: 10px;
+}}
+.pm-metric-list {{ display: grid; grid-auto-rows: 1fr; gap: 8px; flex: 1; }}
+.pm-metric {{
+  min-width: 0; border: 1px solid #1c2532; border-radius: 8px; padding: 10px 11px;
+  background: #111821; display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "label value" "note note"; column-gap: 12px; row-gap: 7px;
+  align-items: center; min-height: 70px;
+}}
+.pm-metric.up {{ border-color: #23863655; background: linear-gradient(180deg, #12301f55, #111821 72%); }}
+.pm-metric.mid {{ border-color: #1f6feb44; }}
+.pm-metric.down {{ border-color: #d2992244; background: linear-gradient(180deg, #35271042, #111821 72%); }}
+.pm-metric-label {{ grid-area: label; color: #b8c4d2; font-size: 0.82rem; font-weight: 850; min-width: 0; overflow: visible; text-overflow: clip; white-space: normal; line-height: 1.18; }}
+.pm-metric-value {{ grid-area: value; color: #e6edf3; font-size: 1.08rem; font-weight: 950; font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }}
+.pm-metric-note {{ grid-area: note; min-width: 0; color: #8b949e; font-size: 0.72rem; line-height: 1.28; text-align: left; }}
+.pm-discipline-strip {{
+  margin-top: 12px; border: 1px solid #21262d; border-radius: 10px; padding: 12px;
+  background: #0d1117; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;
+}}
+.pm-discipline-item {{
+  min-width: 0; display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; align-items: center;
+  gap: 9px; border: 1px solid #1c2532; border-radius: 8px; padding: 9px 10px; background: #111821;
+}}
+.pm-discipline-item .pm-icon {{
+  width: 22px; height: 22px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center;
+  font-size: 0.78rem; font-weight: 950;
+}}
+.pm-discipline-item.card-yellow .pm-icon {{ background: #facc15; color: #111827; }}
+.pm-discipline-item.card-red .pm-icon {{ background: #ef4444; color: #fff; }}
+.pm-discipline-item.foul-made .pm-icon {{ background: #d2992226; color: #f0c040; }}
+.pm-discipline-item.foul-won .pm-icon {{ background: #23863626; color: #5ee787; }}
+.pm-discipline-item span {{ color: #8b949e; font-size: 0.78rem; white-space: normal; overflow: visible; line-height: 1.15; }}
+.pm-discipline-item b {{ color: #e6edf3; font-size: 1.02rem; font-weight: 900; font-variant-numeric: tabular-nums; }}
+@media (max-width: 760px) {{
+  .pm-kpi-row {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+  .pm-role-grid, .pm-role-grid.two {{ grid-template-columns: 1fr; }}
+  .pm-metric {{ grid-template-columns: minmax(0, 1fr) auto; }}
+  .pm-discipline-strip {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+}}
 .rs-highlight {{
   font-size: 0.82rem; color: #c9d1d9; margin-top: auto; line-height: 1.4;
   background: #11161f; border-radius: 8px; padding: 10px 12px;
@@ -3840,6 +4007,28 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
   background: #1f6feb22; border: 1px solid #1f6feb55; color: #79b8ff;
   font-size: 0.78rem; font-weight: 900; font-variant-numeric: tabular-nums;
 }}
+.kit-shirt {{
+  position: relative; width: 38px; height: 32px; flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--shirt-text, #e6edf3); font-size: 0.72rem; font-weight: 950;
+  font-variant-numeric: tabular-nums; isolation: isolate;
+}}
+.kit-shirt::before {{
+  content: ""; position: absolute; inset: 1px 0 0; z-index: 0;
+  background: linear-gradient(180deg, var(--shirt-main, #2f81f7), var(--shirt-main, #2f81f7) 62%, var(--shirt-dark, #1158c7));
+  border: 1px solid var(--shirt-border, #58a6ff70);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10), 0 5px 12px rgba(0,0,0,0.24);
+  clip-path: polygon(18% 7%, 34% 0, 43% 10%, 57% 10%, 66% 0, 82% 7%, 100% 34%, 82% 49%, 75% 33%, 75% 100%, 25% 100%, 25% 33%, 18% 49%, 0 34%);
+}}
+.kit-shirt::after {{
+  content: ""; position: absolute; top: 3px; left: 16px; width: 6px; height: 5px; z-index: 1;
+  border-radius: 0 0 999px 999px; border: 1px solid var(--shirt-border, rgba(13,17,23,0.75)); border-top: 0;
+  background: var(--shirt-border, #0d1117);
+}}
+.kit-shirt .shirt-number {{ position: relative; z-index: 2; margin-top: 6px; color: var(--shirt-text, #e6edf3); }}
+.el-shirt {{ width: 38px; height: 32px; }}
+.pc-shirt {{ width: 34px; height: 29px; font-size: 0.68rem; }}
+.pc-shirt::after {{ left: 14px; }}
 .el-player-id {{ min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }}
 .el-name {{
   color: #e6edf3; font-size: 0.84rem; font-weight: 800; min-width: 0;
@@ -3889,21 +4078,32 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 .el-unused-list {{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }}
 .el-unused-chip {{
   color: #8b949e; background: #161b22; border: 1px solid #222b38;
-  border-radius: 6px; padding: 4px 7px; font-size: 0.72rem; font-weight: 700;
+  border-radius: 6px; padding: 3px 7px 3px 5px; font-size: 0.72rem; font-weight: 700;
+  display: inline-flex; align-items: center; gap: 5px;
 }}
 .pcard.el-pop {{
   position: fixed; left: var(--el-pop-left, 16px); top: var(--el-pop-top, 16px);
   right: auto; transform: translate(var(--pc-x, 0px), var(--pc-y, 0px));
-  z-index: 10000; width: 380px; max-height: calc(100vh - 16px); overflow: auto;
+  z-index: 10000; width: 340px; max-height: calc(100vh - 16px); overflow: auto;
 }}
 .pcard.el-pop .pc-head {{ cursor: move; touch-action: none; }}
 .pcard.el-pop .pc-num {{ background: #1f6feb; }}
-.pcard.el-pop .pc-meta {{ grid-template-columns: 50px 1fr; min-height: 46px; padding: 9px 12px 0; }}
+.pcard.el-pop .pc-head {{ padding: 8px 10px; gap: 8px; }}
+.pcard.el-pop .pc-name {{ font-size: 0.86rem; }}
+.pc-name-link {{
+  appearance: none; border: 0; background: transparent; padding: 0; margin: 0;
+  color: #e6edf3; font: inherit; font-weight: 850; text-align: left; cursor: pointer;
+}}
+.pc-name-link:hover {{ color: #58a6ff; text-decoration: underline; text-underline-offset: 2px; }}
+.pcard.el-pop .pc-meta {{ grid-template-columns: 48px 1fr; min-height: 42px; padding: 8px 10px 0; }}
 .pcard.el-pop .pc-meta-side {{ gap: 7px; }}
+.pcard.el-pop .pc-group {{ padding: 8px 10px 0; }}
+.pcard.el-pop .pc-group:last-child {{ padding-bottom: 10px; }}
+.pcard.el-pop .pc-grid {{ gap: 5px 14px; }}
 @media (max-width: 760px) {{
   .el-leaders {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
   .el-player-grid {{ grid-template-columns: 1fr; }}
-  .pcard.el-pop {{ width: min(380px, calc(100vw - 16px)); }}
+  .pcard.el-pop {{ width: min(340px, calc(100vw - 16px)); }}
 }}
 
 /* ── aba Jogos: card de jogo (accordion) ── */
@@ -4388,12 +4588,15 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
   </label>
   <label class="tb-field">Grupo
     <select id="filterGroup" onchange="applyTeamFilters()"><option value="">Todos</option></select>
+    <span class="filter-hints" id="filterGroupHints"></span>
   </label>
   <label class="tb-field">Confederação
     <select id="filterConfed" onchange="applyTeamFilters()"><option value="">Todas</option></select>
+    <span class="filter-hints" id="filterConfedHints"></span>
   </label>
   <label class="tb-field">Fase
     <select id="filterStage" onchange="applyTeamFilters()"><option value="">Todas</option></select>
+    <span class="filter-hints" id="filterStageHints"></span>
   </label>
   <label class="tb-check"><input type="checkbox" id="filterPlayed" onchange="applyTeamFilters()"> Só com jogos</label>
   <label class="tb-check" title="Só seleções com cobertura de dados avançados (xG, xGP, duelos) no jogo atual"><input type="checkbox" id="filterAdvanced" onchange="applyTeamFilters()"> Só com dados avançados</label>
@@ -4529,6 +4732,51 @@ const TEAMS_DETAIL = {teams_detail_json};
 const TEAMS_GRID = Object.keys(TEAMS_DETAIL);
 const METRIC_GROUPS = {metric_groups_json};
 const LOWER_IS_BETTER = new Set({lower_is_better_json});
+const TEAM_SHIRT_COLORS = {{
+  'África do Sul': '#facc15', 'Alemanha': '#f8fafc', 'Angola': '#c1121f', 'Arábia Saudita': '#15803d',
+  'Argélia': '#f8fafc', 'Argentina': '#75aadb', 'Austrália': '#facc15', 'Bélgica': '#dc2626',
+  'Brasil': '#facc15', 'Cabo Verde': '#2563eb', 'Camarões': '#16a34a', 'Canadá': '#dc2626',
+  'Chile': '#dc2626', 'China': '#dc2626', 'Colômbia': '#facc15', 'Coreia do Sul': '#f8fafc',
+  'Costa Rica': '#dc2626', 'Croácia': '#f8fafc', 'Dinamarca': '#dc2626', 'Egito': '#dc2626',
+  'Equador': '#facc15', 'Espanha': '#dc2626', 'Estados Unidos': '#1d4ed8', 'França': '#1d4ed8',
+  'Gana': '#facc15', 'Holanda': '#f97316', 'Inglaterra': '#f8fafc', 'Irã': '#f8fafc',
+  'Itália': '#2563eb', 'Japão': '#2563eb', 'Marrocos': '#dc2626', 'México': '#15803d',
+  'Nigéria': '#16a34a', 'Noruega': '#dc2626', 'Nova Zelândia': '#111827', 'Panamá': '#dc2626',
+  'Paraguai': '#dc2626', 'Peru': '#f8fafc', 'Polônia': '#f8fafc', 'Portugal': '#dc2626',
+  'Qatar': '#7f1d1d', 'Senegal': '#16a34a', 'Sérvia': '#dc2626', 'Suécia': '#2563eb',
+  'Suíça': '#dc2626', 'Tunísia': '#dc2626', 'Uruguai': '#60a5fa', 'Uzbequistão': '#2563eb',
+  'Venezuela': '#7f1d1d',
+}};
+const TEAM_KIT_COLORS = {{
+  'Alemanha': {{ main: '#f8fafc', border: '#111827', text: '#111827' }},
+  'Argentina': {{ main: '#75aadb', border: '#f8fafc', text: '#111827' }},
+  'Austrália': {{ main: '#facc15', border: '#15803d', text: '#15803d' }},
+  'Bélgica': {{ main: '#dc2626', border: '#111827', text: '#f8fafc' }},
+  'Brasil': {{ main: '#f4d21f', border: '#078930', text: '#1d4ed8' }},
+  'Cabo Verde': {{ main: '#2563eb', border: '#f8fafc', text: '#f8fafc' }},
+  'Canadá': {{ main: '#dc2626', border: '#f8fafc', text: '#f8fafc' }},
+  'Chile': {{ main: '#dc2626', border: '#2563eb', text: '#f8fafc' }},
+  'Colômbia': {{ main: '#facc15', border: '#2563eb', text: '#111827' }},
+  'Coreia do Sul': {{ main: '#f8fafc', border: '#dc2626', text: '#111827' }},
+  'Croácia': {{ main: '#f8fafc', border: '#dc2626', text: '#111827' }},
+  'Dinamarca': {{ main: '#dc2626', border: '#f8fafc', text: '#f8fafc' }},
+  'Espanha': {{ main: '#dc2626', border: '#facc15', text: '#f8fafc' }},
+  'Estados Unidos': {{ main: '#f8fafc', border: '#1d4ed8', text: '#1f2a44' }},
+  'França': {{ main: '#1d4ed8', border: '#f8fafc', text: '#f8fafc' }},
+  'Holanda': {{ main: '#f97316', border: '#111827', text: '#111827' }},
+  'Inglaterra': {{ main: '#f8fafc', border: '#dc2626', text: '#1f2a44' }},
+  'Itália': {{ main: '#2563eb', border: '#f8fafc', text: '#f8fafc' }},
+  'Japão': {{ main: '#2563eb', border: '#f8fafc', text: '#f8fafc' }},
+  'México': {{ main: '#15803d', border: '#f8fafc', text: '#f8fafc' }},
+  'Nigéria': {{ main: '#16a34a', border: '#f8fafc', text: '#f8fafc' }},
+  'Noruega': {{ main: '#dc2626', border: '#1d4ed8', text: '#f8fafc' }},
+  'Peru': {{ main: '#f8fafc', border: '#dc2626', text: '#111827' }},
+  'Polônia': {{ main: '#f8fafc', border: '#dc2626', text: '#111827' }},
+  'Portugal': {{ main: '#7f1d1d', border: '#15803d', text: '#f8fafc' }},
+  'Suécia': {{ main: '#2563eb', border: '#facc15', text: '#facc15' }},
+  'Suíça': {{ main: '#dc2626', border: '#f8fafc', text: '#f8fafc' }},
+  'Uruguai': {{ main: '#60a5fa', border: '#111827', text: '#111827' }},
+}};
 
 // dados de JOGADORES por snapshot + metadados estáticos
 const PLAYER_DATA = {player_data_json};
@@ -4869,12 +5117,14 @@ function teamDebutOrder(team) {{
 // marker='first'|'last' dá um anel colorido no 1º/último jogo do time.
 function paintDot(el, m, color, debutOrder, marker) {{
   el.classList.remove('dot-done', 'dot-pending', 'dot-live', 'dot-faded',
-                      'dot-missing', 'dot-first', 'dot-last');
+                      'dot-missing', 'dot-first', 'dot-last', 'dot-round-end', 'dot-phase-end');
 
   if (debutOrder != null && m.order < debutOrder) {{
     el.classList.add('dot-pending', 'dot-faded');
     el.style.background = 'transparent';
     el.style.borderColor = color + '66';
+    if (m.round_end) el.classList.add('dot-round-end');
+    if (m.phase_end) el.classList.add('dot-phase-end');
     return;
   }}
   el.classList.add('dot-' + m.status);
@@ -4894,6 +5144,8 @@ function paintDot(el, m, color, debutOrder, marker) {{
   // realce do primeiro / último jogo do time
   if (marker === 'first') {{ el.classList.add('dot-first'); el.style.background = '#35c46f'; el.style.borderColor = '#fff'; }}
   if (marker === 'last')  {{ el.classList.add('dot-last');  el.style.background = '#f5c542'; el.style.borderColor = '#fff'; }}
+  if (m.round_end) el.classList.add('dot-round-end');
+  if (m.phase_end) el.classList.add('dot-phase-end');
 }}
 
 // Aplica/limpa o filtro de time na régua PRINCIPAL. focusTeam=null → limpa.
@@ -5079,10 +5331,11 @@ function renderMainDots() {{
       const d = document.createElement('div');
       d.className = 'dot';   // classe base (tamanho/forma); paintDot adiciona o status
       const id = m.match_id.replace('copa_2026_jogo_', 'Jogo ');
+      const markerEnd = m.round_end ? ' · fim da rodada' : (m.phase_end ? ' · fim da fase eliminatória' : '');
       d.title = m.status === 'live' ? `${{id}} — AO VIVO`
-              : m.status === 'done' ? `${{id}} — clique para ver`
-              : m.status === 'missing' ? `${{id}} — finalizado, snapshot ainda não gerado`
-              : `${{id}} — ainda não disputado`;
+              : m.status === 'done' ? `${{id}} — clique para ver${{markerEnd}}`
+              : m.status === 'missing' ? `${{id}} — finalizado, snapshot ainda não gerado${{markerEnd}}`
+              : `${{id}} — ainda não disputado${{markerEnd}}`;
       // só navega para jogos já processados (têm snapshot n)
       if (m.n != null) d.onclick = () => goToJogo(m.n);
       else d.style.cursor = 'default';
@@ -5416,8 +5669,8 @@ function _ensureCompareTeams() {{
 }}
 function _weightPctText(value) {{
   const n = Number(value);
-  if (!Number.isFinite(n)) return '0';
-  return Number.isInteger(n) ? String(n) : n.toFixed(1).replace(/\\.0$/, '');
+  if (!Number.isFinite(n)) return '0.0';
+  return n.toFixed(1);
 }}
 function _guideWeightRows() {{
   return WEIGHT_COMPONENTS
@@ -5491,7 +5744,7 @@ function _componentGuideHtml() {{
           <h3>${{info.title || label}}</h3>
           <span>${{info.role || 'Componente da nota'}}</span>
         </div>
-        <div class="wg-component-weight">${{weight ?? '—'}}%</div>
+        <div class="wg-component-weight">${{weight == null ? '—' : _weightPctText(weight)}}%</div>
       </div>
       <p>${{info.desc || ''}}</p>
       <p>${{info.detail || ''}}</p>
@@ -5589,7 +5842,7 @@ function _compareNarrative(rows, aTeam, bTeam, a, b) {{
   const favored = Math.abs(weightEffect) < 0.15 ? 'Neutro' : (weightEffect > 0 ? aTeam : bTeam);
   const favoredWhy = !shiftRow || Math.abs(weightEffect) < 0.15
     ? 'Os pesos atuais não mudam muito a leitura contra pesos iguais.'
-    : `${{shiftRow.label}} pesa ${{shiftRow.weight.toFixed(0)}}% e ${{weightEffect > 0 ? aTeam : bTeam}} está melhor posicionado nessa lente.`;
+    : `${{shiftRow.label}} pesa ${{_weightPctText(shiftRow.weight)}}% e ${{weightEffect > 0 ? aTeam : bTeam}} está melhor posicionado nessa lente.`;
   const flip = Math.sign(weightedDelta || actualDelta) !== Math.sign(neutralDelta || actualDelta) && Math.abs(neutralDelta) > 0.15;
   return {{ actualDelta, weightedDelta, neutralDelta, weightEffect, winner, loser, decisive, favored, favoredWhy, flip }};
 }}
@@ -5621,7 +5874,7 @@ function _compareGuideHtml() {{
     const who = r.weighted >= 0 ? aTeam : bTeam;
     return `<tr class="${{idx === 0 ? 'top' : ''}}">
       <td>${{r.label}}</td>
-      <td class="wg-compare-weight">${{r.weight.toFixed(0)}}%</td>
+      <td class="wg-compare-weight">${{_weightPctText(r.weight)}}%</td>
       <td>${{(r.av ?? 0).toFixed(1)}}</td>
       <td>${{(r.bv ?? 0).toFixed(1)}}</td>
       <td class="wg-compare-delta ${{r.delta >= 0 ? 'pos' : 'neg'}}">${{_fmtSigned(r.delta)}}</td>
@@ -5832,7 +6085,7 @@ function renderJogo(n) {{
   const pillsHtml = pillDefs.filter(([,,v]) => v !== undefined).map(([label, key, v]) => {{
     return `<button type="button" class="w-pill" onclick="openWeightsGuide('component', '${{key}}')" title="Abrir explicação de ${{label}}">
       <span class="w-name">${{label}}</span>
-      <span class="w-val">${{v}}%</span>
+      <span class="w-val">${{_weightPctText(v)}}%</span>
     </button>`;
   }}).join('');
   const helpHtml = `<button type="button" class="weights-help-btn" onclick="openWeightsGuide('overview')" title="Entenda pesos dinâmicos">?</button>`;
@@ -6944,6 +7197,7 @@ function selectTeam(t) {{
   selectedTeam = t;
   if (t) addTrajectoryTeam(t, false);
   renderSelectedTeamChips();
+  refreshFilterOptions();
   syncDotRows();
   renderJogo(currentJogo);
   if (activeTab === 'teams') renderTeamsGrid();
@@ -7016,9 +7270,10 @@ function renderSelectedTeamChips() {{
   const el = document.getElementById('selectedTeamChips');
   if (!el) return;
   const escJs = s => (s || '').replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'");
-  el.innerHTML = activeTeamFilters().map(team => {{
+  el.innerHTML = activeTeamFilters().map((team, index) => {{
     const flag = TEAM_FLAGS[team] || (TEAMS_DETAIL[team] || {{}}).flag || '🏳️';
-    return `<span class="search-team-chip" title="${{_esc(team)}}"><span>${{flag}} ${{_esc(team)}}</span><button type="button" onclick="removeSearchTeam('${{escJs(team)}}')" title="Remover">×</button></span>`;
+    const color = _focusColor(team, index);
+    return `<span class="search-team-chip" style="--chip-color:${{color}}" title="${{_esc(team)}}"><span>${{flag}} ${{_esc(team)}}</span><button type="button" onclick="removeSearchTeam('${{escJs(team)}}')" title="Remover">×</button></span>`;
   }}).join('');
 }}
 
@@ -7031,6 +7286,7 @@ function removeSearchTeam(team) {{
 // controles compartilhados de busca, métrica, direção e filtros).
 function renderBothViews() {{
   renderSelectedTeamChips();
+  refreshFilterOptions();
   renderJogo(currentJogo);
   if (activeTab === 'teams') renderTeamsGrid();
   if (activeTab === 'players') renderPlayersGrid();
@@ -7484,6 +7740,7 @@ function switchTab(tab) {{
     tab === 'players' ? 'Buscar jogador ou adicionar seleção…' : 'Buscar/adicionar seleção…';
   // a métrica disponível muda entre seleções e jogadores
   syncMetricOptions(tab);
+  refreshFilterOptions();
   if (tab === 'teams') {{
     if (!_teamsInit) {{ initTeamsControls(); _teamsInit = true; }}
     renderTeamsGrid();
@@ -7530,12 +7787,86 @@ const PLAYER_METRICS = [
 ];
 const PLAYER_METRIC_LABELS = {{}};
 PLAYER_METRICS.forEach(([k, l]) => PLAYER_METRIC_LABELS[k] = l);
+const PLAYER_METRIC_CORE = [
+  ['rating_365', 'Nota de atuação'],
+  ['score_geral', 'Score (qualidade)'],
+  ['jogos', 'Jogos disputados'],
+];
+const PLAYER_METRICS_BY_POS = {{
+  goleiro: [
+    ['defesas_por_jogo', 'Defesas / jogo'],
+    ['expected_goals_prevented_por_jogo', 'xGP / jogo'],
+    ['goals_conceded', 'Gols sofridos (total)'],
+    ['saves', 'Defesas (total)'],
+    ['expected_goals_prevented', 'xGP (total)'],
+  ],
+  defensor: [
+    ['tackles_won_por_jogo', 'Desarmes / jogo'],
+    ['interceptions_por_jogo', 'Interceptações / jogo'],
+    ['clearances_por_jogo', 'Cortes / jogo'],
+    ['shots_blocked_por_jogo', 'Bloqueios / jogo'],
+    ['ball_recovery_por_jogo', 'Recuperações / jogo'],
+    ['duels_won_por_jogo', 'Duelos ganhos / jogo'],
+    ['expected_goals_prevented_por_jogo', 'xGP / jogo'],
+    ['tackles_won', 'Desarmes (total)'],
+    ['interceptions', 'Interceptações (total)'],
+    ['clearances', 'Cortes (total)'],
+    ['ball_recovery', 'Recuperações (total)'],
+    ['duels_won', 'Duelos ganhos (total)'],
+  ],
+  meio: [
+    ['assistencias_por_jogo', 'Assistências / jogo'],
+    ['expected_assists_por_jogo', 'xA / jogo'],
+    ['key_passes_por_jogo', 'Passes-chave / jogo'],
+    ['big_chances_created_por_jogo', 'Grandes chances criadas / jogo'],
+    ['dribbles_won_por_jogo', 'Dribles ganhos / jogo'],
+    ['ball_recovery_por_jogo', 'Recuperações / jogo'],
+    ['tackles_won_por_jogo', 'Desarmes / jogo'],
+    ['gols_por_jogo', 'Gols / jogo'],
+    ['expected_goals_por_jogo', 'xG / jogo'],
+    ['chutes_no_alvo_por_jogo', 'Chutes no alvo / jogo'],
+    ['assists', 'Assistências (total)'],
+    ['expected_assists', 'xA (total)'],
+    ['key_passes', 'Passes-chave (total)'],
+  ],
+  atacante: [
+    ['gols_por_jogo', 'Gols / jogo'],
+    ['participacoes_por_jogo', 'G+A / jogo'],
+    ['expected_goals_por_jogo', 'xG / jogo'],
+    ['expected_goals_on_target_por_jogo', 'xGOT / jogo'],
+    ['chutes_no_alvo_por_jogo', 'Chutes no alvo / jogo'],
+    ['assistencias_por_jogo', 'Assistências / jogo'],
+    ['expected_assists_por_jogo', 'xA / jogo'],
+    ['key_passes_por_jogo', 'Passes-chave / jogo'],
+    ['dribbles_won_por_jogo', 'Dribles ganhos / jogo'],
+    ['big_chances_scored_por_jogo', 'Grandes chances em gol / jogo'],
+    ['big_chances_missed_por_jogo', 'Grandes chances perdidas / jogo'],
+    ['goals', 'Gols (total)'],
+    ['assists', 'Assistências (total)'],
+    ['expected_goals', 'xG (total)'],
+  ],
+}};
+Object.values(PLAYER_METRICS_BY_POS).flat().forEach(([k, l]) => {{
+  if (!PLAYER_METRIC_LABELS[k]) PLAYER_METRIC_LABELS[k] = l;
+}});
+function playerMetricOptionsForCurrentPos() {{
+  const pos = playerFilters.pos || '';
+  if (!pos || !PLAYER_METRICS_BY_POS[pos]) return PLAYER_METRICS;
+  const seen = new Set();
+  return [...PLAYER_METRIC_CORE, ...PLAYER_METRICS_BY_POS[pos]].filter(([k]) => {{
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  }});
+}}
 
 function syncMetricOptions(tab) {{
   const sel = document.getElementById('metricSelect');
   if (tab === 'players') {{
-    sel.innerHTML = PLAYER_METRICS.map(([k, l]) => `<option value="${{k}}">${{l}}</option>`).join('');
-    if (!PLAYER_METRIC_LABELS[currentMetric]) currentMetric = 'score_geral';
+    const options = playerMetricOptionsForCurrentPos();
+    const valid = new Set(options.map(([k]) => k));
+    sel.innerHTML = options.map(([k, l]) => `<option value="${{k}}">${{l}}</option>`).join('');
+    if (!valid.has(currentMetric)) currentMetric = 'score_geral';
     sel.value = currentMetric;
   }} else {{
     // restaura as métricas de seleção/corrida (agrupadas)
@@ -7551,8 +7882,50 @@ function _norm(s) {{
   return (s || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
 }}
 
+function _hashColor(text) {{
+  const palette = ['#2563eb', '#dc2626', '#16a34a', '#f97316', '#7c3aed', '#0891b2', '#be123c', '#ca8a04'];
+  let h = 0;
+  for (const ch of String(text || '')) h = ((h << 5) - h + ch.charCodeAt(0)) | 0;
+  return palette[Math.abs(h) % palette.length];
+}}
+function _hexRgb(hex) {{
+  const h = String(hex || '').replace('#', '');
+  if (h.length !== 6) return {{ r: 37, g: 99, b: 235 }};
+  return {{ r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) }};
+}}
+function _mixHex(hex, pct) {{
+  const c = _hexRgb(hex);
+  const t = pct < 0 ? 0 : 255;
+  const p = Math.abs(pct);
+  const to = v => Math.max(0, Math.min(255, Math.round(v + (t - v) * p))).toString(16).padStart(2, '0');
+  return `#${{to(c.r)}}${{to(c.g)}}${{to(c.b)}}`;
+}}
+function _shirtColors(team) {{
+  const kit = TEAM_KIT_COLORS[team] || {{}};
+  const main = kit.main || TEAM_SHIRT_COLORS[team] || TEAM_SHIRT_COLORS[_norm(team)] || _hashColor(team);
+  const rgb = _hexRgb(main);
+  const luminance = (0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b) / 255;
+  const text = kit.text || (luminance > 0.62 ? '#0d1117' : '#f8fafc');
+  const dark = _mixHex(main, -0.36);
+  const border = kit.border || _mixHex(main, luminance > 0.62 ? -0.28 : 0.22);
+  return `--shirt-main:${{main}};--shirt-dark:${{dark}};--shirt-border:${{border}};--shirt-text:${{text}}`;
+}}
+function _kitShirtHtml(num, team, cls = '') {{
+  const n = num == null || num === '—' ? '' : _esc(String(num));
+  return `<span class="kit-shirt ${{cls}}" style="${{_shirtColors(team)}}"><span class="shirt-number">${{n}}</span></span>`;
+}}
+function _playerSlugFor(team, name) {{
+  const targetTeam = _norm(team);
+  const targetName = _norm(name);
+  return PLAYER_SLUGS.find(slug => {{
+    const meta = PLAYER_META[slug] || {{}};
+    return _norm(meta.team) === targetTeam && _norm(meta.name) === targetName;
+  }}) || null;
+}}
+
 const STAGE_LABELS_TEAMS = {{
-  'Fase de Grupos': 'Fase de Grupos', 'Oitavas': 'Oitavas', 'Quartas': 'Quartas',
+  'Fase de Grupos': 'Fase de Grupos', '16-avos de Final': '16-avos de Final',
+  'Oitavas de Final': 'Oitavas de Final', 'Quartas de Final': 'Quartas de Final',
   'Semifinais': 'Semifinais', 'Disputa 3º Lugar': 'Disputa 3º Lugar', 'Final': 'Final',
 }};
 
@@ -7568,15 +7941,69 @@ function initTeamsControls() {{
 
 // Preenche um <select> de filtro com as opções válidas + preserva o valor atual
 // se ainda for válido (senão volta para "todas").
-function _fillFilterSelect(id, values, allLabel, fmt) {{
+function _focusColor(team, fallbackIndex = 0) {{
+  const idx = trajectoryTeams.indexOf(team);
+  return TRAJECTORY_COLORS[(idx >= 0 ? idx : fallbackIndex) % TRAJECTORY_COLORS.length];
+}}
+
+function _focusedFilterSuggestions() {{
+  const out = {{ group: new Map(), confed: new Map(), stage: new Map() }};
+  activeTeamFilters().forEach((team, index) => {{
+    const meta = TEAM_META[team] || {{}};
+    const flag = TEAM_FLAGS[team] || (TEAMS_DETAIL[team] || {{}}).flag || '';
+    const color = _focusColor(team, index);
+    ['group', 'confed', 'stage'].forEach(axis => {{
+      const value = meta[axis];
+      if (!value) return;
+      if (!out[axis].has(value)) out[axis].set(value, []);
+      out[axis].get(value).push({{ team, flag, color }});
+    }});
+  }});
+  return out;
+}}
+
+function _renderFilterHints(id, suggestedMap, hintFmt) {{
+  const el = document.getElementById(id + 'Hints');
+  if (!el) return;
+  const chips = [];
+  suggestedMap.forEach((teams, value) => {{
+    teams.forEach(t => {{
+      chips.push(`<span class="filter-hint" style="--hint-color:${{t.color}}" title="${{_esc(t.team)}} · ${{_esc(hintFmt(value))}}">
+        <span class="filter-hint-dot"></span><span class="filter-hint-text">${{t.flag ? _esc(t.flag) + ' ' : ''}}${{_esc(hintFmt(value))}}</span>
+      </span>`);
+    }});
+  }});
+  el.innerHTML = chips.join('');
+}}
+
+function _suggestGradient(suggestedMap) {{
+  const colors = [];
+  suggestedMap.forEach(teams => teams.forEach(t => colors.push(t.color)));
+  if (!colors.length) return '';
+  const step = 100 / colors.length;
+  return `linear-gradient(90deg, ${{colors.map((c, i) => `${{c}} ${{(i * step).toFixed(2)}}%, ${{c}} ${{((i + 1) * step).toFixed(2)}}%`).join(', ')}})`;
+}}
+
+function _fillFilterSelect(id, values, allLabel, fmt, suggestedMap = new Map(), hintFmt = fmt) {{
   const sel = document.getElementById(id);
   if (!sel) return;
   const cur = sel.value;
   const opts = values.slice().sort();
   const still = opts.includes(cur) ? cur : '';
+  const hasSuggestion = suggestedMap.size > 0;
   sel.innerHTML = `<option value="">${{allLabel}}</option>` +
-    opts.map(v => `<option value="${{v}}"${{v === still ? ' selected' : ''}}>${{fmt(v)}}</option>`).join('');
+    opts.map(v => {{
+      const teams = suggestedMap.get(v) || [];
+      const suggested = teams.length > 0;
+      const teamLabel = suggested ? (teams.length === 1 ? ` · ${{teams[0].team}}` : ` · ${{teams.length}} seleções`) : '';
+      const colorStyle = suggested && teams.length === 1 ? ` style="color:${{teams[0].color}};font-weight:800"` : '';
+      return `<option value="${{_esc(v)}}"${{v === still ? ' selected' : ''}}${{suggested ? ' data-suggested="1"' : ''}}${{colorStyle}}>${{suggested ? '★ ' : ''}}${{_esc(fmt(v))}}${{_esc(teamLabel)}}</option>`;
+    }}).join('');
   sel.value = still;
+  const field = sel.closest('.tb-field');
+  if (field) field.classList.toggle('has-suggestion', hasSuggestion);
+  sel.style['--suggest-gradient'] = hasSuggestion ? _suggestGradient(suggestedMap) : '';
+  _renderFilterHints(id, suggestedMap, hintFmt);
 }}
 
 // CROSS-FILTER: cada dropdown mostra só opções compatíveis com os OUTROS
@@ -7586,6 +8013,7 @@ function _fillFilterSelect(id, values, allLabel, fmt) {{
 // trocar o valor dele). Sincroniza o estado global se algum valor caiu fora.
 function refreshFilterOptions() {{
   const metas = Object.values(TEAM_META);
+  const suggested = _focusedFilterSuggestions();
   // candidatos a cada eixo, dado o estado dos OUTROS dois eixos
   const valid = (axis) => {{
     const out = new Set();
@@ -7598,9 +8026,9 @@ function refreshFilterOptions() {{
     }});
     return [...out];
   }};
-  _fillFilterSelect('filterGroup',  valid('group'),  'Todos',  g => 'Grupo ' + g);
-  _fillFilterSelect('filterConfed', valid('confed'), 'Todas',  c => c);
-  _fillFilterSelect('filterStage',  valid('stage'),  'Todas',  s => s);
+  _fillFilterSelect('filterGroup',  valid('group'),  'Todos',  g => 'Grupo ' + g, suggested.group, g => 'G ' + g);
+  _fillFilterSelect('filterConfed', valid('confed'), 'Todas',  c => c, suggested.confed, c => c);
+  _fillFilterSelect('filterStage',  valid('stage'),  'Todas',  s => s, suggested.stage, s => STAGE_LABELS_TEAMS[s] || s);
   // se algum valor saiu da lista (ficou inválido), atualiza o estado global
   teamFilters.group  = document.getElementById('filterGroup').value;
   teamFilters.confed = document.getElementById('filterConfed').value;
@@ -7614,6 +8042,7 @@ let teamPage = 1;
 // filtros (grupo/confed/fase), volta pra página 1 e re-renderiza AS DUAS abas.
 function applyTeamFilters() {{
   syncFiltersFromTeamsUI();
+  if (activeTab === 'players') syncMetricOptions('players');
   refreshFilterOptions();   // dropdowns se cruzam: só opções compatíveis
   teamPage = 1; playerPage = 1;
   renderTeamsGrid();
@@ -7657,6 +8086,7 @@ function resetAllFilters() {{
   hideTeamSuggestions();
   teamPage = 1; playerPage = 1;
   refreshFilterOptions();   // volta os dropdowns à lista completa
+  if (activeTab === 'players') syncMetricOptions('players');
   syncDotRows();
   renderBothViews();
   if (activeTab === 'players') renderPlayersGrid();
@@ -7779,8 +8209,10 @@ function renderTeamsGrid() {{
       d.stage_now ? `<span class="tc-badge">${{d.stage_now}}</span>` : '',
     ].join('');
 
-    const focusCls = ((selectedTeam && t === selectedTeam) || trajectoryTeams.includes(t)) ? ' tc-focus' : '';
-    return `<div class="team-card${{empty ? ' tc-empty' : ''}}${{focusCls}}" ${{empty ? '' : `onclick="openTeamModal('${{t.replace(/'/g, "\\\\'")}}')"`}}>
+    const isFocused = ((selectedTeam && t === selectedTeam) || trajectoryTeams.includes(t));
+    const focusCls = isFocused ? ' tc-focus' : '';
+    const focusStyle = isFocused ? ` style="--focus-color:${{_focusColor(t)}}"` : '';
+    return `<div class="team-card${{empty ? ' tc-empty' : ''}}${{focusCls}}"${{focusStyle}} ${{empty ? '' : `onclick="openTeamModal('${{t.replace(/'/g, "\\\\'")}}')"`}}>
       <div class="tc-head">
         <span class="tc-flag">${{flag}}</span>
         <div class="tc-info">
@@ -7805,6 +8237,7 @@ let playerPage = 1;
 let selectedPlayer = '';
 const playerFilters = {{ pos: '' }};
 const PERFIL_LABEL = {{ goleiro: 'Goleiro', defensor: 'Defensor', meio: 'Meio', atacante: 'Atacante' }};
+const PERFIL_PLURAL = {{ goleiro: 'Goleiros', defensor: 'Defensores', meio: 'Meias', atacante: 'Atacantes' }};
 
 // índice [jogo][slug] → linha do jogador naquele snapshot (lookup O(1))
 const PSNAP_BY_SLUG = {{}};
@@ -7997,10 +8430,18 @@ function playerHistory(slug, uptoN = currentJogo) {{
   return hist.map(n => (PSNAP_BY_SLUG[n] || {{}})[slug]);
 }}
 
+function _playerMetricValue(row, metric) {{
+  if (!row) return null;
+  if (metric === 'goals_conceded_por_jogo') {{
+    return row.jogos > 0 && row.goals_conceded != null ? row.goals_conceded / row.jogos : null;
+  }}
+  return row[metric] == null ? null : row[metric];
+}}
+
 // média do PERFIL no snapshot atual (para comparação "acima/abaixo da posição")
 function profileAvg(perfil, metric, n = currentJogo) {{
   const rows = (PLAYER_DATA[n] || []).filter(r => r.perfil === perfil && r.jogos > 0);
-  const vals = rows.map(r => r[metric]).filter(v => v != null);
+  const vals = rows.map(r => _playerMetricValue(r, metric)).filter(v => v != null);
   if (!vals.length) return null;
   return vals.reduce((a, b) => a + b, 0) / vals.length;
 }}
@@ -8009,10 +8450,11 @@ function openPlayerModal(slug) {{
   const meta = PLAYER_META[slug];
   if (!meta) return;
   const r = (PSNAP_BY_SLUG[currentJogo] || {{}})[slug];
-  const flag = (TEAMS_DETAIL[meta.team] || {{}}).flag || TEAM_FLAGS[meta.team] || '🏳️';
+  const perfil = r ? r.perfil : meta.perfil;
+  const shirt = meta.shirt != null ? meta.shirt : '—';
+  const playerMeta = `${{shirt}} · ${{PERFIL_LABEL[perfil] || perfil || 'Jogador'}} · ${{meta.team}}`;
   document.getElementById('playerModalTitle').innerHTML =
-    `<span class="modal-flag">${{flag}}</span> ${{meta.name}}` +
-    (r ? ` <span style="font-size:0.75rem;color:#8b949e">${{PERFIL_LABEL[r.perfil] || r.perfil}} · ${{meta.team}}</span>` : '');
+    `<span style="font-size:0.82rem;color:#8b949e;font-weight:800">${{_esc(playerMeta)}}</span>`;
   document.getElementById('playerModalBody').innerHTML = renderPlayerModalBody(slug, r);
   document.getElementById('playerModal').style.display = 'flex';
 }}
@@ -8024,49 +8466,128 @@ function renderPlayerModalBody(slug, r) {{
     return `<div class="md-empty">${{meta.name}} ainda não entrou em campo até o Jogo ${{currentJogo}}.</div>`;
   }}
   const perfil = r.perfil;
-  // hero: nota geral + ranking no perfil
+  // hero compacto: camisa + nome; ranking fica no KPI, não no cabeçalho visual.
+  const teamEsc = meta.team.replace(/'/g, "\\'");
+  const teamFlag = (TEAMS_DETAIL[meta.team] || {{}}).flag || TEAM_FLAGS[meta.team] || '🏳️';
+  const shirtStyle = _shirtColors(meta.team);
   const hero = `<div class="rs-hero">
-    <span class="rs-hero-flag">${{(TEAMS_DETAIL[meta.team]||{{}}).flag || TEAM_FLAGS[meta.team] || '🏳️'}}</span>
+    <span class="rs-hero-shirt" style="${{shirtStyle}}"><span class="shirt-number">${{meta.shirt != null ? meta.shirt : ''}}</span></span>
     <div class="rs-hero-info">
-      <div class="rs-hero-top"><span class="rs-hero-name" style="color:${{r.rating_365 != null ? _ratingColor(r.rating_365) : '#e6edf3'}}">${{r.rating_365 != null ? r.rating_365.toFixed(1) : '—'}}</span>
-        <span class="rs-hero-rank">nota de atuação · Score ${{r.score_geral != null ? r.score_geral.toFixed(1) : '—'}} (#${{Math.round(r.ranking_score_geral)}} entre ${{PERFIL_LABEL[perfil] || perfil}}s)</span></div>
-      <div class="rs-hero-meta">${{r.jogos}} jogo${{r.jogos !== 1 ? 's' : ''}} · evidência ${{r.nivel_evidencia || '—'}} ·
-        <a href="#" onclick="event.preventDefault(); openTeamFromPlayer('${{meta.team.replace(/'/g, "\\'")}}')" style="color:#58a6ff">ver ${{meta.team}}</a></div>
+      <div class="rs-hero-top"><span class="rs-hero-name">${{_esc(meta.name)}}</span></div>
     </div>
+    <a class="rs-team-flag-link" href="#" onclick="event.preventDefault(); openTeamFromPlayer('${{teamEsc}}')" title="Ver ${{meta.team}}">${{teamFlag}}</a>
   </div>`;
 
-  // resumo de stats (relevante ao perfil)
+  const fmtStat = (v, digits = 2) => {{
+    if (v == null || !Number.isFinite(Number(v))) return '—';
+    const n = Number(v);
+    return digits === 0 ? String(Math.round(n)) : n.toFixed(digits).replace(/\\.00$/, '').replace(/(\\.\\d)0$/, '$1');
+  }};
   const kv = (k, v) => `<div class="rs-kv"><span class="rs-k">${{k}}</span><span class="rs-v">${{v}}</span></div>`;
-  const colA = `<div class="rs-col"><div class="rs-col-title">Produção</div>
-    ${{kv('Gols', Math.round(r.goals || 0))}}
-    ${{kv('Assistências', Math.round(r.assists || 0))}}
-    ${{kv('G+A', Math.round(r.participacoes_gol || 0))}}
-    ${{perfil === 'goleiro' ? kv('Defesas', Math.round(r.saves || 0)) : kv('Chutes no alvo', Math.round(r.shots_on_target || 0))}}
-  </div>`;
-  const colB = `<div class="rs-col"><div class="rs-col-title">Disciplina · médias/jogo</div>
-    ${{kv('Amarelos', Math.round(r.yellow_cards || 0))}}
-    ${{kv('Vermelhos', Math.round(r.red_cards || 0))}}
-    ${{kv('Faltas cometidas/jogo', (r.faltas_cometidas_por_jogo ?? 0).toFixed(1))}}
-    ${{kv('Faltas sofridas/jogo', (r.faltas_sofridas_por_jogo ?? 0).toFixed(1))}}
+  const rankLabel = r.ranking_score_geral != null ? `#${{Math.round(r.ranking_score_geral)}}` : '—';
+  const kpis = `<div class="pm-kpi-row">
+    <div class="pm-kpi"><span>Nota</span><b style="color:${{r.rating_365 != null ? _ratingColor(r.rating_365) : '#e6edf3'}}">${{fmtStat(r.rating_365, 1)}}</b></div>
+    <div class="pm-kpi"><span>Score</span><b>${{fmtStat(r.score_geral, 1)}}</b></div>
+    <div class="pm-kpi"><span>Ranking da posição</span><b>${{rankLabel}}</b></div>
+    <div class="pm-kpi"><span>Jogos</span><b>${{Math.round(r.jogos || 0)}}</b></div>
   </div>`;
 
-  // comparação com o perfil: barras valor-vs-média da posição
-  const CMP = perfil === 'goleiro'
-    ? [['Defesas/jogo', 'defesas_por_jogo']]
-    : [['Gols/jogo', 'gols_por_jogo'], ['Assist./jogo', 'assistencias_por_jogo'], ['Chutes no alvo/jogo', 'chutes_no_alvo_por_jogo']];
-  const cmpHtml = CMP.map(([lbl, key]) => {{
-    const val = r[key] ?? 0;
-    const avg = profileAvg(perfil, key) || 0;
-    const ratio = avg > 0 ? val / avg : (val > 0 ? 2 : 1);
-    const pct = Math.max(4, Math.min(100, ratio * 50));   // 50% = na média
-    const cor = ratio >= 1.15 ? '#3fb950' : ratio >= 0.85 ? '#58a6ff' : '#d29922';
-    const rel = avg > 0 ? `${{(ratio * 100 - 100 >= 0 ? '+' : '')}}${{Math.round(ratio * 100 - 100)}}% vs média` : 'sem base';
-    return `<div class="es-mm">
-      <div class="es-mm-head"><span class="es-mm-lbl">${{lbl}}</span>
-        <span class="es-mm-vals"><b>${{val.toFixed(2)}}</b> <span class="es-mm-meta">${{rel}}</span></span></div>
-      <div class="es-mm-bar"><span class="es-mm-fill" style="width:${{pct}}%;background:${{cor}}"></span></div>
+  const metricTone = (metric, val, inverse = false) => {{
+    const avg = profileAvg(perfil, metric);
+    if (avg == null || avg <= 0 || val == null) return 'mid';
+    const raw = inverse ? (avg - val) / avg : (val - avg) / avg;
+    return raw >= 0.15 ? 'up' : raw <= -0.15 ? 'down' : 'mid';
+  }};
+  const metricTile = (label, metric, note, digits = 2, inverse = false) => {{
+    const val = _playerMetricValue(r, metric);
+    const tone = metricTone(metric, val, inverse);
+    return `<div class="pm-metric ${{tone}}">
+      <span class="pm-metric-label">${{label}}</span>
+      <span class="pm-metric-value">${{fmtStat(val, digits)}}</span>
+      <span class="pm-metric-note">${{note}}</span>
     </div>`;
-  }}).join('');
+  }};
+  const card = (title, items) => `<div class="pm-role-card">
+    <div class="pm-role-title">${{title}}</div>
+    <div class="pm-metric-list">${{items.map(item => metricTile(...item)).join('')}}</div>
+  </div>`;
+  const roleSections = {{
+    goleiro: [
+      ['Proteção do gol', [
+        ['Defesas', 'defesas_por_jogo', 'volume real de intervenções', 2],
+        ['Gols sofridos', 'goals_conceded_por_jogo', 'quanto dano passou pela defesa', 2, true],
+        ['Gols evitados', 'expected_goals_prevented_por_jogo', 'defesa/goleiro acima do esperado', 2],
+      ]],
+      ['Área e pressão', [
+        ['Bolas altas', 'high_claims_por_jogo', 'saída em cruzamentos e bolas longas', 2],
+        ['Socos', 'punches_por_jogo', 'resposta quando não dá para encaixar', 2],
+        ['Pênaltis defendidos', 'penalties_saved_por_jogo', 'eventos raros, mas decisivos', 2],
+      ]],
+    ],
+    defensor: [
+      ['Proteção', [
+        ['Desarmes', 'tackles_won_por_jogo', 'vence duelos diretos no chão', 2],
+        ['Interceptações', 'interceptions_por_jogo', 'antecipa linhas de passe', 2],
+        ['Cortes', 'clearances_por_jogo', 'remove perigo da área', 2],
+        ['Chutes bloqueados', 'shots_blocked_por_jogo', 'protege a finalização', 2],
+      ]],
+      ['Cobertura', [
+        ['Recuperações', 'ball_recovery_por_jogo', 'ganha segunda bola e reorganiza', 2],
+        ['Duelos ganhos', 'duels_won_por_jogo', 'força física e disputa aérea', 2],
+        ['Gols evitados', 'expected_goals_prevented_por_jogo', 'impacto defensivo acima do esperado', 2],
+      ]],
+      ['Apoio com bola', [
+        ['Assistências', 'assistencias_por_jogo', 'participação direta em gol', 2],
+        ['xA', 'expected_assists_por_jogo', 'qualidade dos passes para chance', 2],
+        ['Passes-chave', 'key_passes_por_jogo', 'passes que viram finalização', 2],
+      ]],
+    ],
+    meio: [
+      ['Criação', [
+        ['Assistências', 'assistencias_por_jogo', 'passe final convertido em gol', 2],
+        ['xA', 'expected_assists_por_jogo', 'qualidade das chances criadas', 2],
+        ['Passes-chave', 'key_passes_por_jogo', 'criação que vira finalização', 2],
+        ['Chances claras criadas', 'big_chances_created_por_jogo', 'passes para chances claras', 2],
+      ]],
+      ['Controle e disputa', [
+        ['Dribles ganhos', 'dribbles_won_por_jogo', 'quebra linhas com a bola', 2],
+        ['Recuperações', 'ball_recovery_por_jogo', 'sustenta pressão pós-perda', 2],
+        ['Desarmes', 'tackles_won_por_jogo', 'contribuição sem bola', 2],
+      ]],
+      ['Chegada ao gol', [
+        ['Gols', 'gols_por_jogo', 'ameaça final', 2],
+        ['xG', 'expected_goals_por_jogo', 'qualidade das próprias chances', 2],
+        ['Chutes no alvo', 'chutes_no_alvo_por_jogo', 'finalização que exige defesa', 2],
+      ]],
+    ],
+    atacante: [
+      ['Finalização', [
+        ['Gols', 'gols_por_jogo', 'produção que já virou placar', 2],
+        ['xG', 'expected_goals_por_jogo', 'qualidade das chances recebidas', 2],
+        ['xGOT', 'expected_goals_on_target_por_jogo', 'qualidade do chute no alvo', 2],
+        ['Chutes no alvo', 'chutes_no_alvo_por_jogo', 'ameaça que força defesa', 2],
+      ]],
+      ['Criação e 1x1', [
+        ['Assistências', 'assistencias_por_jogo', 'passe final convertido em gol', 2],
+        ['xA', 'expected_assists_por_jogo', 'qualidade dos passes para chance', 2],
+        ['Passes-chave', 'key_passes_por_jogo', 'criação que vira finalização', 2],
+        ['Dribles ganhos', 'dribbles_won_por_jogo', 'vantagem criada no duelo', 2],
+      ]],
+      ['Decisão', [
+        ['Chances claras marcadas', 'big_chances_scored_por_jogo', 'chance clara convertida', 2],
+        ['Chances claras perdidas', 'big_chances_missed_por_jogo', 'chance clara desperdiçada', 2, true],
+        ['Participações em gol', 'participacoes_por_jogo', 'gols + assistências por jogo', 2],
+      ]],
+    ],
+  }};
+  const sections = roleSections[perfil] || roleSections.atacante;
+  const roleHtml = `<div class="pm-role-grid${{sections.length === 2 ? ' two' : ''}}">${{sections.map(([title, items]) => card(title, items)).join('')}}</div>`;
+  const disciplineHtml = `<div class="pm-discipline-strip">
+    <div class="pm-discipline-item card-yellow"><span class="pm-icon">C</span><span>Cartões amarelos</span><b>${{fmtStat(r.yellow_cards || 0, 0)}}</b></div>
+    <div class="pm-discipline-item card-red"><span class="pm-icon">C</span><span>Cartões vermelhos</span><b>${{fmtStat(r.red_cards || 0, 0)}}</b></div>
+    <div class="pm-discipline-item foul-made"><span class="pm-icon">F</span><span>Faltas cometidas</span><b>${{fmtStat(r.faltas_cometidas_por_jogo || 0, 1)}}</b></div>
+    <div class="pm-discipline-item foul-won"><span class="pm-icon">+</span><span>Faltas sofridas</span><b>${{fmtStat(r.faltas_sofridas_por_jogo || 0, 1)}}</b></div>
+  </div>`;
 
   // histórico jogo a jogo (acumulado por snapshot em que jogou)
   const hist = playerHistory(slug);
@@ -8080,8 +8601,9 @@ function renderPlayerModalBody(slug, r) {{
     <table class="pm-table"><thead><tr><th>Após</th><th>Nota</th><th>G</th><th>A</th><th>Rank</th></tr></thead>
     <tbody>${{histRows}}</tbody></table></div>` : '';
 
-  return `${{hero}}<div class="rs-cols">${{colA}}${{colB}}</div>
-    <div class="pm-section"><div class="rs-col-title">Comparação com a posição (50% da barra = média)</div>${{cmpHtml}}</div>
+  return `${{hero}}${{kpis}}
+    <div class="pm-section"><div class="rs-col-title">Leitura por função · valores por jogo e comparação com a posição</div>${{roleHtml}}</div>
+    ${{disciplineHtml}}
     ${{histHtml}}`;
 }}
 
@@ -8109,6 +8631,7 @@ function openTeamModal(team) {{
       renderPlayersGrid();
     }}
   }}
+  refreshFilterOptions();
   modalTeam = team;
   modalTab = 'scores';
   expandedGame = null;
@@ -8519,6 +9042,11 @@ function _rosterPlayerCardHtml(p) {{
   }};
 
   const escName = _esc(p.name || '');
+  const playerSlug = _playerSlugFor(modalTeam, p.name);
+  const slugEsc = playerSlug ? playerSlug.replace(/\\\\/g, "\\\\\\\\").replace(/'/g, "\\\\'") : '';
+  const nameHtml = playerSlug
+    ? `<button class="pc-name-link" onpointerdown="event.stopPropagation()" onclick="event.stopPropagation();openPlayerModal('${{slugEsc}}')">${{escName}}</button>`
+    : `<span class="pc-name">${{escName}}</span>`;
   const closeName = (p.name || '').replace(/'/g, "\\\\'");
   const key = _rosterCardKey(p.name);
   const keyEsc = key.replace(/\\\\/g, "\\\\\\\\").replace(/'/g, "\\\\'");
@@ -8620,8 +9148,8 @@ function _rosterPlayerCardHtml(p) {{
     .join('');
   return `<div class="pcard el-pop" style="--el-pop-left:${{anchor.left}}px;--el-pop-top:${{anchor.top}}px;--pc-x:${{off.x || 0}}px;--pc-y:${{off.y || 0}}px" onclick="event.stopPropagation()">
     <div class="pc-head" onpointerdown="startPlayerCardDrag(event, '${{keyEsc}}')">
-      <span class="pc-num">${{p.num ?? ''}}</span>
-      <div class="pc-id"><span class="pc-name">${{escName}}</span><span class="pc-pos">${{_esc(p.pos || '—')}}</span></div>
+      ${{_kitShirtHtml(p.num, modalTeam, 'pc-shirt')}}
+      <div class="pc-id">${{nameHtml}}<span class="pc-pos">${{_esc(p.pos || '—')}}</span></div>
       <button class="pc-close" onclick="event.stopPropagation();showRosterPlayer('${{closeName}}')">✕</button>
     </div>
     <div class="pc-meta">${{ratingHtml}}<div class="pc-meta-side"><div class="pc-ctx">${{gamesCtx}}${{ratingCtx}}</div>${{ctxHtml}}</div></div>
@@ -9232,7 +9760,7 @@ function renderModalBody() {{
       const isOpen = openRosterCards.has(p.name);
       return `<div class="el-player${{isOpen ? ' open' : ''}}" onclick="showRosterPlayer('${{nameEscAttr}}', this)">
         <div class="el-player-top">
-          <span class="el-avatar">${{_esc(String(num))}}</span>
+          ${{_kitShirtHtml(num, modalTeam, 'el-shirt')}}
           <div class="el-player-id">
             <span class="el-name">${{_esc(p.name)}}</span>
             ${{pos ? `<span class="el-pos-label">${{_esc(pos)}}</span>` : ''}}
@@ -9255,7 +9783,7 @@ function renderModalBody() {{
       if (!items.length) return '';
       return `<div class="el-unused-group">
         <div class="el-unused-head">${{group}} · ${{items.length}}</div>
-        <div class="el-unused-list">${{items.map(p => `<span class="el-unused-chip">${{_esc(String(p.num ?? '—'))}} · ${{_esc(p.name)}}</span>`).join('')}}</div>
+        <div class="el-unused-list">${{items.map(p => `<span class="el-unused-chip">${{_kitShirtHtml(p.num, modalTeam, 'pc-shirt')}}<span>${{_esc(p.name)}}</span></span>`).join('')}}</div>
       </div>`;
     }};
     const extraHtml = extras.length ? `<div class="el-extra">
