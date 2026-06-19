@@ -243,6 +243,66 @@ def test_team_scores_no_process_stats_still_works():
     assert brasil["score_resultado"] > alemanha["score_resultado"]
 
 
+def test_team_scores_advanced_metrics_aggregated_from_players():
+    """xG/xGP só existem por jogador (365Scores) — devem ser somados ao time."""
+    matches = pd.DataFrame([_match("j1", "Brasil", "Alemanha", 2, 1)])
+    stats = pd.DataFrame([
+        _team_stats("j1", "Brasil"),
+        _team_stats("j1", "Alemanha"),
+    ])
+    players = pd.DataFrame([
+        _player("j1", "Brasil", "A", expected_goals=0.8, expected_goals_prevented=0.5,
+                ground_duels_won=3, aerial_duels_won=2, shots_blocked=1),
+        _player("j1", "Brasil", "B", expected_goals=0.7, expected_goals_prevented=0.3),
+        _player("j1", "Alemanha", "C", expected_goals=0.3, expected_goals_prevented=-0.2),
+    ])
+    features = build_team_match_features(matches, stats, player_stats=players)
+    brasil = features[features["team"] == "Brasil"].iloc[0]
+    assert brasil["team_xg"] == pytest.approx(1.5)
+    assert brasil["team_xgp"] == pytest.approx(0.8)
+    # o xG do adversário deve virar xg_against no time
+    assert brasil["xg_against"] == pytest.approx(0.3)
+
+
+def test_team_scores_work_without_advanced_player_stats():
+    """Backward-compat: sem player_stats, o score ainda é calculado (advanced_coverage=0)."""
+    matches = pd.DataFrame([_match("j1", "Brasil", "Alemanha", 3, 0)])
+    stats = pd.DataFrame([
+        _team_stats("j1", "Brasil", shots=20, shots_on_target=8),
+        _team_stats("j1", "Alemanha", shots=4, shots_on_target=1),
+    ])
+    features = build_team_match_features(matches, stats)  # sem player_stats
+    scores = build_team_scores(features)
+    assert (scores["advanced_coverage"] == 0).all()
+    brasil = scores[scores["team"] == "Brasil"].iloc[0]
+    alemanha = scores[scores["team"] == "Alemanha"].iloc[0]
+    assert brasil["score_geral"] > alemanha["score_geral"]
+
+
+def test_team_scores_defesa_monotonic_with_advanced_data():
+    """Time que sofreu mais gols nunca pode ter defesa melhor — mesmo com xGP alto."""
+    matches = pd.DataFrame([
+        _match("j1", "Solido", "RivalA", 0, 0),
+        _match("j2", "Furado", "RivalB", 0, 3),
+    ])
+    stats = pd.DataFrame([
+        _team_stats("j1", "Solido"), _team_stats("j1", "RivalA"),
+        _team_stats("j2", "Furado"), _team_stats("j2", "RivalB"),
+    ])
+    players = pd.DataFrame([
+        _player("j1", "Solido", "S", expected_goals_prevented=0.1, ground_duels_won=5),
+        _player("j1", "RivalA", "Ra", expected_goals=0.5),
+        # Furado com xGP altíssimo (goleiro fez milagres) mas sofreu 3 gols
+        _player("j2", "Furado", "F", expected_goals_prevented=3.0, ground_duels_won=20),
+        _player("j2", "RivalB", "Rb", expected_goals=4.0),
+    ])
+    features = build_team_match_features(matches, stats, player_stats=players)
+    scores = build_team_scores(features)
+    solido = scores[scores["team"] == "Solido"].iloc[0]
+    furado = scores[scores["team"] == "Furado"].iloc[0]
+    assert solido["score_defesa"] > furado["score_defesa"]
+
+
 def test_team_scores_draw_gives_equal_resultado():
     matches = pd.DataFrame([_match("j1", "Brasil", "Alemanha", 1, 1)])
     features = build_team_match_features(matches, None)
@@ -738,6 +798,53 @@ def test_build_player_match_features_expands_roster_players_by_match():
 
     assert list(neymar["match_id"]) == ["j1", "j2"]
     assert neymar["appearances"].sum() == 0
+
+
+def test_build_player_match_features_reuses_known_id_for_roster_dnp_rows():
+    players = pd.DataFrame([
+        _player("j1", "Brasil", "Meia", position="CM", player_id="10"),
+        _player("j2", "Brasil", "Atacante", position="CF", player_id="9"),
+    ])
+    rosters = pd.DataFrame([
+        {"team": "Brasil", "player_name": "Meia", "squad_position": "M"},
+        {"team": "Brasil", "player_name": "Atacante", "squad_position": "F"},
+    ])
+
+    features = build_player_match_features(players, rosters=rosters)
+    meia = features[features["player_name"] == "Meia"].sort_values("match_id")
+    scores = build_player_scores(features)
+
+    assert list(meia["match_id"]) == ["j1", "j2"]
+    assert meia["player_slug"].nunique() == 1
+    assert scores[scores["player_name"] == "Meia"].shape[0] == 1
+
+
+def test_build_player_match_features_applies_aliases_to_rosters_too():
+    players = pd.DataFrame([
+        _player("j1", "Uruguai", "Agustín Cano", position="SUB", player_id="241466", appearances=1),
+    ])
+    rosters = pd.DataFrame([
+        {"team": "Uruguai", "player_name": "Agustín Cano", "squad_position": "M"},
+    ])
+
+    features = build_player_match_features(players, rosters=rosters)
+
+    assert set(features["player_name"]) == {"Agustín Canobbio"}
+    assert features.iloc[0]["roster_position"] == "M"
+
+
+def test_build_player_match_features_drops_empty_non_roster_sub_rows():
+    players = pd.DataFrame([
+        _player("j1", "Brasil", "Jogador Real", position="CM", player_id="10", appearances=1),
+        _player("j1", "Brasil", "Reserva Fantasma", position="SUB", player_id="99", appearances=0),
+    ])
+    rosters = pd.DataFrame([
+        {"team": "Brasil", "player_name": "Jogador Real", "squad_position": "M"},
+    ])
+
+    features = build_player_match_features(players, rosters=rosters)
+
+    assert set(features["player_name"]) == {"Jogador Real"}
 
 
 def test_build_player_match_features_preserves_roster_accent_collision():

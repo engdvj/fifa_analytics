@@ -111,7 +111,7 @@ def run_scores_pipeline() -> dict[str, Any]:
     stats_365 = _read_optional(GOLD_DIR / "fact_team_match_stats" / "365scores_enrichment.parquet")
 
     events = _read_optional(GOLD_DIR / "fact_events" / "canonical_events.parquet")
-    team_match_features = build_team_match_features(matches, team_stats, events, lineups, stats_365)
+    team_match_features = build_team_match_features(matches, team_stats, events, lineups, stats_365, player_stats)
     effective_weights = _load_latest_calibrated_weights()
     team_scores = build_team_scores(team_match_features, weights=effective_weights)
     team_recent_form = build_team_recent_form(team_match_features, n=3)
@@ -260,7 +260,9 @@ def _render_calibration_report(
 
     lines.append("\n## Pesos sugeridos para score_geral (vs. atuais)\n")
     if weight_calibration.get("status") == "ok":
-        lines.append(f"R² do modelo: {weight_calibration['r2']} | N jogos: {weight_calibration['n_jogos']}\n")
+        # modo processo usa 'n_jogos'; modo preditivo usa 'n_pares' (jogos N→N+1)
+        _amostra = weight_calibration.get("n_jogos", weight_calibration.get("n_pares", n_jogos))
+        lines.append(f"R² do modelo: {weight_calibration['r2']} | N jogos: {_amostra}\n")
         lines.append("| Componente | Peso atual | Peso sugerido |")
         lines.append("|---|---|---|")
         for component, current_weight in TEAM_SCORE_WEIGHTS.items():
@@ -623,9 +625,9 @@ generated_at: {utc_now_iso()}
 # numero fixo no texto, porque os pesos mudam a cada calibracao.
 _COMPONENT_EXPLANATION_TEMPLATES = {
     "score_resultado": "aproveitamento de pontos ponderado pela forca do adversario no momento do jogo — empatar com um time forte vale mais que empatar com um fraco ({peso} da nota geral)",
-    "score_ataque": "gols, chutes no alvo, key passes e expected assists por jogo (ESPN + 365Scores), ponderados por quao solida e a defesa historica do adversario ({peso})",
-    "score_defesa": "gols sofridos, chutes no alvo sofridos e jogos sem tomar gol, ponderados por quanto volume o adversario criou — defesa pouco testada (dominio total do proprio time) e atraida para o neutro, ja que nao foi testada ({peso})",
-    "score_eficiencia": "conversao de chutes em gol, chutes no alvo por chute e key passes por jogo (365Scores) — criar chances que nao terminam em gol tambem conta como eficiencia ofensiva, nao so a finalizacao ({peso})",
+    "score_ataque": "gols, xG (qualidade das chances criadas), chutes no alvo e key passes por jogo (ESPN + 365Scores), ponderados por quao solida e a defesa historica do adversario — xG entra onde ha cobertura 365Scores ({peso})",
+    "score_defesa": "gols sofridos (eixo dominante) e, dentro da faixa de gols, a QUALIDADE defensiva: xGP (gols evitados acima do esperado), bloqueios por chute sofrido e duelos ganhos — nao o volume de desarmes (que indica time pressionado); ponderado pela forca do adversario; defesa pouco testada e atraida para o neutro ({peso})",
+    "score_eficiencia": "conversao de chutes em gol, gols vs xG (finalizar acima do esperado), chutes no alvo por chute e key passes por jogo (365Scores) — criar chances que nao terminam em gol tambem conta como eficiencia ({peso})",
     "score_controle": "posse, passes, precisao e posse liquida (dribbles ganhos / posse perdida, via 365Scores) — estilo de jogo, peso baixo, mesmo ajuste de adversario ({peso})",
     "score_forca_relativa": "rating Elo ponderado por desempenho (gols, chutes no alvo, posse) — vencer um adversario forte vale mais que vencer um fraco. Peso escalado pela maturidade do Elo: no inicio do torneio, com todos os times no rating inicial, ainda nao ha forca relativa real para medir ({peso})",
 }
@@ -778,7 +780,7 @@ nivel_evidencia: {team.get('nivel_evidencia', '')}
 
 Ranking: **{_format_value(team.get('ranking_score_geral'))} de {total_teams}** selecoes — nivel de evidencia **{team.get('nivel_evidencia', '')}** ({jogos} jogo{'s' if jogos != 1 else ''} disputado{'s' if jogos != 1 else ''} dos 3 da fase de grupos; jogos extras no mata-mata so aumentam a confianca).
 
-A nota geral combina os seis componentes abaixo por media ponderada (pesos entre parenteses), calculados via z-score entre as selecoes do torneio — isso preserva a distancia real de desempenho, nao so o ranking ordinal. Resultado e Forca Relativa tem peso de design fixo (35% e 15%, este ultimo escalado pela maturidade do Elo — ver nota abaixo); Ataque, Defesa, Eficiencia e Controle sao recalibrados a cada jogo novo via regressao (RidgeCV) contra saldo de gols real, usando estatisticas brutas de processo (chutes, posse, key passes etc.) — ver [[reports/rankings/calibracao_pesos\\|historico de calibracao]] para a evolucao dos pesos sugeridos.
+A nota geral combina os seis componentes abaixo por media ponderada (pesos entre parenteses), calculados via z-score entre as selecoes do torneio — isso preserva a distancia real de desempenho, nao so o ranking ordinal. Resultado e Forca Relativa tem peso de design fixo (35% e 15%, este ultimo escalado pela maturidade do Elo — ver nota abaixo); Ataque, Defesa, Eficiencia e Controle sao recalibrados a cada jogo novo via regressao (RidgeCV) contra saldo de gols real, usando estatisticas de processo (chutes, posse, key passes, xG e xGP onde ha cobertura 365Scores) — ver [[reports/rankings/calibracao_pesos\\|historico de calibracao]] para a evolucao dos pesos sugeridos.
 
 Maturidade do Elo: no inicio do torneio todos os times comecam no mesmo rating (1500) — vencer ainda nao prova forca relativa de fato, e o mesmo sinal que Resultado ja capta. O peso de Forca Relativa cresce organicamente conforme os ratings se diferenciam de verdade (medido pela variancia real do Elo vs. o teto teorico para o numero de jogos disputados); a fracao "nao ganha" e transferida para Resultado.
 
@@ -1124,9 +1126,9 @@ def _team_score_explanation(
 
 - **Nota geral**: nota de 0 a 100, media ponderada de seis componentes. Calculados via z-score, preservando distancia absoluta entre selecoes.
 - **Resultado** (peso {resultado_pct}): aproveitamento real de pontos. Quem vence mais jogos tem nota mais alta independente do estilo. Peso fixo de design — absorve a fracao de Forca Relativa ainda nao "ganha" pela maturidade do Elo (ver abaixo).
-- **Ataque** (peso {p('score_ataque')}): gols, chutes no alvo, key passes e expected assists por jogo (ESPN + 365Scores). Sem chutes totais isolados — mede qualidade, nao volume bruto.
-- **Defesa** (peso {p('score_defesa')}): gols sofridos, chutes no alvo sofridos e jogos sem tomar gol.
-- **Eficiencia** (peso {p('score_eficiencia')}): conversao de chutes em gol, chutes no alvo por chute e key passes por jogo. Distinto de ataque: ataque mede producao, eficiencia mede aproveitamento — criar chance sem converter tambem conta.
+- **Ataque** (peso {p('score_ataque')}): gols, xG (qualidade das chances criadas), chutes no alvo e key passes por jogo (ESPN + 365Scores). Mede qualidade da criacao, nao volume bruto de chutes; xG entra onde ha cobertura 365Scores.
+- **Defesa** (peso {p('score_defesa')}): gols sofridos define a faixa; dentro dela, a QUALIDADE defensiva sobe a nota — xGP (gols evitados acima do esperado), bloqueios por chute sofrido e duelos ganhos. NAO usa volume de desarmes/cortes (volume alto = time pressionado, nao solido). xGP/duelos entram onde ha cobertura 365Scores.
+- **Eficiencia** (peso {p('score_eficiencia')}): conversao de chutes em gol, gols vs xG (finalizar acima do esperado), chutes no alvo por chute e key passes por jogo. Distinto de ataque: ataque mede producao, eficiencia mede aproveitamento.
 - **Controle** (peso {p('score_controle')}): posse, passes, precisao e posse liquida (dribbles ganhos / posse perdida, via 365Scores). Peso baixo — estilo de jogo nao e determinante de qualidade.
 - **Forca relativa** (peso {forca_pct}): rating Elo. O placar real decide a faixa do ajuste — vitoria sempre acima de empate, empate sempre acima de derrota, a hierarquia nunca se inverte. Mas a posicao exata dentro de cada faixa vem do indice de desempenho (gols, chutes no alvo, posse): uma vitoria sofrida (ganhou jogando pior que o adversario) ganha menos rating que uma vitoria dominante com a mesma margem de gols, e o mesmo vale para empates (dominado vs. equilibrado) e derrotas. Contextualiza tambem pelo adversario enfrentado — vencer um time forte vale mais que vencer um fraco, efeito que so aparece a partir do 2o jogo de cada selecao, quando os ratings ja deixaram de ser todos iguais. **O peso exibido aqui ja reflete a maturidade atual do Elo** (cresce conforme os ratings se diferenciam de verdade); o peso de design pleno e {p('score_forca_relativa')}.
 - **Disciplina**: faltas, cartoes amarelos e vermelhos por jogo. Nota alta = time disciplinado. Nao entra na nota geral — e informativo.
@@ -1134,7 +1136,7 @@ def _team_score_explanation(
 - **Tendencia**: variacao de posicao no ranking geral em relacao ao jogo anterior (`↑3` subiu 3, `↓2` caiu 2, `→` estavel ou primeiro jogo).
 - **Evidencia**: estabilidade da nota (`baixa`, `media`, `alta`). Atinge confianca plena com 3 jogos — os 3 da fase de grupos.
 
-Ataque, Defesa, Eficiencia e Controle sao recalibrados a cada jogo novo finalizado via regressao (RidgeCV) contra saldo de gols real — ver [[reports/rankings/calibracao_pesos\\|historico de calibracao]]. Fontes de dados: ESPN (estatisticas de equipe e jogador desde o inicio do torneio) e 365Scores (enriquecimento com formacao tatica, expected assists, key passes e dribbles ganhos, cobrindo os jogos ja finalizados)."""
+Ataque, Defesa, Eficiencia e Controle sao recalibrados a cada jogo novo finalizado via regressao (RidgeCV) contra saldo de gols real — ver [[reports/rankings/calibracao_pesos\\|historico de calibracao]]. Fontes de dados: ESPN (estatisticas de equipe e jogador desde o inicio do torneio) e 365Scores (enriquecimento com formacao tatica, xG, xGP, expected assists, key passes, duelos e dribbles ganhos, cobrindo os jogos ja finalizados)."""
 
 
 def _format_value(value: Any) -> str:

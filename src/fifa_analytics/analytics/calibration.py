@@ -13,18 +13,21 @@ from sklearn.preprocessing import StandardScaler
 # squad_ataque tenta prever gols, não posse de bola, por exemplo.
 COMPONENT_VALIDATION_TARGETS: dict[str, dict[str, list[str] | str]] = {
     "score_ataque": {
-        "features": ["shots", "shots_on_target", "key_passes", "expected_assists"],
+        # team_xg = qualidade das chances criadas (melhor preditor de gol que volume)
+        "features": ["shots", "shots_on_target", "key_passes", "expected_assists", "team_xg"],
         "target": "goals_for",
     },
     "score_defesa": {
         # solidez = sofrer pouco; tackles/interceptions/clearances medem volume
         # de ações (time pressionado), não solidez — fora (ver PROCESS_FEATURES).
-        "features": ["shots_against", "shots_on_target_against"],
+        # xg_against (qualidade das chances concedidas) e team_xgp (gols evitados
+        # acima do esperado) SÃO sinais de solidez, não de volume — entram.
+        "features": ["shots_against", "shots_on_target_against", "xg_against", "team_xgp"],
         "target": "goals_against",
         "lower_is_better_target": True,
     },
     "score_eficiencia": {
-        "features": ["shot_accuracy", "goal_conversion", "key_passes"],
+        "features": ["shot_accuracy", "goal_conversion", "key_passes", "team_xg"],
         "target": "goals_for",
     },
     "score_controle": {
@@ -46,9 +49,12 @@ COMPONENT_VALIDATION_TARGETS: dict[str, dict[str, list[str] | str]] = {
 # medem o oposto: um time que desarma/corta muito é um time PRESSIONADO (está
 # apanhando), o que polui o sinal e derrubava o peso da defesa artificialmente.
 PROCESS_FEATURES: dict[str, list[str]] = {
-    "ataque": ["shots", "shots_on_target", "key_passes", "expected_assists"],
-    "defesa": ["shots_against", "shots_on_target_against"],
-    "eficiencia": ["shot_accuracy", "goal_conversion"],
+    "ataque": ["shots", "shots_on_target", "key_passes", "expected_assists", "team_xg"],
+    # defesa = solidez (sofrer pouco). Adiciona xg_against (qualidade das chances
+    # concedidas) e team_xgp (gols evitados acima do esperado) — ambos são sinais
+    # de SOLIDEZ, não de volume de ações (que indicaria time pressionado).
+    "defesa": ["shots_against", "shots_on_target_against", "xg_against", "team_xgp"],
+    "eficiencia": ["shot_accuracy", "goal_conversion", "team_xg"],
     "controle": ["possession", "passes", "pass_accuracy", "touches", "dribbles_won"],
 }
 
@@ -136,11 +142,16 @@ def calibrate_team_score_weights(
 ) -> dict[str, float | int | str | dict]:
     """Calibra os pesos relativos dos componentes de processo do score_geral.
 
-    Por padrão usa um alvo híbrido: combinação ponderada de pontos (3/1/0) e
-    saldo de gols, ambos normalizados por z-score antes de combinar.
-    ``alpha_hibrido`` controla o peso de pontos (0.6) vs. saldo de gols (0.4):
-    pontos capturam se o time ganhou, saldo captura por quanto dominou — os
-    dois se complementam sem precisar de um modelo multivariado.
+    Por padrão usa um alvo HÍBRIDO de TRÊS sinais do que aconteceu no jogo, cada
+    um z-normalizado antes de combinar:
+      • pontos (3/1/0) — se o time GANHOU (o que mais importa);
+      • saldo de gols — por QUANTO dominou (granularidade que pontos não têm);
+      • saldo de xG (gols esperados) — se MERECEU o resultado, filtrando sorte/
+        azar de finalização (um 1-0 com 0.2 xG contra 2.5 do rival foi sorte).
+    Pesos: pontos = ``alpha_hibrido`` (0.6); o restante (0.4) é dividido entre
+    saldo de gols e saldo de xG. Onde NÃO há cobertura de xG (jogo sem 365Scores),
+    o saldo de xG cai para 0 (neutro após z-norm) e os outros dois absorvem — não
+    descarta o jogo. Combinar os três dá um alvo mais robusto que o placar puro.
 
     Usa RidgeCV (regularização L2) para lidar com amostras pequenas sem
     superajustar — o alpha é escolhido por validação cruzada interna.
@@ -164,7 +175,24 @@ def calibrate_team_score_weights(
             std = s.std(ddof=0)
             return (s - s.mean()) / std if std > 0 else s - s.mean()
 
-        data["_target"] = alpha_hibrido * _znorm(points) + (1 - alpha_hibrido) * _znorm(goal_diff)
+        # saldo de xG (mérito): só conta onde há cobertura 365Scores; ausente → 0
+        # (neutro, não penaliza nem infla quem não tem o dado).
+        xg_for = pd.to_numeric(data.get("team_xg"), errors="coerce") if "team_xg" in data.columns else None
+        xg_against = pd.to_numeric(data.get("xg_against"), errors="coerce") if "xg_against" in data.columns else None
+        rest = 1.0 - alpha_hibrido
+        if xg_for is not None and xg_against is not None and (xg_for.notna() | xg_against.notna()).any():
+            xg_diff = (xg_for.fillna(0) - xg_against.fillna(0))
+            has_xg = xg_for.notna() | xg_against.notna()
+            xg_z = _znorm(xg_diff).where(has_xg, 0.0)  # sem cobertura → 0 (neutro)
+            w_goal, w_xg = rest * 0.5, rest * 0.5
+            data["_target"] = (
+                alpha_hibrido * _znorm(points)
+                + w_goal * _znorm(goal_diff)
+                + w_xg * xg_z
+            )
+        else:
+            # sem xG em lugar nenhum: cai no híbrido clássico pontos + saldo
+            data["_target"] = alpha_hibrido * _znorm(points) + rest * _znorm(goal_diff)
         target_col = "_target"
     elif target == "goal_diff":
         data["goal_diff"] = pd.to_numeric(data["goals_for"], errors="coerce") - pd.to_numeric(
@@ -183,7 +211,11 @@ def calibrate_team_score_weights(
         # Padroniza cada feature antes de agregar — sem isso, "passes" (~500)
         # dominaria "shot_accuracy" (~0-1) só pela escala, não pela relevância real.
         standardized = (numeric - numeric.mean()) / numeric.std(ddof=0).replace(0, 1)
-        component_features[component] = standardized.mean(axis=1)
+        # skipna: features avançadas (team_xg/xg_against/team_xgp) são NaN nos
+        # jogos sem cobertura 365Scores. Tirar a média ignorando NaN evita que o
+        # .dropna() lá embaixo descarte todo jogo sem essas colunas — o componente
+        # ainda vale pela features que ele TEM (chutes etc.).
+        component_features[component] = standardized.mean(axis=1, skipna=True)
 
     if not component_features:
         return {"status": "dados_insuficientes"}
@@ -265,6 +297,34 @@ def calibrate_team_score_weights(
     }
 
 
+# Teto do peso de um único componente de PROCESSO. A calibração às vezes
+# inflava um componente (ex.: score_eficiencia chegou a 0.27, quase igual aos
+# 0.35 fixos do resultado) — um refinamento de processo não pode rivalizar com
+# o resultado real. Com teto de 0.18, nenhum processo passa de ~metade do peso
+# do resultado; o excedente é redistribuído entre os demais processos.
+MAX_PROCESS_WEIGHT = 0.18
+
+
+def _cap_and_redistribute(weights: dict[str, float], cap: float) -> dict[str, float]:
+    """Limita cada peso a ``cap`` e redistribui o excedente proporcionalmente
+    entre os que ainda têm folga, iterando até estabilizar. O total é preservado."""
+    capped = dict(weights)
+    for _ in range(len(capped) + 1):
+        excess = sum(v - cap for v in capped.values() if v > cap)
+        if excess <= 1e-9:
+            break
+        room = {k: cap - v for k, v in capped.items() if v < cap}
+        room_total = sum(room.values())
+        if room_total <= 1e-9:
+            break  # todos no teto — nada a redistribuir
+        for k in capped:
+            if capped[k] >= cap:
+                capped[k] = cap
+            else:
+                capped[k] += excess * (room[k] / room_total)
+    return capped
+
+
 def apply_calibrated_weights(
     base_weights: dict[str, float],
     weight_calibration: dict[str, Any],
@@ -272,25 +332,23 @@ def apply_calibrated_weights(
 ) -> dict[str, float]:
     """Aplica os pesos sugeridos pela calibração.
 
-    Modo preditivo (modo="preditivo_6_pesos"): todos os 6 componentes foram
-    calibrados juntos — usa os pesos sugeridos diretamente, redistribuídos
-    para somar 1.0, sem fixar nenhum componente.
-
-    Modo processo (padrão): resultado e força relativa ficam fixos em
-    base_weights; os 4 componentes de processo são redistribuídos na proporção
-    sugerida pela regressão, preenchendo o espaço restante (1.0 - fixos).
+    EM AMBOS os modos (processo e preditivo), score_resultado e
+    score_forca_relativa ficam FIXOS em base_weights (35% e 15% de design): são os
+    sinais mais confiáveis (o que de fato aconteceu + força relativa acumulada) e
+    NÃO podem ser atropelados pela regressão — com amostra pequena ela dava
+    resultado=4%/controle=37% (ruído travestido de aprendizado). A regressão
+    recalibra apenas os 4 componentes de PROCESSO (ataque/defesa/eficiência/
+    controle), na proporção sugerida, dentro do orçamento restante (1.0 - fixos),
+    com teto de ``MAX_PROCESS_WEIGHT`` por componente. A diferença entre os modos
+    é só COMO os pesos de processo são estimados (processo = regressão no mesmo
+    jogo; preditivo = regressão contra o jogo seguinte), não QUAIS são fixos.
     """
     if weight_calibration.get("status") != "ok":
         return dict(base_weights)
 
     suggested = weight_calibration.get("pesos_sugeridos", {})
 
-    if weight_calibration.get("modo") == "preditivo_6_pesos":
-        # Todos os 6 pesos vêm da regressão — normaliza para somar 1.0
-        total = sum(suggested.get(c, 0.0) for c in base_weights) or 1.0
-        return {c: round(suggested.get(c, 0.0) / total, 4) for c in base_weights}
-
-    # Modo processo: fixos preservados, variáveis redistribuídos
+    # fixos preservados, processo redistribuído (vale p/ processo E preditivo)
     fixed_total = sum(base_weights.get(c, 0.0) for c in fixed_components)
     remaining = max(1.0 - fixed_total, 0.0)
 
@@ -300,9 +358,14 @@ def apply_calibrated_weights(
 
     suggested_total = sum(suggested[c] for c in calibrated_components) or 1.0
 
+    # pesos de processo na escala do orçamento restante, antes do teto
+    raw = {c: remaining * suggested[c] / suggested_total for c in calibrated_components}
+    # aplica o teto (absoluto) sobre cada processo e redistribui o excedente
+    capped = _cap_and_redistribute(raw, MAX_PROCESS_WEIGHT)
+
     result = dict(base_weights)
     for component in calibrated_components:
-        result[component] = round(remaining * suggested[component] / suggested_total, 4)
+        result[component] = round(capped[component], 4)
     return result
 
 
@@ -364,6 +427,13 @@ def calibrate_full_weights_predictive(
             row = {col: hist_row.iloc[0].get(col, np.nan) for col in available_score_cols}
             row["goal_diff_next"] = goals_for - goals_against
             row["points_next"] = points if not pd.isna(points) else np.nan
+            # saldo de xG do PRÓXIMO jogo (mérito) — entra no alvo onde há cobertura
+            xgf = pd.to_numeric(next_game.get("team_xg"), errors="coerce")
+            xga = pd.to_numeric(next_game.get("xg_against"), errors="coerce")
+            row["xg_diff_next"] = (
+                (0 if pd.isna(xgf) else xgf) - (0 if pd.isna(xga) else xga)
+                if not (pd.isna(xgf) and pd.isna(xga)) else np.nan
+            )
             rows.append(row)
 
     if len(rows) < 5:
@@ -386,8 +456,19 @@ def calibrate_full_weights_predictive(
     goal_diff = pd.to_numeric(df["goal_diff_next"], errors="coerce")
     if "points_next" in df.columns and df["points_next"].notna().sum() >= 5:
         points = pd.to_numeric(df["points_next"], errors="coerce")
-        y = (alpha_hibrido * _znorm(points) + (1 - alpha_hibrido) * _znorm(goal_diff)).to_numpy()
-        target_label = f"hibrido(pontos={alpha_hibrido:.0%}, saldo={1-alpha_hibrido:.0%})_next"
+        rest = 1.0 - alpha_hibrido
+        # saldo de xG do próximo jogo (mérito) entra se houver cobertura suficiente;
+        # ausência → 0 (neutro), e os termos de pontos/saldo absorvem.
+        xg_next = pd.to_numeric(df.get("xg_diff_next"), errors="coerce") if "xg_diff_next" in df.columns else None
+        if xg_next is not None and xg_next.notna().sum() >= 5:
+            has_xg = xg_next.notna()
+            xg_z = _znorm(xg_next.fillna(0)).where(has_xg, 0.0)
+            w_goal, w_xg = rest * 0.5, rest * 0.5
+            y = (alpha_hibrido * _znorm(points) + w_goal * _znorm(goal_diff) + w_xg * xg_z).to_numpy()
+            target_label = f"hibrido(pontos={alpha_hibrido:.0%}, saldo={w_goal:.0%}, xG={w_xg:.0%})_next"
+        else:
+            y = (alpha_hibrido * _znorm(points) + rest * _znorm(goal_diff)).to_numpy()
+            target_label = f"hibrido(pontos={alpha_hibrido:.0%}, saldo={rest:.0%})_next"
     else:
         y = goal_diff.to_numpy()
         target_label = "goal_diff_next"

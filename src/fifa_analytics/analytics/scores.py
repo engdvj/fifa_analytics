@@ -108,12 +108,49 @@ _POSITION_TO_PROFILE: dict[str, str] = {
 # Features por partida — seleções
 # ---------------------------------------------------------------------------
 
+def _aggregate_player_advanced_to_team(player_stats: pd.DataFrame | None) -> pd.DataFrame:
+    """Soma as métricas avançadas da 365Scores (que só existem por JOGADOR) ao
+    nível time-jogo. xG, xGP e duelos não vêm no team_stats da ESPN nem no
+    enrichment 365Scores de time — só nas linhas de jogador. Aqui agregamos o
+    elenco de cada time num jogo para ter o sinal coletivo correspondente.
+
+    Os ratios de duelo (ground/aerial_duels_won) já vêm como contagem GANHA por
+    jogador (numerador do ratio), então a soma do time é o total de duelos
+    ganhos — usado depois como taxa contra o total disputado (estimado)."""
+    if player_stats is None or player_stats.empty:
+        return pd.DataFrame()
+    cols = {
+        "expected_goals": "team_xg",
+        "expected_goals_prevented": "team_xgp",
+        "expected_goals_on_target_conceded": "team_xgot_conceded",
+        "tackles_won": "team_tackles_won",
+        "ground_duels_won": "team_ground_duels_won",
+        "aerial_duels_won": "team_aerial_duels_won",
+        "shots_blocked": "team_shots_blocked",
+        "ball_recovery": "team_ball_recovery",
+    }
+    present = {src: dst for src, dst in cols.items() if src in player_stats.columns}
+    if not present or not {"match_id", "team"}.issubset(player_stats.columns):
+        return pd.DataFrame()
+    agg = (
+        player_stats.groupby(["match_id", "team"], dropna=False)[list(present)]
+        .sum(min_count=1)
+        .rename(columns=present)
+        .reset_index()
+    )
+    # marca quais time-jogos têm de fato cobertura 365Scores (qualquer métrica
+    # avançada não-nula) — para não tratar 0 artificial como "defesa perfeita".
+    agg["advanced_stats_available"] = agg[list(present.values())].notna().any(axis=1)
+    return agg
+
+
 def build_team_match_features(
     matches: pd.DataFrame,
     team_stats: pd.DataFrame | None = None,
     events: pd.DataFrame | None = None,
     lineups: pd.DataFrame | None = None,
     stats_365: pd.DataFrame | None = None,
+    player_stats: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     finished = matches[matches["status"] == "finalizado"].copy()
     rows = []
@@ -148,6 +185,12 @@ def build_team_match_features(
         enrich = enrich.drop(columns=["formation"])
         features = features.merge(enrich, on=["match_id", "team"], how="left", suffixes=("", "_365"))
         features = features.merge(formation_365, on=["match_id", "team"], how="left")
+
+    # Métricas avançadas agregadas do elenco (xG/xGP/duelos) — só existem por
+    # jogador na 365Scores, então somamos ao nível time-jogo aqui.
+    player_team_adv = _aggregate_player_advanced_to_team(player_stats)
+    if not player_team_adv.empty:
+        features = features.merge(player_team_adv, on=["match_id", "team"], how="left")
 
     # Gols contra SOFRIDOS por time/jogo. No fact_events, o evento gol_contra é
     # atribuído ao time BENEFICIADO; quem sofreu o gol contra é o adversário
@@ -196,13 +239,20 @@ def build_team_match_features(
     # ataque/defesa/eficiência/controle pela criação real do rival naquele
     # jogo: segurar 0 gols contra um time que criou muito vale mais do que
     # contra um time que praticamente não chegou ao ataque.
-    opponent_stats = features[["match_id", "team", "shots", "shots_on_target", "possession", "passes"]].rename(columns={
+    _opp_src_cols = ["match_id", "team", "shots", "shots_on_target", "possession", "passes"]
+    _opp_rename = {
         "team": "opponent",
         "shots": "shots_against",
         "shots_on_target": "shots_on_target_against",
         "possession": "possession_against",
         "passes": "passes_against",
-    })
+    }
+    # xG do adversário NESSE jogo = qualidade real das chances que a defesa
+    # concedeu (melhor sinal de pressão sofrida do que volume de chutes).
+    if "team_xg" in features.columns:
+        _opp_src_cols.append("team_xg")
+        _opp_rename["team_xg"] = "xg_against"
+    opponent_stats = features[_opp_src_cols].rename(columns=_opp_rename)
     features = features.merge(opponent_stats, on=["match_id", "opponent"], how="left")
     features["opponent_stats_available"] = features[["shots_against", "shots_on_target_against"]].notna().any(axis=1)
 
@@ -567,6 +617,15 @@ def build_team_scores(
         "interceptions": "sum",
         "clearances": "sum",
         "final_third_possession_won": "sum",
+        # Métricas avançadas agregadas do elenco (365Scores) — entram no score
+        # de ataque/defesa/eficiência quando há cobertura. Ver build_team_match_features.
+        "team_xg": "sum",
+        "team_xgp": "sum",
+        "team_ground_duels_won": "sum",
+        "team_aerial_duels_won": "sum",
+        "team_shots_blocked": "sum",
+        "xg_against": "sum",
+        "advanced_stats_available": "sum",
     }
     available = {c: agg for c, agg in aggregations.items() if c in team_match_features.columns}
     scores = team_match_features.groupby("team", dropna=False).agg(available).reset_index()
@@ -629,12 +688,25 @@ def build_team_scores(
     # o resto ficam 0 — não inflar nem penalizar times sem essa fonte ainda,
     # por isso entram em score_eficiencia/score_controle só quando há
     # cobertura real (ver checagem `.gt(0).any()` mais abaixo).
-    for _col_365 in ["key_passes", "expected_assists", "dribbles_won", "touches", "posse_perdida"]:
+    for _col_365 in ["key_passes", "expected_assists", "dribbles_won", "touches", "posse_perdida",
+                     "team_xg", "team_xgp", "team_ground_duels_won", "team_aerial_duels_won",
+                     "team_shots_blocked", "xg_against", "advanced_stats_available"]:
         if _col_365 not in scores.columns:
             scores[_col_365] = 0.0
     scores["key_passes_por_jogo"] = _safe_divide(scores["key_passes"], scores["jogos"])
     scores["expected_assists_por_jogo"] = _safe_divide(scores["expected_assists"], scores["jogos"])
     scores["dribbles_won_por_jogo"] = _safe_divide(scores["dribbles_won"], scores["jogos"])
+    # Médias por jogo das métricas avançadas — usadas em ataque/defesa/eficiência
+    # apenas onde há cobertura 365Scores (advanced_stats_available > 0).
+    scores["xg_por_jogo"] = _safe_divide(scores["team_xg"], scores["jogos"])
+    scores["xgp_por_jogo"] = _safe_divide(scores["team_xgp"], scores["jogos"])
+    scores["xg_against_por_jogo"] = _safe_divide(scores["xg_against"], scores["jogos"])
+    scores["duels_won_por_jogo"] = _safe_divide(
+        scores["team_ground_duels_won"] + scores["team_aerial_duels_won"], scores["jogos"])
+    scores["shots_blocked_por_jogo"] = _safe_divide(scores["team_shots_blocked"], scores["jogos"])
+    # cobertura: fração dos jogos do time com dados avançados (365Scores). Atenua
+    # o sinal avançado proporcionalmente — 1 jogo coberto de 3 não vale tanto.
+    scores["advanced_coverage"] = _safe_divide(scores["advanced_stats_available"], scores["jogos"]).clip(0, 1)
     # posse_liquida: dribbles ganhos relativos à posse perdida — controle de
     # qualidade não é só ter a bola, é manter o domínio em duelos (driblar
     # com sucesso) sem entregá-la com frequência (possession_lost).
@@ -718,7 +790,15 @@ def build_team_scores(
     _og_for = scores.get("own_goals_for", pd.Series(0, index=scores.index)).fillna(0)
     _gols_ataque_por_jogo = _safe_divide((scores["gols_pro"] - _og_for).clip(lower=0), scores["jogos"])
     _ataque_gol = _zscore_to_100(_gols_ataque_por_jogo * scores["ataque_ctx"])
+    # componente de volume/qualidade de chance: chutes no alvo medem volume; xG
+    # mede a QUALIDADE das chances criadas (um chute de dentro da área vale mais
+    # que um de fora). Onde há cobertura 365Scores, mistura xG no termo de volume
+    # proporcional à cobertura — refina o sinal sem descartar quem não tem xG.
     _ataque_vol = _zscore_to_100(scores["chutes_no_alvo_por_jogo"] * scores["ataque_ctx"])
+    if scores["advanced_coverage"].gt(0).any():
+        _ataque_xg = _zscore_to_100(scores["xg_por_jogo"] * scores["ataque_ctx"])
+        _cov = scores["advanced_coverage"]
+        _ataque_vol = _ataque_vol * (1 - _cov) + _ataque_xg * _cov
     _ataque_raw = _ataque_gol * 0.70 + _ataque_vol * 0.30
     scores["score_ataque"] = _apply_confidence(_ataque_raw, _amostra_conf)
 
@@ -772,6 +852,28 @@ def build_team_scores(
     # mérito contextual ∈ [-1,+1]: segurar volume sob pressão de adversário forte.
     # Escalado a ±40% do gap local — o ajuste fica sempre menor que meia-banda.
     _merito = _zscore_to_100(_neutralizados * _defesa_ctx_q)  # 0..100, média ~50
+
+    # --- Eficiência defensiva (365Scores) ---
+    # NÃO usa volume bruto de desarmes/cortes (volume alto = time PRESSIONADO, não
+    # sólido — ver nota de design em calibration.py). Usa QUALIDADE:
+    #  • xGP/jogo: gols evitados acima do esperado (defesa + goleiro batendo o xG
+    #    concedido) — o sinal mais limpo de solidez sob finalização real;
+    #  • bloqueios por chute sofrido: interromper a finalização antes do gol,
+    #    normalizado pelo volume sofrido (não premia quem só apanha muito);
+    #  • duelos ganhos/jogo: domínio nos confrontos diretos.
+    # Só entra onde há cobertura 365Scores; o peso é atenuado por advanced_coverage.
+    if scores["advanced_coverage"].gt(0).any():
+        _blocks_per_shot = _safe_divide(
+            scores["team_shots_blocked"], scores["chutes_sofridos"].clip(lower=1))
+        _def_quality = _mean_score([
+            _zscore_to_100(scores["xgp_por_jogo"]),
+            _zscore_to_100(_blocks_per_shot),
+            _zscore_to_100(scores["duels_won_por_jogo"]),
+        ])  # 0..100, média ~50
+        # mistura no mérito proporcional à cobertura: sem cobertura, mérito = só
+        # o de volume neutralizado; com cobertura plena, metade vem da qualidade.
+        _cov = scores["advanced_coverage"]
+        _merito = _merito * (1 - 0.5 * _cov) + _def_quality * (0.5 * _cov)
     _ajuste = ((_merito - 50.0) / 50.0).clip(-1, 1) * _gap_local * 0.40
 
     _defesa_raw = (_banda_base + _ajuste).clip(0, 100)
@@ -810,7 +912,24 @@ def build_team_scores(
     # times com dado real contra times com 0 artificial.
     if scores["key_passes_por_jogo"].gt(0).any():
         _eficiencia_components.append(_zscore_to_100(scores["key_passes_por_jogo"] * scores["eficiencia_ctx"]))
-    scores["score_eficiencia"] = _apply_confidence(_mean_score(_eficiencia_components), _amostra_conf)
+    # gols vs xG: converter ACIMA do esperado é eficiência de finalização real
+    # (clínico na frente do gol), independente de volume. Razão gols/xG > 1 =
+    # superou o esperado. Só entra com cobertura 365Scores.
+    if scores["advanced_coverage"].gt(0).any() and scores["team_xg"].gt(0).any():
+        _gols_vs_xg = _safe_divide(scores["gols_pro"] - _og_for.clip(lower=0), scores["team_xg"].clip(lower=0.1))
+        _eficiencia_components.append(_zscore_to_100(_gols_vs_xg))
+    _eficiencia_raw = _mean_score(_eficiencia_components)
+
+    # Guarda de placar: converter bem numa GOLEADA SOFRIDA não é eficiência real
+    # (ex.: Curaçao marcou 1 em 8 chutes numa derrota de 1-7 e cravava eficiência
+    # alta, ficando à frente da Argélia que perdeu por 0-3). Times com saldo de
+    # gols/jogo muito negativo têm a eficiência atraída para o neutro (50),
+    # proporcionalmente ao tamanho da derrota: -1 ainda quase pleno, -3 já bem
+    # atenuado, -5+ praticamente neutro. Saldo >= 0 não sofre atenuação.
+    _saldo_jogo = _safe_divide(scores["saldo_gols"], scores["jogos"])
+    _eficiencia_outcome_factor = (1.0 + _saldo_jogo.clip(upper=0) / 4.0).clip(lower=0.1)
+    _eficiencia_dampened = 50.0 + (_eficiencia_raw - 50.0) * _eficiencia_outcome_factor
+    scores["score_eficiencia"] = _apply_confidence(_eficiencia_dampened, _amostra_conf)
 
     # score_controle: domínio de bola/jogo — peso baixo, não determina qualidade.
     # Dois grupos com pesos diferentes (CORE 70% / COMPLEMENTOS 30%):
@@ -957,10 +1076,29 @@ def _add_unique_player_slugs(features: pd.DataFrame) -> pd.DataFrame:
     )
     identity_cols = ["team", "player_name"]
     if "player_id" in out.columns and out["player_id"].notna().any():
+        out["_resolved_player_id"] = out["player_id"].astype("object")
+        valid_player_id = out["player_id"].notna() & out["player_id"].astype(str).str.strip().ne("")
+        known_ids = out.loc[valid_player_id, ["team", "player_name", "player_id"]].copy()
+        known_ids["player_id"] = known_ids["player_id"].astype(str)
+        unique_ids = (
+            known_ids.drop_duplicates()
+            .groupby(["team", "player_name"])["player_id"]
+            .agg(lambda values: values.iloc[0] if values.nunique() == 1 else pd.NA)
+            .dropna()
+            .to_dict()
+        )
+        missing_player_id = ~valid_player_id
+        if unique_ids and missing_player_id.any():
+            out.loc[missing_player_id, "_resolved_player_id"] = out.loc[missing_player_id].apply(
+                lambda row: unique_ids.get((row.get("team"), row.get("player_name")), row.get("player_id")),
+                axis=1,
+            )
         out["_player_identity"] = out.apply(
             lambda row: (
                 str(row.get("team")),
-                str(row.get("player_id")) if pd.notna(row.get("player_id")) and row.get("player_id") != "" else str(row.get("player_name")),
+                str(row.get("_resolved_player_id"))
+                if pd.notna(row.get("_resolved_player_id")) and str(row.get("_resolved_player_id")).strip()
+                else str(row.get("player_name")),
             ),
             axis=1,
         )
@@ -968,7 +1106,11 @@ def _add_unique_player_slugs(features: pd.DataFrame) -> pd.DataFrame:
         out["_player_identity"] = out.apply(lambda row: tuple(str(row.get(c)) for c in identity_cols), axis=1)
 
     identity_rows = (
-        out[["_base_player_slug", "_player_identity", "player_id"] if "player_id" in out.columns else ["_base_player_slug", "_player_identity"]]
+        out[
+            ["_base_player_slug", "_player_identity", "_resolved_player_id"]
+            if "_resolved_player_id" in out.columns
+            else ["_base_player_slug", "_player_identity"]
+        ]
         .drop_duplicates(["_base_player_slug", "_player_identity"])
         .sort_values(["_base_player_slug", "_player_identity"])
         .reset_index(drop=True)
@@ -980,7 +1122,7 @@ def _add_unique_player_slugs(features: pd.DataFrame) -> pd.DataFrame:
         base = row["_base_player_slug"]
         if int(row["_collision_count"]) <= 1:
             return base
-        player_id = row.get("player_id") if "player_id" in row else None
+        player_id = row.get("_resolved_player_id") if "_resolved_player_id" in row else None
         suffix = slugify(player_id) if player_id is not None and pd.notna(player_id) and str(player_id) else str(int(row["_collision_index"]))
         return f"{base}_{suffix}"
 
@@ -990,7 +1132,7 @@ def _add_unique_player_slugs(features: pd.DataFrame) -> pd.DataFrame:
         on=["_base_player_slug", "_player_identity"],
         how="left",
     )
-    return out.drop(columns=["_base_player_slug", "_player_identity"], errors="ignore")
+    return out.drop(columns=["_base_player_slug", "_player_identity", "_resolved_player_id"], errors="ignore")
 
 
 def build_player_match_features(
@@ -1010,6 +1152,7 @@ def build_player_match_features(
     if lineups is not None and not lineups.empty:
         lineups = apply_player_aliases(lineups)
     if rosters is not None and not rosters.empty:
+        rosters = apply_player_aliases(rosters)
         detect_name_mismatches(player_stats, rosters)
 
     metric_columns = [
@@ -1141,6 +1284,29 @@ def build_player_match_features(
         )
         has_roster = features["squad_position"].notna()
         features.loc[has_roster, "roster_position"] = features.loc[has_roster, "squad_position"]
+        stat_signal_cols = [
+            c for c in [*metric_columns, *optional_365_columns, "rating", "minutes"]
+            if c in features.columns
+        ]
+        if stat_signal_cols:
+            stat_signal = (
+                features[stat_signal_cols]
+                .apply(pd.to_numeric, errors="coerce")
+                .fillna(0)
+                .abs()
+                .sum(axis=1)
+                .gt(0)
+            )
+        else:
+            stat_signal = pd.Series(False, index=features.index)
+        has_appearance = pd.to_numeric(features["appearances"], errors="coerce").fillna(0).gt(0)
+        # Algumas fontes listam reservas fora do roster oficial como SUB, mas sem
+        # minuto, rating ou qualquer estatística. Isso não é jogador canônico: é
+        # ruído de relacionado/boxscore e não deve inflar elenco nem snapshots.
+        out_of_roster_empty = ~has_roster & ~has_appearance & ~stat_signal
+        if out_of_roster_empty.any():
+            features = features.loc[~out_of_roster_empty].copy()
+            has_roster = features["squad_position"].notna()
         features = features.drop(columns=["squad_position"])
 
         if not features.empty and "match_id" in features.columns:
