@@ -1360,9 +1360,17 @@ for item in snapshot_meta:
         round_end_orders[item["round"]] = item["order"]
     else:
         phase_end_orders[item["stage"]] = item["order"]
+# Fim de fase do mata-mata: as 4 fases que TÊM uma fase seguinte (16-avos →
+# oitavas → quartas → semi) ganham BOLINHA DOURADA cheia no último jogo. Final e
+# 3º lugar são terminais — mantêm o troféu 🏆 (phase_end), não a bolinha.
+_GOLD_PHASE_END = {"dezesseis_avos", "oitavas_de_final", "quartas_de_final", "semifinal"}
 for item in snapshot_meta:
-    item["round_end"] = item.get("stage") == "fase_de_grupos" and item["order"] == round_end_orders.get(item["round"])
-    item["phase_end"] = item.get("stage") != "fase_de_grupos" and item["order"] == phase_end_orders.get(item["stage"])
+    stage = item.get("stage")
+    is_last_of_stage = item["order"] == phase_end_orders.get(stage)
+    item["round_end"] = stage == "fase_de_grupos" and item["order"] == round_end_orders.get(item["round"])
+    item["phase_end_gold"] = stage in _GOLD_PHASE_END and is_last_of_stage
+    # troféu só nas fases terminais (final, 3º lugar); as progressivas usam a bolinha
+    item["phase_end"] = stage not in {"fase_de_grupos", *_GOLD_PHASE_END} and is_last_of_stage
 
 snapshot_meta_json = json.dumps(snapshot_meta, ensure_ascii=False)
 snapshot_order_json = json.dumps([m["n"] for m in snapshot_meta if m["n"] is not None], ensure_ascii=False)
@@ -2182,6 +2190,12 @@ input[type=range] {{
 .dot-round-end, .dot-phase-end {{
   opacity: 1;
   box-shadow: 0 0 0 1px #ffffff88, 0 0 9px 2px #f5c542aa;
+}}
+/* fim de fase progressiva do mata-mata: bolinha dourada CHEIA (sem emoji),
+   com brilho — marca o fim de 16-avos/oitavas/quartas/semi. */
+.dot-phase-gold {{
+  opacity: 1;
+  box-shadow: 0 0 0 1px #ffffffaa, 0 0 8px 2px #f5c542cc;
 }}
 .dot-round-end::after, .dot-phase-end::after {{
   content: "⚽";
@@ -5117,7 +5131,8 @@ function teamDebutOrder(team) {{
 // marker='first'|'last' dá um anel colorido no 1º/último jogo do time.
 function paintDot(el, m, color, debutOrder, marker) {{
   el.classList.remove('dot-done', 'dot-pending', 'dot-live', 'dot-faded',
-                      'dot-missing', 'dot-first', 'dot-last', 'dot-round-end', 'dot-phase-end');
+                      'dot-missing', 'dot-first', 'dot-last', 'dot-round-end',
+                      'dot-phase-end', 'dot-phase-gold');
 
   if (debutOrder != null && m.order < debutOrder) {{
     el.classList.add('dot-pending', 'dot-faded');
@@ -5125,6 +5140,7 @@ function paintDot(el, m, color, debutOrder, marker) {{
     el.style.borderColor = color + '66';
     if (m.round_end) el.classList.add('dot-round-end');
     if (m.phase_end) el.classList.add('dot-phase-end');
+    if (m.phase_end_gold) el.classList.add('dot-phase-gold');
     return;
   }}
   el.classList.add('dot-' + m.status);
@@ -5146,6 +5162,12 @@ function paintDot(el, m, color, debutOrder, marker) {{
   if (marker === 'last')  {{ el.classList.add('dot-last');  el.style.background = '#f5c542'; el.style.borderColor = '#fff'; }}
   if (m.round_end) el.classList.add('dot-round-end');
   if (m.phase_end) el.classList.add('dot-phase-end');
+  // bolinha dourada cheia no fim das fases progressivas do mata-mata
+  if (m.phase_end_gold) {{
+    el.classList.add('dot-phase-gold');
+    el.style.background = '#f5c542';
+    el.style.borderColor = '#f5c542';
+  }}
 }}
 
 // Aplica/limpa o filtro de time na régua PRINCIPAL. focusTeam=null → limpa.
