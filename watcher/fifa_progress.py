@@ -116,7 +116,7 @@ def _open_html():
 # ── estado em disco ───────────────────────────────────────────────────────────
 
 def _write_state(pct, msg="", done=False, idle=False, pending=None,
-                 ready=None, scheduled=None, live=None, update_ts=True):
+                 ready=None, scheduled=None, live=None, update_ts=True, error=False):
     tmp = STATE_FILE + ".tmp"
     try:
         try:
@@ -128,6 +128,7 @@ def _write_state(pct, msg="", done=False, idle=False, pending=None,
             "msg": msg,
             "done": done,
             "idle": idle,
+            "error": error,
             "ts": time.time() if update_ts else existing.get("ts", time.time()),
             # pending: compat antiga (lista simples)
             "pending": pending if pending is not None else existing.get("pending", []),
@@ -212,7 +213,8 @@ def _handle_command(payload: dict):
                      ready=payload.get("ready"),
                      scheduled=payload.get("scheduled"),
                      live=payload.get("live"),
-                     update_ts=False)
+                     update_ts=False,
+                     error=cur.get("error", False))
         return
     _write_state(
         payload.get("pct"),
@@ -223,6 +225,7 @@ def _handle_command(payload: dict):
         ready=payload.get("ready"),
         scheduled=payload.get("scheduled"),
         live=payload.get("live"),
+        error=payload.get("error", False),
     )
 
 
@@ -273,6 +276,13 @@ def progress_done(msg="Concluído"):
 
 def progress_idle(msg="Aguardando jogos…"):
     _send({"pct": None, "msg": msg, "idle": True})
+
+
+def progress_error(msg="Erro ao processar"):
+    """Estado de ERRO visível e persistente — o jogo falhou (ex.: porta de
+    qualidade recusou placar≠eventos). Mostra o motivo na janela em vez de o
+    jogo reaparecer silenciosamente como 'pronto'."""
+    _send({"pct": None, "msg": msg, "idle": True, "error": True})
 
 
 def set_pending(items):
@@ -623,14 +633,25 @@ def _run_window():
                 except Exception:
                     pass
 
-        def _quit(self):
-            from PySide6.QtWidgets import QApplication
-            # avisa o daemon para encerrar também (run-window.sh observa este sinal)
+        def _signal_stop(self):
+            """Pede ao daemon para encerrar. Idempotente — chamado tanto pelo
+            botão ✕ quanto pelo fechamento via gerenciador de janelas (closeEvent)."""
             try:
                 Path(STOP_FILE).write_text("1")
             except Exception:
                 pass
+
+        def _quit(self):
+            from PySide6.QtWidgets import QApplication
+            self._signal_stop()
             QApplication.quit()
+
+        def closeEvent(self, event):
+            # captura QUALQUER forma de fechar a janela (botão ✕ da janela, Alt+F4,
+            # gerenciador de janelas) — não só o nosso botão. Sem isso, fechar pelo
+            # OS deixava o daemon órfão rodando (o "daemon antigo que sempre fica").
+            self._signal_stop()
+            super().closeEvent(event)
 
         def _render_jobs(self):
             from PySide6.QtCore import Qt
@@ -757,6 +778,7 @@ def _run_window():
             st = _read_state()
             idle = st.get("idle", True)
             done = st.get("done", False)
+            error = st.get("error", False)
             pct = st.get("pct")
             msg = st.get("msg", "")
             ready = st.get("ready", [])
@@ -834,6 +856,17 @@ def _run_window():
                 self.dot.setStyleSheet(f"background:{DOT_COLORS['done']};")
                 self.progress.setValue(100)
                 self.meta.setText("pronto")
+                return
+
+            # ── ERRO: o processamento falhou (ex.: porta de qualidade). Mostra o
+            #    motivo de forma persistente em vez de o jogo reaparecer mudo. ──
+            if error:
+                self.active.setText(msg or "Erro ao processar")
+                self.status.setText("Erro")
+                self.status.setStyleSheet("color:#c0392b;")
+                self.dot.setStyleSheet(f"background:{DOT_COLORS['err']};")
+                self.progress.setValue(0)
+                self.meta.setText("falhou")
                 return
 
             # ── ocioso: o foco é mostrar o que está rolando, não "processando" ──

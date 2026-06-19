@@ -319,6 +319,11 @@ def main() -> None:
         result = run_snapshot_jogo(n=args.jogo)
         if result.get("proximo"):
             print(f"Próximo: fifa-analytics reprocessar-snapshots --jogo {result['proximo']}")
+        # Exit code não-zero quando o jogo NÃO foi processado (porta de qualidade
+        # recusou ou erro) — senão o watcher/scripts acham que deu certo (o bug
+        # "snapshot ok" sem snapshot criado, que fazia o jogo reaparecer mudo).
+        if result.get("status") in {"bloqueado", "erro"}:
+            raise SystemExit(1)
     elif args.command in {"atualizar", "refresh", "update"}:
         result = run_update_pipeline(
             include_worldcup2026=not args.sem_worldcup2026,

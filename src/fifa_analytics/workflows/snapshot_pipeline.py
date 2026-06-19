@@ -182,21 +182,33 @@ def _load_match_order() -> list[str]:
     all_features = build_team_match_features(matches, team_stats, events, lineups, stats_365)
 
     match_ids_with_features = set(all_features["match_id"].dropna())
+
+    # Jogos que JÁ TÊM SNAPSHOT são válidos por definição — não podem sumir da
+    # ordem só porque suas features oscilaram numa coleta parcial (a fonte cai, o
+    # build_team_match_features fica sem aquele match por um ciclo). Sem essa
+    # garantia, o jogo saía do order → encolhia o n_total → o prune apagava o
+    # snapshot recém-criado → ele reaparecia como "pendente" eternamente.
+    ensure_dir(SNAPSHOTS_DIR)
+    snapshot_ids: set[str] = set()
+    existing = json.loads(MATCH_ORDER_PATH.read_text()) if MATCH_ORDER_PATH.exists() else []
+    for path in SNAPSHOTS_DIR.glob("snapshot_jogo_*.parquet"):
+        idx = _snapshot_index(path, "snapshot_jogo")
+        if idx is not None and 1 <= idx <= len(existing):
+            snapshot_ids.add(existing[idx - 1])  # match_id daquela posição já processada
+
+    valid_ids = match_ids_with_features | snapshot_ids
     order_cols = [c for c in ("match_id", "temporal_order", "date", "kickoff_time") if c in matches.columns]
-    order_frame = matches[matches["match_id"].isin(match_ids_with_features)][order_cols].drop_duplicates("match_id")
+    order_frame = matches[matches["match_id"].isin(valid_ids)][order_cols].drop_duplicates("match_id")
     sort_cols = [c for c in ("temporal_order", "date", "kickoff_time", "match_id") if c in order_frame.columns]
     chronological = order_frame.sort_values(sort_cols, na_position="last")["match_id"].tolist()
 
-    # Regrava a ordem com a lista canônica atual. Preserva a posição de jogos que
-    # continuam válidos, mas remove IDs órfãos que desapareceram das features; se
-    # eles ficarem no fim, viram snapshots fantasma no dashboard.
-    existing = json.loads(MATCH_ORDER_PATH.read_text()) if MATCH_ORDER_PATH.exists() else []
+    # Regrava a ordem: preserva a posição de jogos que continuam válidos (com
+    # features OU com snapshot), remove só órfãos reais (sem features E sem snapshot).
     valid = set(chronological)
     order = [mid for mid in existing if mid in valid]
     seen = set(order)
     order.extend(mid for mid in chronological if mid not in seen)
 
-    ensure_dir(SNAPSHOTS_DIR)
     MATCH_ORDER_PATH.write_text(json.dumps(order), encoding="utf-8")
     return order
 
@@ -307,7 +319,10 @@ def run_snapshot_jogo(n: int | None = None) -> dict[str, Any]:
     stats_365 = _read_optional(GOLD_DIR / "fact_team_match_stats" / "365scores_enrichment.parquet")
     player_stats = _read_optional(GOLD_DIR / "fact_player_match_stats" / "canonical_player_stats.parquet")
     rosters = _read_optional(GOLD_DIR / "rosters" / "espn_rosters.parquet")
-    all_features = build_team_match_features(matches, team_stats, events, lineups, stats_365)
+    # player_stats é necessário para agregar xG/xGP/duelos ao nível time (essas
+    # métricas só existem por jogador na 365Scores) — sem ele os componentes de
+    # ataque/defesa do snapshot perdem o sinal avançado (advanced_coverage=0).
+    all_features = build_team_match_features(matches, team_stats, events, lineups, stats_365, player_stats)
 
     match_id = match_order[n - 1]
     ids_ate_agora = match_order[:n]

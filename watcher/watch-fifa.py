@@ -30,9 +30,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "watcher"))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 import fifa_progress as ui  # noqa: E402
 from flags import flag  # noqa: E402
+
+# Detector de status leve: bate direto na ESPN (sem reconciliar worldcup2026, que
+# vive caindo). É a FONTE DE VERDADE do estado ao vivo/finalizado do watcher.
+try:
+    from check_matches import _collect as _espn_collect  # noqa: E402
+except Exception:  # pragma: no cover — se faltar, cai no canônico (modo antigo)
+    _espn_collect = None
 
 VENV_BIN = ROOT / ".venv" / "bin"
 FIFA_CLI = VENV_BIN / "fifa-analytics"
@@ -194,49 +202,124 @@ def _rewrite_narrative(n: int, hb_pct: int | None = None, hb_msg: str = "") -> t
 
 # ── leitura de estado ─────────────────────────────────────────────────────────
 
+def _extract_snapshot_error(out: str) -> str:
+    """Extrai o MOTIVO legível da falha do reprocessar-snapshots para mostrar na
+    janela. A porta de qualidade imprime '• <motivo>' (ex.: 'eventos têm 4 gol(s),
+    placar soma 5'); se não achar, cai num resumo da última linha não-vazia."""
+    bullets = [ln.strip(" •\t") for ln in out.splitlines() if ln.strip().startswith("•")]
+    if bullets:
+        joined = "; ".join(bullets)
+        return joined[:160] + ("…" if len(joined) > 160 else "")
+    if "dados incompletos" in out or "inconsistente" in out:
+        return "dados incompletos/inconsistentes na fonte (placar ≠ eventos)"
+    tail = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    return (tail[-1][:160] if tail else "erro desconhecido no snapshot")
+
+
+def _match_key(a: str, b: str) -> frozenset:
+    """Confronto independente de ordem casa/fora e de acento/caixa."""
+    norm = lambda s: "".join(ch for ch in str(s).lower() if ch.isalnum())
+    return frozenset({norm(a), norm(b)})
+
+
+def _espn_status_by_match(days_back: int = 2) -> dict:
+    """Mapa {confronto -> status ESPN} para hoje e os últimos dias (jogos podem
+    virar finalizado depois da meia-noite). Fonte direta da ESPN — não depende de
+    reconciliar a worldcup2026 (que vive caindo). Retorna {} se a ESPN falhar."""
+    if _espn_collect is None:
+        return {}
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    today = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+    result: dict = {}
+    for delta in range(days_back + 1):
+        d = today - timedelta(days=delta)
+        try:
+            for m in _espn_collect(d):
+                result[_match_key(m["home"], m["away"])] = m
+        except Exception as exc:
+            log(f"check_matches ESPN falhou para {d}: {exc}")
+    return result
+
+
 def _load_pending() -> list[tuple[int, str]]:
     """Retorna [(n_jogo, label)] dos jogos finalizados sem snapshot.
 
-    A ordem (n_jogo) é a posição cronológica do jogo entre TODOS os finalizados —
-    reconstruída na hora, não do match_order.json cacheado. Assim um jogo recém-
-    finalizado (que ainda não entrou no cache) aparece como pendente corretamente.
+    CRÍTICO: o n_jogo é a posição em `match_order.json` — EXATAMENTE a mesma chave
+    que `reprocessar-snapshots --jogo N` usa (`match_order[N-1]`). Numerar por
+    ordem cronológica recalculada na hora era um bug latente: quando um jogo
+    anterior finalizava tarde (ex.: Suíça via ESPN), todos os índices seguintes
+    deslocavam e o clique processava o jogo errado. match_order é estável
+    (preserva posições, só anexa novos), então é a única fonte segura do n.
+
+    Placar exibido prefere a ESPN (mais fresco que o canônico). Jogos que a ESPN
+    já dá como finalizados mas ainda não entraram no match_order aparecem assim
+    que o `_process` reconciliar (ele roda indice-canonico + snapshot, que
+    reconstrói o match_order).
     """
     import pandas as pd
 
     if not MATCHES_PATH.exists():
         return []
 
-    matches = pd.read_parquet(MATCHES_PATH)
-    finalizados = matches[matches["status"] == "finalizado"].copy()
-    if finalizados.empty:
-        return []
+    # match_order pela MESMA função do pipeline (single source of truth): preserva
+    # posições já processadas e ANEXA jogos recém-finalizados na ordem cronológica.
+    # Reconstruir aqui (em vez de só ler o arquivo) garante que um jogo que acabou
+    # de finalizar já apareça como pendente, sem esperar um snapshot run.
+    try:
+        from fifa_analytics.workflows.snapshot_pipeline import _load_match_order
+        order = _load_match_order()
+    except Exception:
+        if not MATCH_ORDER_PATH.exists():
+            return []
+        try:
+            order = json.loads(MATCH_ORDER_PATH.read_text())
+        except (OSError, ValueError):
+            return []
 
-    # ordem cronológica canônica de todos os finalizados
-    sort_cols = [c for c in ("temporal_order", "date", "kickoff_time") if c in finalizados.columns]
-    finalizados = finalizados.sort_values(sort_cols).reset_index(drop=True)
-
+    matches = pd.read_parquet(MATCHES_PATH).set_index("match_id")
+    espn = _espn_status_by_match()
     done = {int(p.stem.split("_")[-1]) for p in SNAPSHOTS_DIR.glob("snapshot_jogo_*.parquet")}
 
     pending = []
-    for n, (_, row) in enumerate(finalizados.iterrows(), 1):
-        if n in done:
+    for n, match_id in enumerate(order, 1):  # n = posição em match_order (= pipeline)
+        if n in done or match_id not in matches.index:
             continue
-        hs, as_ = row.get("home_score"), row.get("away_score")
-        score = f"{int(hs)}–{int(as_)}" if pd.notna(hs) and pd.notna(as_) else "?"
+        row = matches.loc[match_id]
         home, away = row.get("home_team", "?"), row.get("away_team", "?")
-        # bandeiras ao redor do placar: Casa 🏠  placar  🚩 Fora
+        m = espn.get(_match_key(home, away))
+        if m is not None and m.get("home_score") is not None:
+            score = f"{m['home_score']}–{m['away_score']}"  # placar fresco da ESPN
+        else:
+            hs, as_ = row.get("home_score"), row.get("away_score")
+            score = f"{int(hs)}–{int(as_)}" if pd.notna(hs) and pd.notna(as_) else "?"
         label = f"Jogo {n:02d} · {home} {flag(home)} {score} {flag(away)} {away}"
         pending.append((n, label))
     return sorted(pending)
 
 
 def _load_live() -> list[str]:
-    """Retorna labels dos jogos acontecendo agora (status ao_vivo), com placar parcial."""
+    """Retorna labels dos jogos acontecendo agora (ao vivo), com placar parcial.
+
+    Direto da ESPN (`check_matches`) — em tempo real, sem depender de reconciliar
+    a worldcup2026. Fallback: status do canônico se a ESPN falhar."""
+    espn = _espn_status_by_match(days_back=1)
+    if espn:
+        labels = []
+        for m in espn.values():
+            if m.get("status") != "ao_vivo":
+                continue
+            hs, as_ = m.get("home_score") or "0", m.get("away_score") or "0"
+            minute = f" ({m.get('detail')})" if m.get("detail") else ""
+            labels.append(f"{m['home']} {flag(m['home'])} {hs}–{as_} {flag(m['away'])} {m['away']}{minute}")
+        return labels
+
+    # fallback: canônico (modo antigo)
     import pandas as pd
 
     if not MATCHES_PATH.exists():
         return []
-
     matches = pd.read_parquet(MATCHES_PATH)
     live = matches[matches["status"] == "ao_vivo"]
     labels = []
@@ -246,10 +329,7 @@ def _load_live() -> list[str]:
             continue
         hs, as_ = row.get("home_score"), row.get("away_score")
         score = f"{int(hs)}–{int(as_)}" if pd.notna(hs) and pd.notna(as_) else "0–0"
-        raw_date = row.get("date", "")
-        date_str = str(raw_date)[:10] if pd.notna(raw_date) else ""
-        prefix = f"{date_str} · " if date_str else ""
-        labels.append(f"{prefix}{home} {flag(home)} {score} {flag(away)} {away}")
+        labels.append(f"{home} {flag(home)} {score} {flag(away)} {away}")
     return labels
 
 
@@ -363,6 +443,15 @@ def _load_agendados(limit: int = 12) -> list[str]:
 
 # ── publicação do estado (sem processar) ──────────────────────────────────────
 
+def _publish_lists_only():
+    """Atualiza as listas (ao vivo/prontos/agendados) SEM tocar no estado de
+    progresso — as setters usam o caminho list_only, que preserva o flag de erro.
+    Usado após uma falha p/ refrescar as listas sem apagar a mensagem de erro."""
+    ui.set_live(_load_live())
+    ui.set_ready([{"n": n, "label": lbl} for n, lbl in _load_pending()])
+    ui.set_scheduled(_load_agendados())
+
+
 def _publish_state():
     """Coleta o estado atual e publica na janela: ao vivo + prontos + agendados."""
     live = _load_live()              # [label]
@@ -381,19 +470,44 @@ def _publish_state():
 
 
 def _refresh_match_index(start_pct: int | None, label_prefix: str = "") -> bool:
-    """Atualiza só o necessário para o watcher enxergar ao vivo/finalizados."""
+    """Atualiza só o necessário para o watcher enxergar ao vivo/finalizados.
+
+    Resiliência a ponto único de falha: a fonte operacional primária
+    (worldcup2026) vive caindo com erro de TLS — quando isso acontecia, o método
+    abortava e o watcher NUNCA via o jogo ao vivo, mesmo com ESPN funcionando e
+    cobrindo o mesmo jogo (status ao_vivo, placar). Agora: tenta worldcup2026;
+    se falhar, cai para a ESPN como fonte de status ao vivo. Só aborta se NENHUMA
+    fonte operacional atualizar — aí não há o que reconciliar. O indice-canonico
+    reconcilia com qualquer combinação de fontes disponíveis.
+    """
     prefix = f"{label_prefix} · " if label_prefix else ""
     ui.progress_update(start_pct, f"{prefix}Atualizando jogos ao vivo…")
+
+    # 1) fonte operacional primária (instável — SSL cai com frequência)
     log("atualizando fonte operacional")
     code, out = _run(
         [str(FIFA_CLI), "worldcup2026"],
         timeout=UPDATE_TIMEOUT,
         heartbeat=(start_pct, f"{prefix}Atualizando jogos ao vivo…"),
     )
-    if code != 0:
-        log(f"fonte operacional falhou (code={code}):\n{out[-500:]}")
-        return False
+    operacional_ok = code == 0
+    if not operacional_ok:
+        log(f"fonte operacional (worldcup2026) falhou (code={code}) — caindo para ESPN:\n{out[-300:]}")
+        # 2) FALLBACK: ESPN também traz status ao_vivo + placar parcial. É a fonte
+        #    que mantém o watcher funcional quando a worldcup26.ir está fora.
+        ui.progress_update(start_pct, f"{prefix}Fonte primária fora · usando ESPN…")
+        log("fallback: atualizando status pela ESPN")
+        code, out = _run(
+            [str(FIFA_CLI), "espn"],
+            timeout=UPDATE_TIMEOUT,
+            heartbeat=(start_pct, f"{prefix}Fonte primária fora · usando ESPN…"),
+        )
+        if code != 0:
+            log(f"fallback ESPN também falhou (code={code}) — sem fonte de status ao vivo:\n{out[-300:]}")
+            return False
+        log("fallback ESPN ok — status ao vivo virá da ESPN nesta reconciliação")
 
+    # 3) reconcilia o que houver (worldcup2026 OU ESPN) no índice canônico
     reconcile_pct = None if start_pct is None else min(95, start_pct + 45)
     ui.progress_update(reconcile_pct, f"{prefix}Reconciliando calendário…")
     log("reconciliando índice canônico")
@@ -457,9 +571,12 @@ def _process(ns: list[int] | None) -> None:
             timeout=SNAPSHOT_TIMEOUT, retries=1,
         )
         if code != 0:
-            ui.progress_update(lo, f"Erro no snapshot do jogo {n}")
+            reason = _extract_snapshot_error(out)
             log(f"erro reprocessar-snapshots --jogo {n} (code={code}):\n{out[-500:]}")
-            _publish_state()
+            # atualiza as listas (o jogo continua pendente) SEM limpar o erro, e
+            # publica o estado de ERRO por último p/ ficar visível e persistente.
+            _publish_lists_only()
+            ui.progress_error(f"Jogo {n} não processado — {reason}")
             return
         log(f"jogo {n} · snapshot ok")
 

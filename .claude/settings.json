@@ -7,7 +7,9 @@
       "Bash(pkill -9 -f \"watcher/fifa_progress.py\")",
       "Bash(touch /tmp/fifa-copa-stop)",
       "Bash(nohup bash watcher/run-window.sh)",
-      "WebFetch(domain:givevoicetofootball.github.io)"
+      "WebFetch(domain:givevoicetofootball.github.io)",
+      "Bash(pkill -f \"sleep 300\")",
+      "Bash(ps -eo pid,args)"
     ],
     "deny": [
       "Bash(git push --force:*)",
