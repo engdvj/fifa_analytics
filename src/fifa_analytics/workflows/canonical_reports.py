@@ -4,9 +4,12 @@ import json
 import re
 import unicodedata
 from collections import Counter
+from datetime import datetime
+from difflib import SequenceMatcher
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yaml
@@ -21,7 +24,7 @@ from fifa_analytics.utils.time import utc_now_iso
 
 
 SOURCE_PRIORITY = ["worldcup2026", "espn", "wikipedia"]
-EVENT_SOURCE_PRIORITY = ["espn", "worldcup2026", "wikipedia"]
+EVENT_SOURCE_PRIORITY = ["espn", "365scores", "worldcup2026", "wikipedia"]
 _CANONICAL_DATASET_DEDUPE_KEYS: dict[tuple[str, str], list[str]] = {
     ("fact_team_match_stats", "team_stats"): ["match_id", "team"],
     ("lineups", "lineups"): ["match_id", "team", "player_name"],
@@ -464,6 +467,29 @@ def build_canonical_events(source_map: pd.DataFrame) -> pd.DataFrame:
         events = read_dataframe(path)
         if events.empty:
             continue
+        # 365scores grava os eventos JÁ com match_id canônico (resolvido no
+        # pipeline via o mapa próprio source_game_id→match_id), pois não está no
+        # source_map global. As demais fontes casam o source_match_id pelo mapa.
+        if source == "365scores":
+            home_away = (
+                source_map.dropna(subset=["home_team", "away_team"])
+                .drop_duplicates("canonical_match_id")
+                .set_index("canonical_match_id")[["home_team", "away_team"]]
+                if {"home_team", "away_team", "canonical_match_id"}.issubset(source_map.columns)
+                else pd.DataFrame()
+            )
+            if not home_away.empty:
+                events = events.merge(home_away, left_on="match_id", right_index=True, how="left")
+            else:
+                events["home_team"] = pd.NA
+                events["away_team"] = pd.NA
+            if events.empty:
+                continue
+            events["opponent"] = events.apply(_event_opponent, axis=1)
+            events["event_source"] = source
+            event_frames.append(events)
+            continue
+
         source_rows = source_map[source_map["source"] == source].copy()
         for optional_column in ["home_team", "away_team"]:
             if optional_column not in source_rows.columns:
@@ -484,31 +510,75 @@ def build_canonical_events(source_map: pd.DataFrame) -> pd.DataFrame:
 
     events = pd.concat(event_frames, ignore_index=True)
     events["source_priority"] = events["event_source"].map({source: index for index, source in enumerate(EVENT_SOURCE_PRIORITY)})
-    events["_minute_base"] = (pd.to_numeric(events["minute_sort"], errors="coerce").fillna(0) // 100).astype(int)
+    _ms = pd.to_numeric(events["minute_sort"], errors="coerce").fillna(0).astype(int)
+    events["_minute_base"] = _ms // 100
+    events["_stoppage"] = (_ms % 100 > 0).astype(int)
     events["_event_family"] = events["event_type"].map(_EVENT_DEDUP_FAMILY).fillna(events["event_type"])
+    events["_player_toks"] = events["player"].map(_name_tokens)
     events = events.sort_values(["match_id", "source_priority", "minute_sort"]).reset_index(drop=True)
 
-    # Dedup com tolerância de 1' entre fontes: mesmo time + mesma família de
-    # evento + minuto a no máximo 1' de distância de um evento já mantido
-    # (ex: Wikipedia=50' / ESPN=51' para o mesmo gol não casam em minuto exato).
+    # Dedup robusto a ruído de fonte (worldcup2026 corrompe nomes: "Jvhan Mnzambi"
+    # em vez de "Johan Manzambi"). Regra: mesmo time + mesma família + minuto-base
+    # ≤1' de um evento já mantido = DUPLICATA por padrão (dois gols do mesmo time
+    # no mesmo minuto exato são quase sempre o MESMO gol, fontes só divergem no
+    # autor/grafia). Só mantém SEPARADO quando há evidência DUPLA de que são
+    # eventos distintos: acréscimo diferente E nomes claramente diferentes.
+    #  • Balogun 45' (wc2026) vs 45'+5 (espn): nome igual → funde (mesmo gol);
+    #  • Manzambi 90'+0 vs Xhaka 90'+7: acréscimo E nome diferem → separa (gol extra);
+    #  • Kamada vs Ogawa no MESMO minuto exato: sem acréscimo diferente → funde
+    #    (mesmo gol com autor divergente entre fontes, não dois gols).
     keep_mask = pd.Series(True, index=events.index)
-    kept_minute_by_key: dict[tuple[Any, Any, Any], list[int]] = {}
+    kept_by_key: dict[tuple[Any, Any, Any], list[tuple[int, int, tuple]]] = {}
     for idx, row in events.iterrows():
         key = (row["match_id"], row["team"], row["_event_family"])
-        minute = row["_minute_base"]
-        kept_minutes = kept_minute_by_key.setdefault(key, [])
-        if any(abs(minute - m) <= 1 for m in kept_minutes):
+        minute, stop, toks = row["_minute_base"], row["_stoppage"], row["_player_toks"]
+        kept = kept_by_key.setdefault(key, [])
+        is_dup = any(
+            abs(minute - m) <= 1
+            and not (stop != m_stop and _names_clearly_different(toks, m_toks))
+            for m, m_stop, m_toks in kept
+        )
+        if is_dup:
             keep_mask.loc[idx] = False
         else:
-            kept_minutes.append(minute)
+            kept.append((minute, stop, toks))
 
     events = (
         events[keep_mask]
         .sort_values(["match_id", "minute_sort"])
-        .drop(columns=["source_priority", "_minute_base", "_event_family"])
+        .drop(columns=["source_priority", "_minute_base", "_stoppage", "_event_family", "_player_toks"])
         .reset_index(drop=True)
     )
     return events
+
+
+# Abaixo deste limiar de similaridade, dois nomes são "claramente diferentes".
+# Calibrado: mesmo jogador (com ruído/ordem/abreviação) fica ≥0.67; jogadores
+# distintos ficam ≤0.43. 0.55 separa os dois grupos com folga.
+_NAME_DIFF_THRESHOLD = 0.55
+
+
+def _name_tokens(name: Any) -> tuple:
+    """Tokens do nome normalizado, descartando tokens de 1 char (iniciais).
+    Tupla p/ ser hasheável e cacheável na linha do DataFrame."""
+    key = person_name_key(name)
+    return tuple(t for t in key.split("_") if len(t) >= 2) if key else tuple()
+
+
+def _names_clearly_different(toks_a: tuple, toks_b: tuple) -> bool:
+    """True só quando há FORTE evidência de jogadores distintos. Compara o melhor
+    par de tokens (≥3 chars) por similaridade; tolera ordem invertida, abreviação
+    e corrupção. Nome ausente em qualquer lado → NÃO é "claramente diferente"
+    (sem evidência, deixa fundir)."""
+    if not toks_a or not toks_b:
+        return False
+    best = 0.0
+    for x in toks_a:
+        for y in toks_b:
+            if len(x) < 3 or len(y) < 3:
+                continue
+            best = max(best, SequenceMatcher(None, x, y).ratio())
+    return best < _NAME_DIFF_THRESHOLD
 
 
 def _event_opponent(event: pd.Series) -> Any:
@@ -742,8 +812,38 @@ def _matching_rows(source_rows: pd.DataFrame, primary: pd.Series) -> pd.DataFram
     return source_rows[(source_rows["source"] == primary["source"]) & (source_rows["source_match_id_text"] == primary["source_match_id_text"])].copy()
 
 
+# Quão "avançado" está o jogo segundo cada status — usado para escolher de QUAL
+# fonte vêm os campos voláteis (status/placar). Sem isso, a prioridade fixa de
+# fonte fazia o worldcup2026 desatualizado ("agendado", quando a fonte cai)
+# sobrescrever um "ao_vivo"/"finalizado" fresco da ESPN — o jogo ao vivo nunca
+# aparecia. Status mais avançado vence; entre iguais, vale a prioridade de fonte.
+_STATUS_PROGRESS = {"finalizado": 3, "ao_vivo": 2, "em_andamento": 2, "agendado": 1, "desconhecido": 0}
+
+
+def _status_progress(status: Any) -> int:
+    return _STATUS_PROGRESS.get(str(status or "").strip().lower(), 0)
+
+
 def _choose_best_record(source_records: list[dict[str, Any]]) -> dict[str, Any]:
-    return sorted(source_records, key=lambda row: row["source_priority"])[0]
+    """Escolhe o registro-base por prioridade de fonte (campos estáveis: times,
+    grupo, estádio), mas sobrescreve os campos VOLÁTEIS (status, placar) com a
+    fonte que reporta o jogo no estado mais avançado — uma fonte primária
+    desatualizada não pode manter o jogo como 'agendado' quando outra já o vê
+    ao vivo ou finalizado."""
+    by_priority = sorted(source_records, key=lambda row: row["source_priority"])
+    base = dict(by_priority[0])
+
+    # fonte mais "avançada": maior progresso de status; desempate pela prioridade
+    most_advanced = min(
+        source_records,
+        key=lambda row: (-_status_progress(row.get("status")), row["source_priority"]),
+    )
+    if _status_progress(most_advanced.get("status")) > _status_progress(base.get("status")):
+        for volatile in ("status", "home_score", "away_score", "winner"):
+            if volatile in most_advanced:
+                base[volatile] = most_advanced.get(volatile)
+        base["status_source"] = most_advanced.get("source")
+    return base
 
 
 def _canonical_match_id(row: pd.Series | dict[str, Any]) -> str:
@@ -764,7 +864,35 @@ def _unmatched_source_match_id(row: pd.Series | dict[str, Any]) -> str:
     return f"copa_2026_{source}_{_slug(str(row.get('source_match_id_text') or row.get('match_id')))}"
 
 
+_BRT = ZoneInfo("America/Sao_Paulo")
+
+
+def _kickoff_in_brt(source_records: list[dict[str, Any]]) -> tuple[Any, Any, str] | None:
+    """Converte o horário de início para o fuso de Brasília quando há uma fonte
+    em UTC (a ESPN grava `kickoff_time` em UTC + timezone='UTC'). O worldcup2026
+    grava horário LOCAL do estádio sem timezone — exibido cru, dava horas erradas.
+    Retorna (date, kickoff_time, 'BRT') ou None se não houver fonte UTC utilizável."""
+    for rec in source_records:
+        tz = str(rec.get("timezone") or "").strip().upper()
+        date_val = rec.get("date")
+        time_val = rec.get("kickoff_time")
+        if tz != "UTC" or not date_val or not time_val:
+            continue
+        try:
+            dt = datetime.fromisoformat(f"{str(date_val)[:10]}T{str(time_val)[:5]}:00+00:00")
+            local = dt.astimezone(_BRT)
+            return local.strftime("%Y-%m-%d"), local.strftime("%H:%M"), "BRT"
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
 def _canonical_row(canonical_match_id: str, chosen: dict[str, Any], source_records: list[dict[str, Any]]) -> dict[str, Any]:
+    # horário em BRT a partir da fonte UTC (ESPN); se não houver, mantém o do chosen
+    _brt = _kickoff_in_brt(source_records)
+    _date = _brt[0] if _brt else chosen.get("date")
+    _kickoff = _brt[1] if _brt else chosen.get("kickoff_time")
+    _tz = _brt[2] if _brt else chosen.get("timezone")
     row = {
         "canonical_match_id": canonical_match_id,
         "match_id": canonical_match_id,
@@ -772,9 +900,9 @@ def _canonical_row(canonical_match_id: str, chosen: dict[str, Any], source_recor
         "match_number_source": chosen.get("source"),
         "home_team": chosen.get("home_team"),
         "away_team": chosen.get("away_team"),
-        "date": chosen.get("date"),
-        "kickoff_time": chosen.get("kickoff_time"),
-        "timezone": chosen.get("timezone"),
+        "date": _date,
+        "kickoff_time": _kickoff,
+        "timezone": _tz,
         "group": chosen.get("group"),
         "stage": chosen.get("stage"),
         "round": chosen.get("round"),

@@ -9,6 +9,7 @@ from fifa_analytics.paths import GOLD_DIR, RAW_DIR, SILVER_DIR
 from fifa_analytics.sources.scores365 import (
     discover_game_ids,
     fetch_tournament,
+    normalize_events,
     normalize_player_stats,
     normalize_team_match_stats,
 )
@@ -103,6 +104,15 @@ def run_scores365_pipeline(
         GOLD_DIR / "fact_player_match_stats" / "365scores_rating.parquet", player_rating
     )
 
+    # --- Eventos (timeline) → fact_events, já com match_id CANÔNICO ---
+    # Usado como 2ª fonte de eventos na reconciliação: completa gols/cartões que
+    # a ESPN às vezes não consolida (ex.: placar 4-1 mas só 4 gols na ESPN).
+    events = normalize_events(payload)
+    events_canonical = _map_events_to_canonical(events, team_stats)
+    events_path = write_dataframe(
+        GOLD_DIR / "fact_events" / "365scores_events.parquet", events_canonical
+    )
+
     games_played = team_stats["source_game_id"].nunique() if not team_stats.empty else 0
     teams = team_stats["team"].nunique() if not team_stats.empty else 0
     players = player_stats["player_name"].nunique() if not player_stats.empty else 0
@@ -123,6 +133,26 @@ def run_scores365_pipeline(
         "team_stat_rows": len(team_stats),
         "player_stat_rows": len(player_stats),
     }
+
+
+def _map_events_to_canonical(events: pd.DataFrame, team_stats: pd.DataFrame) -> pd.DataFrame:
+    """Resolve o match_id CANÔNICO de cada evento via o mapa source_game_id→match_id
+    (mesma chave robusta usada para stats). Escreve o evento já com match_id
+    canônico, então build_canonical_events não precisa do source_map global p/ 365."""
+    if events.empty:
+        return pd.DataFrame()
+    match_map = _build_scores365_match_map(team_stats)
+    if match_map.empty or "source_game_id" not in match_map.columns:
+        return pd.DataFrame()
+    id_to_canonical = {
+        str(gid): mid
+        for gid, mid in match_map.drop_duplicates("source_game_id")[["source_game_id", "match_id"]].itertuples(index=False)
+    }
+    out = events.copy()
+    # source_match_id é string; casa pela chave string (o mapa usa int internamente)
+    out["match_id"] = out["source_match_id"].astype(str).map(id_to_canonical)
+    out = out[out["match_id"].notna()].reset_index(drop=True)
+    return out
 
 
 def _map_to_canonical_match_id(team_stats: pd.DataFrame) -> pd.DataFrame:

@@ -304,6 +304,46 @@ def test_build_canonical_index_uses_primary_source_score_when_diverging():
     assert row["primary_source"] == "worldcup2026"
 
 
+def test_build_canonical_index_uses_more_advanced_status_when_primary_is_stale():
+    """Fonte primária desatualizada não pode manter o jogo 'agendado' quando
+    outra fonte já o vê ao vivo. Regressão do bug: worldcup2026 caía (SSL) e
+    ficava com status velho, escondendo o jogo ao vivo que a ESPN reportava."""
+    source_matches = {
+        "worldcup2026": pd.DataFrame([{
+            "match_id": "suica_bosnia_2026_match_26",
+            "source_match_id": "26",
+            "home_team": "Suíça",
+            "away_team": "Bósnia e Herzegovina",
+            "group": "L",
+            "stage": "fase_de_grupos",
+            "status": "agendado",  # fonte primária desatualizada
+            "home_score": None,
+            "away_score": None,
+        }]),
+        "espn": pd.DataFrame([{
+            "match_id": "suica_bosnia_espn_99",
+            "source_match_id": "99",
+            "source_match_number": 26,
+            "home_team": "Suíça",
+            "away_team": "Bósnia e Herzegovina",
+            "group": "L",
+            "stage": "fase_de_grupos",
+            "status": "ao_vivo",  # ESPN vê o jogo acontecendo
+            "home_score": 3,
+            "away_score": 1,
+        }]),
+    }
+
+    canonical, _ = build_canonical_index(source_matches)
+
+    row = canonical.iloc[0]
+    assert row["status"] == "ao_vivo"
+    assert row["home_score"] == 3
+    assert row["away_score"] == 1
+    # campos estáveis continuam vindo da fonte primária
+    assert row["primary_source"] == "worldcup2026"
+
+
 def test_build_canonical_index_sources_count_reflects_all_matched():
     source_matches = {
         "worldcup2026": pd.DataFrame([{
@@ -425,6 +465,41 @@ def test_build_canonical_events_keeps_different_goals_same_match(tmp_path, monke
 
     assert len(events) == 2
     assert set(events["minute"]) == {"9", "67"}
+
+
+def test_build_canonical_events_merges_corrupted_names_keeps_stoppage_distinct(tmp_path, monkeypatch):
+    """Dedup robusto a ruído de fonte: nome corrompido no MESMO minuto funde
+    (worldcup2026 'Jvhan Mnzambi' = espn 'Johan Manzambi'); gol de acréscimo com
+    OUTRO jogador é mantido (Xhaka 90'+7) — o gol extra que só uma fonte tinha."""
+    import fifa_analytics.workflows.canonical_reports as cr_module
+
+    espn_events = pd.DataFrame([
+        {"match_id": "espn_1", "event_type": "gol",        "minute": "90",   "minute_sort": 9000, "team": "Suíça", "player": "Johan Manzambi"},
+        {"match_id": "espn_1", "event_type": "gol_penalti", "minute": "90+7", "minute_sort": 9007, "team": "Suíça", "player": "Granit Xhaka"},
+    ])
+    wc_events = pd.DataFrame([
+        # mesmo gol do Manzambi aos 90', nome corrompido pela fonte
+        {"match_id": "wc_1", "event_type": "gol", "minute": "90", "minute_sort": 9000, "team": "Suíça", "player": "Jvhan Mnzambi"},
+    ])
+
+    def fake_events_path(source: str):
+        p = tmp_path / f"{source}_events.parquet"
+        if source == "espn":
+            espn_events.to_parquet(p, index=False)
+        elif source == "worldcup2026":
+            wc_events.to_parquet(p, index=False)
+        return p
+
+    monkeypatch.setattr(cr_module, "_events_path", fake_events_path)
+    source_map = _make_source_map(
+        ("copa_2026_jogo_001", "espn", "espn_1"),
+        ("copa_2026_jogo_001", "worldcup2026", "wc_1"),
+    )
+    events = build_canonical_events(source_map)
+    gols = events[events["event_type"].astype(str).str.contains("gol")]
+    # 2 gols distintos (Manzambi 90' fundido + Xhaka 90'+7 mantido), não 3
+    assert len(gols) == 2
+    assert set(gols["minute"]) == {"90", "90+7"}
 
 
 def test_build_canonical_events_empty_when_no_source_files(tmp_path, monkeypatch):

@@ -42,6 +42,43 @@ def test_parse_player_stats_includes_defensive_goalkeeper_and_xg_metrics():
     assert stats["big_chances_scored"] == 2
 
 
+def test_normalize_events_extracts_goals_cards_with_stoppage_distinct():
+    """O 365 supre eventos que a ESPN às vezes não consolida. Dois gols no mesmo
+    minuto-base mas acréscimos diferentes (90'+0 e 90'+7) devem ser distintos."""
+    payload = {
+        "details": {
+            "100": {
+                "game": {
+                    "homeCompetitor": {"id": 1, "name": "Switzerland"},
+                    "awayCompetitor": {"id": 2, "name": "Bosnia-Herzegovina"},
+                    "members": [
+                        {"id": 11, "name": "Manzambi"},
+                        {"id": 12, "name": "Xhaka"},
+                    ],
+                    "events": [
+                        {"competitorId": 1, "gameTime": 90, "addedTime": 0, "gameTimeDisplay": "90'",
+                         "playerId": 11, "eventType": {"id": 1, "name": "Goal", "subTypeName": "Field Goal"}},
+                        {"competitorId": 1, "gameTime": 90, "addedTime": 7, "gameTimeDisplay": "90'",
+                         "playerId": 12, "eventType": {"id": 1, "name": "Goal", "subTypeName": "Penalty"}},
+                        {"competitorId": 2, "gameTime": 59, "addedTime": 0, "gameTimeDisplay": "59'",
+                         "playerId": None, "eventType": {"id": 2, "name": "Yellow Card"}},
+                    ],
+                }
+            }
+        },
+        "collected_at": "test",
+    }
+    df = scores365.normalize_events(payload)
+    goals = df[df["event_type"].str.contains("gol")]
+    assert len(goals) == 2
+    # os dois gols dos 90' têm minute_sort distinto (9000 vs 9007) → não fundem no dedup
+    assert sorted(goals["minute_sort"].tolist()) == [9000, 9007]
+    # pênalti distinguido pelo subTypeName
+    assert "gol_penalti" in set(df["event_type"])
+    # cartão amarelo mapeado
+    assert "cartao_amarelo" in set(df["event_type"])
+
+
 def test_scores365_source_reads_base_url_and_competition_from_config(monkeypatch):
     monkeypatch.setattr(
         scores365,

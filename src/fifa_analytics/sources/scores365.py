@@ -295,6 +295,80 @@ def normalize_player_stats(payload: dict[str, Any]) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Normalização — eventos (timeline: gols, cartões, substituições)
+# ---------------------------------------------------------------------------
+
+# eventType.id da 365Scores → vocabulário canônico (mesmo da ESPN). Gol distingue
+# campo/pênalti/contra pelo subTypeName.
+_365_EVENT_TYPE = {2: "cartao_amarelo", 3: "cartao_vermelho", 4: "substituicao"}
+
+
+def _365_goal_type(sub_type_name: str | None) -> str:
+    name = str(sub_type_name or "").lower()
+    if "penalty" in name:
+        return "gol_penalti"
+    if "own" in name:
+        return "gol_contra"
+    return "gol"
+
+
+def normalize_events(payload: dict[str, Any]) -> pd.DataFrame:
+    """Timeline de eventos (gols, cartões, substituições) por jogo, no schema
+    canônico — usada como 2ª fonte de eventos quando a ESPN vem incompleta
+    (ex.: placar 4-1 mas só 4 gols na ESPN; o 365 tem os 5). Casa o jogador pelo
+    playerId via game.members; o time pelo competitorId (home/away)."""
+    rows: list[dict[str, Any]] = []
+    details = payload.get("details", {})
+    collected_at = payload.get("collected_at", utc_now_iso())
+
+    for game_id_str, detail in details.items():
+        g = detail.get("game", {})
+        if not g:
+            continue
+        members = {m.get("id"): m.get("name") for m in g.get("members", [])}
+        home, away = g.get("homeCompetitor", {}), g.get("awayCompetitor", {})
+        team_by_comp = {
+            home.get("id"): traduzir_selecao(home.get("name", "")),
+            away.get("id"): traduzir_selecao(away.get("name", "")),
+        }
+
+        for ev in g.get("events", []):
+            et = ev.get("eventType", {}) or {}
+            type_id = et.get("id")
+            if type_id == 1:
+                event_type = _365_goal_type(et.get("subTypeName"))
+            else:
+                event_type = _365_EVENT_TYPE.get(type_id)
+            if not event_type:
+                continue  # ignora tipos sem mapa (VAR, var-check etc.)
+
+            base = int(ev.get("gameTime") or 0)
+            added = int(ev.get("addedTime") or 0)
+            minute = f"{base}+{added}" if added else str(base)
+            # minute_sort: base*100 + acréscimo, p/ ordenar e DISTINGUIR 90'+0 de 90'+7
+            minute_sort = base * 100 + added
+
+            rows.append({
+                # string p/ casar o dtype das outras fontes de evento (ESPN/wc2026);
+                # senão o concat na reconciliação quebra ao escrever o parquet.
+                "source_match_id": str(game_id_str),
+                "event_type": event_type,
+                "minute": minute,
+                "minute_sort": minute_sort,
+                "team": team_by_comp.get(ev.get("competitorId")),
+                "player": members.get(ev.get("playerId")),
+                # ids como string p/ casar o dtype das outras fontes (ESPN/wc2026)
+                # — o concat na reconciliação quebra o parquet se misturar int/str.
+                "player_id": None if ev.get("playerId") is None else str(ev.get("playerId")),
+                "period": None if ev.get("stageId") is None else str(ev.get("stageId")),
+                "source": "365scores",
+                "collected_at": collected_at,
+            })
+
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
 # Helpers internos
 # ---------------------------------------------------------------------------
 
