@@ -84,6 +84,34 @@ def fetch_calendar_matches(
     return _get(url).get("Results", [])
 
 
+# --- v3: detalhe de jogo --------------------------------------------------
+
+
+def fetch_match_live(id_stage: str, id_match: str) -> dict[str, Any]:
+    """Detalhe completo do jogo: escalações (com posição tática), gols, cartões,
+    substituições, árbitros, estádio.
+
+    Levanta FifaSourceError(404) se o jogo ainda não tem dados (futuro).
+    """
+    url = (
+        f"{V3_BASE}/live/football/{ID_COMPETITION}/{ID_SEASON}"
+        f"/{id_stage}/{id_match}?language=en"
+    )
+    return _get(url)
+
+
+def fetch_match_timeline(id_stage: str, id_match: str) -> dict[str, Any]:
+    """Timeline cronológica de eventos do jogo (stream ordenado por minuto).
+
+    Levanta FifaSourceError(404) se o jogo ainda não tem timeline.
+    """
+    url = (
+        f"{V3_BASE}/timelines/{ID_COMPETITION}/{ID_SEASON}"
+        f"/{id_stage}/{id_match}?language=en"
+    )
+    return _get(url)
+
+
 # --- fdh: avançado --------------------------------------------------------
 
 
@@ -93,3 +121,20 @@ def fetch_match_team_stats(id_ifes: str) -> dict[str, Any]:
     Levanta FifaSourceError(404) se o jogo ainda não finalizou.
     """
     return _get(f"{FDH_BASE}/stats/match/{id_ifes}/teams.json")
+
+
+def fetch_match_player_stats(id_ifes: str) -> dict[str, Any]:
+    """Métricas por jogador, para um jogo (dict idPlayer -> [[nome, valor, oficial], ...]).
+
+    Levanta FifaSourceError(404) se o jogo ainda não tem dados.
+    """
+    return _get(f"{FDH_BASE}/stats/match/{id_ifes}/players.json")
+
+
+def fetch_power_ranking_season() -> dict[str, Any]:
+    """Power Ranking oficial por jogador para a temporada inteira (~600 KB).
+
+    Retorna outfieldPlayers e goalkeepers com attacking/defensive/creativity
+    score+rank e tournamentHistory rodada a rodada.
+    """
+    return _get(f"{FDH_BASE}/powerranking/season/{ID_SEASON}.json")

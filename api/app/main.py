@@ -5,17 +5,15 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from api.app.db import Base, SessionLocal, engine
-from api.app.routers import matches, pools, predictions, users
+from api.app.routers import analytics, auth, matches, pools, predictions, users
 from api.app.seed import seed_rules
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Cria tabelas se ainda não existem (Alembic é a fonte de verdade em prod;
-    # isto facilita dev/SQLite) e seeda as regras builtin. Tolerante a banco
-    # ausente: em testes o schema/seed vêm da fixture, não daqui.
     try:
         Base.metadata.create_all(engine)
         db = SessionLocal()
@@ -23,13 +21,23 @@ async def lifespan(app: FastAPI):
             seed_rules(db)
         finally:
             db.close()
-    except Exception:  # noqa: BLE001 — não derruba o app se o banco real não existe
+    except Exception:  # noqa: BLE001
         pass
     yield
 
 
 app = FastAPI(title="FIFA Bolão Analytics", version="0.1.0", lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(analytics.router)
+app.include_router(auth.router)
 app.include_router(matches.router)
 app.include_router(users.router)
 app.include_router(pools.router)

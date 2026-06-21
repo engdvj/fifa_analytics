@@ -1,10 +1,17 @@
 """Pipeline FIFA: coleta -> raw -> silver -> gold (parquet).
 
-Fatia vertical fina: calendário (todos os jogos) + stats de time dos jogos
-finalizados. Fonte única FIFA. Saídas:
+Fonte única FIFA. Saídas:
 - raw    data/raw/fifa/<endpoint>/date=YYYYMMDD/collected_at=TS/*.json
-- silver data/silver/fifa/dim_match.parquet, fact_team_match_stats.parquet
-- gold   data/gold/dim_match.parquet, fact_team_match_stats.parquet
+- silver data/silver/fifa/*.parquet
+- gold   data/gold/*.parquet
+
+Tabelas geradas:
+  dim_match                  — todos os 104 jogos (calendário)
+  fact_team_match_stats      — 145 métricas por time por jogo (fdh)
+  fact_player_match_stats    — métricas por jogador por jogo (fdh)
+  fact_lineups               — escalações com posição tática (v3/live)
+  fact_events                — gols, cartões, substituições (v3/live)
+  fact_power_ranking         — power ranking por jogador na temporada (fdh)
 """
 
 from __future__ import annotations
@@ -27,11 +34,15 @@ def _raw_path(endpoint: str, *, ts: str, suffix: str = "") -> str:
     return str(RAW_DIR / "fifa" / endpoint / f"date={date}" / f"collected_at={ts}" / name)
 
 
+def _concat(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
 def run(*, only_finished: bool = True) -> dict[str, int]:
     """Executa o pipeline completo. Retorna contadores para log/CLI."""
     ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
 
-    # 1. coleta calendário (raw) ------------------------------------------
+    # 1. calendário (v3) -------------------------------------------------------
     logger.info("FIFA: coletando calendário…")
     results = client.fetch_calendar_matches()
     write_json(_raw_path("calendar", ts=ts), results)
@@ -40,39 +51,93 @@ def run(*, only_finished: bool = True) -> dict[str, int]:
     finished = matches[matches["status"] == "finalizado"]
     logger.info("FIFA: %d jogos (%d finalizados)", len(matches), len(finished))
 
-    # 2. stats de time por jogo finalizado (raw + transform) --------------
     targets = finished if only_finished else matches[matches["id_ifes"] != ""]
-    stats_frames = []
-    ok = miss = 0
+
+    # 2. por jogo: live (escalações + eventos) + player stats (fdh) -----------
+    team_stats_frames: list[pd.DataFrame] = []
+    player_stats_frames: list[pd.DataFrame] = []
+    lineup_frames: list[pd.DataFrame] = []
+    event_frames: list[pd.DataFrame] = []
+
+    ok_team = miss_team = ok_player = miss_player = ok_live = miss_live = 0
+
     for row in targets.itertuples():
-        if not row.id_ifes:
-            continue
-        try:
-            payload = client.fetch_match_team_stats(row.id_ifes)
-        except client.FifaSourceError as exc:
-            logger.warning("FIFA: sem stats p/ %s (%s): %s", row.match_id, row.id_ifes, exc)
-            miss += 1
-            continue
-        write_json(_raw_path("match_team_stats", ts=ts, suffix=row.id_ifes), payload)
-        stats_frames.append(
-            transforms.normalize_match_team_stats(row.match_id, row.id_ifes, payload)
-        )
-        ok += 1
+        # --- team stats (fdh) ---
+        if row.id_ifes:
+            try:
+                payload = client.fetch_match_team_stats(row.id_ifes)
+                write_json(_raw_path("match_team_stats", ts=ts, suffix=row.id_ifes), payload)
+                team_stats_frames.append(
+                    transforms.normalize_match_team_stats(row.match_id, row.id_ifes, payload)
+                )
+                ok_team += 1
+            except client.FifaSourceError as exc:
+                logger.warning("FIFA team stats: %s (%s): %s", row.match_id, row.id_ifes, exc)
+                miss_team += 1
 
-    team_stats = (
-        pd.concat(stats_frames, ignore_index=True) if stats_frames else pd.DataFrame()
-    )
+            # --- player stats (fdh) ---
+            try:
+                payload = client.fetch_match_player_stats(row.id_ifes)
+                write_json(_raw_path("match_player_stats", ts=ts, suffix=row.id_ifes), payload)
+                player_stats_frames.append(
+                    transforms.normalize_match_player_stats(row.match_id, row.id_ifes, payload)
+                )
+                ok_player += 1
+            except client.FifaSourceError as exc:
+                logger.warning("FIFA player stats: %s (%s): %s", row.match_id, row.id_ifes, exc)
+                miss_player += 1
 
-    # 3. silver + gold (parquet) ------------------------------------------
+        # --- live (v3): escalações + eventos ---
+        if row.id_stage and row.id_match:
+            try:
+                live = client.fetch_match_live(row.id_stage, row.id_match)
+                write_json(_raw_path("match_live", ts=ts, suffix=row.id_match), live)
+                lineup_frames.append(transforms.normalize_lineups(row.match_id, live))
+                event_frames.append(transforms.normalize_match_events(row.match_id, live))
+                ok_live += 1
+            except client.FifaSourceError as exc:
+                logger.warning("FIFA live: %s (%s/%s): %s", row.match_id, row.id_stage, row.id_match, exc)
+                miss_live += 1
+
+    # 3. power ranking (fdh) — uma chamada para a temporada inteira -----------
+    power_ranking = pd.DataFrame()
+    try:
+        pr_payload = client.fetch_power_ranking_season()
+        write_json(_raw_path("power_ranking_season", ts=ts), pr_payload)
+        power_ranking = transforms.normalize_power_ranking_season(pr_payload)
+        logger.info("FIFA power ranking: %d jogadores", len(power_ranking))
+    except client.FifaSourceError as exc:
+        logger.warning("FIFA power ranking: %s", exc)
+
+    # 4. gravar silver + gold --------------------------------------------------
+    tables = {
+        "dim_match.parquet": matches,
+        "fact_team_match_stats.parquet": _concat(team_stats_frames),
+        "fact_player_match_stats.parquet": _concat(player_stats_frames),
+        "fact_lineups.parquet": _concat(lineup_frames),
+        "fact_events.parquet": _concat(event_frames),
+        "fact_power_ranking.parquet": power_ranking,
+    }
+
     for base in (SILVER_DIR / "fifa", GOLD_DIR):
-        write_dataframe(base / "dim_match.parquet", matches)
-        if not team_stats.empty:
-            write_dataframe(base / "fact_team_match_stats.parquet", team_stats)
+        for name, df in tables.items():
+            if not df.empty:
+                write_dataframe(base / name, df)
 
-    logger.info("FIFA: gold gravado — stats de %d jogos (%d sem dados)", ok, miss)
+    logger.info(
+        "FIFA: gold gravado — team_stats=%d/%d, player_stats=%d/%d, live=%d/%d",
+        ok_team, ok_team + miss_team,
+        ok_player, ok_player + miss_player,
+        ok_live, ok_live + miss_live,
+    )
     return {
         "matches": len(matches),
         "finished": len(finished),
-        "stats_ok": ok,
-        "stats_missing": miss,
+        "team_stats_ok": ok_team,
+        "team_stats_missing": miss_team,
+        "player_stats_ok": ok_player,
+        "player_stats_missing": miss_player,
+        "live_ok": ok_live,
+        "live_missing": miss_live,
+        "power_ranking_players": len(power_ranking),
     }
