@@ -45,3 +45,7 @@ body {
   background: var(--border);
   border-radius: 3px;
 }
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
