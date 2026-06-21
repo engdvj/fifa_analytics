@@ -3,6 +3,7 @@
 import { useEffect, useCallback } from "react";
 import { PowerRankingPlayer } from "@/lib/api";
 import { scoreColor, positionLabel, compositeScore, rankLabel } from "@/lib/playerUtils";
+import { flag, getKit } from "@/lib/teamUtils";
 
 interface PlayerModalProps {
   player: PowerRankingPlayer;
@@ -35,67 +36,6 @@ function ProgressBar({ value, max = 10, color }: { value: number; max?: number; 
   );
 }
 
-function ComparisonBar({
-  label,
-  playerValue,
-  avgValue,
-}: {
-  label: string;
-  playerValue: number | null;
-  avgValue: number | null;
-}) {
-  if (playerValue === null && avgValue === null) return null;
-  return (
-    <div style={{ marginBottom: 16 }}>
-      <div
-        style={{
-          color: "var(--text-muted)",
-          fontSize: "0.72rem",
-          marginBottom: 6,
-          fontWeight: 600,
-          textTransform: "uppercase",
-          letterSpacing: "0.05em",
-        }}
-      >
-        {label}
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ width: 90, fontSize: "0.78rem", color: "var(--text)" }}>Jogador</span>
-          <ProgressBar value={playerValue ?? 0} color={scoreColor(playerValue)} />
-          <span
-            style={{
-              width: 36,
-              textAlign: "right",
-              fontSize: "0.82rem",
-              fontWeight: 700,
-              color: scoreColor(playerValue),
-            }}
-          >
-            {playerValue !== null ? playerValue.toFixed(1) : "—"}
-          </span>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ width: 90, fontSize: "0.78rem", color: "var(--text-muted)" }}>
-            Média pos.
-          </span>
-          <ProgressBar value={avgValue ?? 0} color="var(--text-muted)" />
-          <span
-            style={{
-              width: 36,
-              textAlign: "right",
-              fontSize: "0.82rem",
-              color: "var(--text-muted)",
-            }}
-          >
-            {avgValue !== null ? avgValue.toFixed(1) : "—"}
-          </span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export default function PlayerModal({ player, allPlayers, onClose }: PlayerModalProps) {
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -111,6 +51,7 @@ export default function PlayerModal({ player, allPlayers, onClose }: PlayerModal
 
   const isGoalkeeper = player.player_type === "goalkeeper";
   const composite = compositeScore(player);
+  const kit = getKit(player.team_name);
 
   const sameType = allPlayers.filter((p) => p.player_type === player.player_type);
 
@@ -131,13 +72,13 @@ export default function PlayerModal({ player, allPlayers, onClose }: PlayerModal
   const kpiItems = isGoalkeeper
     ? [
         {
-          label: "Jogo de bola",
+          label: "Jogo de Bola",
           score: player.attacking_score,
           rankInfo: atkRank,
           change: player.attacking_rank_change,
         },
         {
-          label: "Defesa do gol",
+          label: "Defesa do Gol",
           score: player.defensive_score,
           rankInfo: defRank,
           change: player.defensive_rank_change,
@@ -164,6 +105,22 @@ export default function PlayerModal({ player, allPlayers, onClose }: PlayerModal
         },
       ];
 
+  const comparisonItems = [
+    {
+      label: isGoalkeeper ? "Jogo de bola" : "Ataque",
+      playerVal: player.attacking_score,
+      avgVal: avgAtk,
+    },
+    {
+      label: isGoalkeeper ? "Defesa do gol" : "Defesa",
+      playerVal: player.defensive_score,
+      avgVal: avgDef,
+    },
+    ...(!isGoalkeeper
+      ? [{ label: "Criatividade", playerVal: player.creativity_score, avgVal: avgCrt }]
+      : []),
+  ];
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
@@ -179,188 +136,186 @@ export default function PlayerModal({ player, allPlayers, onClose }: PlayerModal
           width: "100%",
           maxHeight: "85vh",
           overflow: "auto",
+          display: "flex",
+          flexDirection: "column",
         }}
         onClick={(e) => e.stopPropagation()}
-        className="p-6"
       >
-        {/* Header */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "flex-start",
-            justifyContent: "space-between",
-            marginBottom: 20,
-          }}
-        >
+        {/* Hero */}
+        <div style={{
+          background: `linear-gradient(135deg, ${kit.main}33, var(--surface))`,
+          borderBottom: "1px solid var(--border)",
+          padding: "20px 24px",
+          display: "flex", alignItems: "center", gap: 16, flexShrink: 0,
+          borderRadius: "12px 12px 0 0",
+        }}>
+          {/* Jersey com bandeira */}
+          <div style={{
+            width: 56, height: 56, borderRadius: 12,
+            background: kit.main, border: `3px solid ${kit.border}`,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: 22, fontWeight: 900, color: kit.text,
+            boxShadow: `0 4px 14px ${kit.main}55`,
+            flexShrink: 0,
+          }}>
+            <span>{flag(player.team_name)}</span>
+          </div>
           <div>
-            <h2
-              style={{
-                fontWeight: 700,
-                fontSize: "1.15rem",
-                marginBottom: 4,
-                color: "var(--text)",
-              }}
-            >
-              {player.player_name ?? "—"}
+            <h2 style={{ color: "var(--text)", fontSize: 18, fontWeight: 800, margin: 0 }}>
+              {player.player_name ?? "?"}
             </h2>
-            <p style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>
-              {player.team_name ?? "—"} · {positionLabel(player.player_type)}
+            <p style={{ color: "var(--text-muted)", fontSize: 12, margin: "4px 0 0" }}>
+              {flag(player.team_name)} {player.team_name ?? "?"} · {positionLabel(player.player_type)}
             </p>
           </div>
           <button
             onClick={onClose}
             style={{
-              color: "var(--text-muted)",
-              background: "transparent",
+              marginLeft: "auto",
+              background: "none",
               border: "none",
+              color: "var(--text-muted)",
+              fontSize: 20,
               cursor: "pointer",
-              fontSize: "1.2rem",
+              padding: "4px 8px",
               lineHeight: 1,
-              padding: 4,
             }}
           >
             ✕
           </button>
         </div>
 
-        {/* KPI grid */}
-        <div
-          style={{
+        {/* Body */}
+        <div style={{ padding: "20px 24px", overflow: "auto" }}>
+          {/* KPI grid */}
+          <div style={{
             display: "grid",
             gridTemplateColumns: `repeat(${kpiItems.length}, 1fr)`,
             gap: 12,
             marginBottom: 20,
-          }}
-        >
-          {kpiItems.map(({ label, score, rankInfo, change }) => (
-            <div
-              key={label}
-              style={{
-                background: "var(--surface2)",
-                borderRadius: 8,
-                padding: "12px 14px",
-                textAlign: "center",
-              }}
-            >
+          }}>
+            {kpiItems.map(({ label, score, rankInfo, change }) => (
               <div
+                key={label}
                 style={{
-                  fontSize: "0.7rem",
-                  color: "var(--text-muted)",
-                  marginBottom: 6,
-                  fontWeight: 600,
+                  background: "var(--surface2)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 10,
+                  padding: "14px 16px",
+                  textAlign: "center",
+                  borderTop: `3px solid ${scoreColor(score)}`,
                 }}
               >
-                {label}
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: 6,
-                  marginBottom: 6,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: "1.35rem",
-                    fontWeight: 800,
-                    color: scoreColor(score),
-                  }}
-                >
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>{label}</div>
+                <div style={{
+                  fontSize: 28, fontWeight: 900, color: scoreColor(score), lineHeight: 1,
+                }}>
                   {score !== null ? score.toFixed(1) : "—"}
-                </span>
-                {rankInfo.arrow !== "—" && change !== null && change !== 0 && (
-                  <span
-                    style={{
-                      fontSize: "0.82rem",
-                      color: rankInfo.color,
-                      fontWeight: 600,
-                    }}
-                  >
-                    {rankInfo.arrow}
-                    {Math.abs(change)}
-                  </span>
-                )}
+                </div>
+                <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 6, marginTop: 6 }}>
+                  {rankInfo.rank && rankInfo.rank !== "—" && (
+                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{rankInfo.rank}</span>
+                  )}
+                  {change !== null && change !== 0 && (
+                    <span style={{
+                      fontSize: 11, fontWeight: 700, color: rankInfo.color,
+                      background: `${rankInfo.color}18`,
+                      border: `1px solid ${rankInfo.color}44`,
+                      borderRadius: 4, padding: "1px 5px",
+                    }}>
+                      {rankInfo.arrow}{Math.abs(change)}
+                    </span>
+                  )}
+                </div>
               </div>
-              <div style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
-                {rankInfo.rank}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Score composto */}
-        {composite !== null && (
-          <div
-            style={{
-              background: "var(--surface2)",
-              borderRadius: 8,
-              padding: "12px 16px",
-              marginBottom: 20,
-              display: "flex",
-              alignItems: "center",
-              gap: 12,
-            }}
-          >
-            <span
-              style={{
-                fontSize: "0.78rem",
-                color: "var(--text-muted)",
-                whiteSpace: "nowrap",
-              }}
-            >
-              Score composto
-            </span>
-            <ProgressBar value={composite} color={scoreColor(composite)} />
-            <span
-              style={{
-                fontWeight: 800,
-                fontSize: "1rem",
-                color: scoreColor(composite),
-                whiteSpace: "nowrap",
-              }}
-            >
-              {composite.toFixed(1)}
-            </span>
+            ))}
           </div>
-        )}
 
-        {/* Divider */}
-        <div style={{ borderTop: "1px solid var(--border)", marginBottom: 16 }} />
-        <div
-          style={{
+          {/* Score composto — barra estilizada */}
+          {composite !== null && (() => {
+            const color = scoreColor(composite);
+            return (
+              <div style={{
+                marginBottom: 20,
+                padding: "12px 16px",
+                background: "var(--surface2)",
+                border: "1px solid var(--border)",
+                borderRadius: 10,
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                  <span style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>Score Composto</span>
+                  <span style={{ fontSize: 20, fontWeight: 800, color }}>{composite.toFixed(1)}</span>
+                </div>
+                <div style={{ height: 8, background: "var(--surface)", borderRadius: 4, overflow: "hidden" }}>
+                  <div style={{
+                    height: "100%",
+                    width: `${(composite / 10) * 100}%`,
+                    background: `linear-gradient(90deg, ${color}88, ${color})`,
+                    borderRadius: 4,
+                    transition: "width 0.4s ease",
+                  }} />
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
+                  <span style={{ fontSize: 10, color: "var(--text-muted)" }}>0</span>
+                  <span style={{ fontSize: 10, color: "var(--text-muted)" }}>10</span>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Divider */}
+          <div style={{ borderTop: "1px solid var(--border)", marginBottom: 16 }} />
+          <div style={{
             fontSize: "0.72rem",
             color: "var(--text-muted)",
             fontWeight: 600,
             textTransform: "uppercase",
             letterSpacing: "0.08em",
             marginBottom: 14,
-          }}
-        >
-          Comparação com a posição
-        </div>
+          }}>
+            Comparação com a posição
+          </div>
 
-        {/* Comparison bars */}
-        <ComparisonBar
-          label={isGoalkeeper ? "Jogo de bola" : "Ataque"}
-          playerValue={player.attacking_score}
-          avgValue={avgAtk}
-        />
-        <ComparisonBar
-          label={isGoalkeeper ? "Defesa do gol" : "Defesa"}
-          playerValue={player.defensive_score}
-          avgValue={avgDef}
-        />
-        {!isGoalkeeper && (
-          <ComparisonBar
-            label="Criatividade"
-            playerValue={player.creativity_score}
-            avgValue={avgCrt}
-          />
-        )}
+          {/* Comparison bars — barras duplas */}
+          {comparisonItems.map(({ label, playerVal, avgVal }) => {
+            if (playerVal === null && avgVal === null) return null;
+            return (
+              <div key={label} style={{ marginBottom: 14 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                  <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{label}</span>
+                  <div style={{ display: "flex", gap: 12 }}>
+                    <span style={{ fontSize: 12, color: "var(--accent)", fontWeight: 700 }}>
+                      {playerVal !== null ? playerVal.toFixed(1) : "—"}
+                    </span>
+                    <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                      ~{avgVal !== null ? avgVal.toFixed(1) : "—"} média
+                    </span>
+                  </div>
+                </div>
+                {/* Barra do jogador */}
+                <div style={{ height: 6, background: "var(--surface2)", borderRadius: 3, overflow: "hidden", marginBottom: 2 }}>
+                  <div style={{
+                    height: "100%",
+                    width: `${Math.min(100, (playerVal ?? 0) * 10)}%`,
+                    background: "var(--accent)",
+                    borderRadius: 3,
+                    transition: "width 0.4s",
+                  }} />
+                </div>
+                {/* Barra da média */}
+                <div style={{ height: 4, background: "var(--surface2)", borderRadius: 2, overflow: "hidden", opacity: 0.5 }}>
+                  <div style={{
+                    height: "100%",
+                    width: `${Math.min(100, (avgVal ?? 0) * 10)}%`,
+                    background: "var(--text-muted)",
+                    borderRadius: 2,
+                  }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
 }
-

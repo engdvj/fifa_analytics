@@ -3,8 +3,9 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import useSWR from "swr";
 import { analytics, Match, LineupPlayer, TeamStat } from "@/lib/api";
-import { TeamSummary } from "@/lib/teamUtils";
+import { TeamSummary, flag, getKit } from "@/lib/teamUtils";
 import PitchView from "./PitchView";
+import EventTimeline from "./EventTimeline";
 
 const TABS = ["resumo", "jogos", "elenco", "estilo"] as const;
 type Tab = typeof TABS[number];
@@ -58,7 +59,7 @@ function formatDate(d: string | null) {
 // ─── Per-game expanded row ────────────────────────────────────────────────────
 
 function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
-  const [subTab, setSubTab] = useState<"stats" | "lineup">("stats");
+  const [subTab, setSubTab] = useState<"stats" | "lineup" | "timeline">("stats");
 
   const { data: lineups } = useSWR(
     `lineups-${match.match_id}`,
@@ -92,7 +93,7 @@ function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
       background: "var(--background)",
     }}>
       <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-        {(["stats", "lineup"] as const).map(t => (
+        {(["stats", "lineup", "timeline"] as const).map(t => (
           <button key={t}
             onClick={() => setSubTab(t)}
             style={{
@@ -105,7 +106,7 @@ function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
               cursor: "pointer",
             }}
           >
-            {t === "stats" ? "Estatísticas" : "Escalação"}
+            {t === "stats" ? "Estatísticas" : t === "lineup" ? "Escalação" : "Timeline"}
           </button>
         ))}
       </div>
@@ -163,6 +164,21 @@ function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
           />
         )
       )}
+
+      {subTab === "timeline" && (
+        !events ? (
+          <p style={{ fontSize: 12, color: "var(--text-muted)" }}>Carregando...</p>
+        ) : events.length === 0 ? (
+          <p style={{ fontSize: 12, color: "var(--text-muted)" }}>Sem eventos registrados.</p>
+        ) : (
+          <EventTimeline
+            events={events}
+            homeTeam={match.home_team ?? ""}
+            awayTeam={match.away_team ?? ""}
+            homeIdTeam={homeIdTeam}
+          />
+        )
+      )}
     </div>
   );
 }
@@ -178,6 +194,8 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
   const [activeTab, setActiveTab] = useState<Tab>("resumo");
   const [expandedGame, setExpandedGame] = useState<string | null>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
+
+  const kit = getKit(team.name);
 
   useEffect(() => {
     const fn = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -218,7 +236,7 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
 
   // Aggregate stats for Resumo metrics
   const { data: avgMetrics } = useSWR(
-    activeTab === "resumo" && teamIdTeam && finalized.length > 0
+    (activeTab === "resumo" || activeTab === "estilo") && teamIdTeam && finalized.length > 0
       ? `avg-metrics-${team.name}`
       : null,
     async () => {
@@ -282,31 +300,45 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
         }}
         onClick={e => e.stopPropagation()}
       >
-        {/* Header */}
+        {/* Header com camisa kit */}
         <div style={{
+          background: "linear-gradient(135deg, var(--surface2), var(--background))",
           borderBottom: "1px solid var(--border)",
           padding: "16px 24px",
           display: "flex",
           alignItems: "center",
-          justifyContent: "space-between",
+          gap: 16,
           flexShrink: 0,
         }}>
-          <div>
-            <h2 style={{ color: "var(--text)", fontSize: 18, fontWeight: 700, margin: 0 }}>
+          {/* Jersey/Camisa visual */}
+          <div style={{
+            width: 52,
+            height: 52,
+            borderRadius: 10,
+            background: kit.main,
+            border: `3px solid ${kit.border}`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 22,
+            fontWeight: 900,
+            color: kit.text,
+            flexShrink: 0,
+            boxShadow: `0 4px 14px ${kit.main}55`,
+          }}>
+            {flag(team.name)}
+          </div>
+          <div style={{ flex: 1 }}>
+            <h2 style={{ color: "var(--text)", fontSize: 20, fontWeight: 700, margin: 0 }}>
               {team.name}
-              {team.code && (
-                <span style={{ color: "var(--text-muted)", fontSize: 13, fontWeight: 400, marginLeft: 8 }}>
-                  {team.code}
-                </span>
-              )}
             </h2>
-            <p style={{ color: "var(--text-muted)", fontSize: 12, margin: "2px 0 0" }}>
-              {team.confederation} · {team.group ? `Grupo ${team.group}` : "—"}
+            <p style={{ color: "var(--text-muted)", fontSize: 12, margin: "3px 0 0" }}>
+              {team.confederation}{team.group ? ` · Grupo ${team.group}` : ""}{team.code ? ` · ${team.code}` : ""}
             </p>
           </div>
           <button
             onClick={onClose}
-            style={{ background: "none", border: "none", color: "var(--text-muted)", fontSize: 18, cursor: "pointer", padding: "4px 8px" }}
+            style={{ background: "none", border: "none", color: "var(--text-muted)", fontSize: 20, cursor: "pointer", padding: "4px 8px" }}
           >
             ✕
           </button>
@@ -346,26 +378,28 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
           {/* ── RESUMO ── */}
           {activeTab === "resumo" && (
             <div>
+              {/* Grid de stats campanha com bordas coloridas */}
               <div style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(4, 1fr)",
-                gap: 10,
+                gap: 8,
                 marginBottom: 20,
               }}>
                 {[
-                  { label: "Pontos", value: team.points },
-                  { label: "V/E/D", value: `${team.wins}/${team.draws}/${team.losses}` },
-                  { label: "Gols", value: `${team.gf}:${team.ga}` },
-                  { label: "Saldo", value: gd > 0 ? `+${gd}` : gd },
-                ].map(({ label, value }) => (
+                  { label: "Pontos", value: team.points, color: team.points > 0 ? "var(--green)" : "var(--text)" },
+                  { label: "V / E / D", value: `${team.wins}/${team.draws}/${team.losses}`, color: undefined },
+                  { label: "Gols", value: `${team.gf}:${team.ga}`, color: undefined },
+                  { label: "Saldo", value: gd >= 0 ? `+${gd}` : String(gd), color: gd > 0 ? "var(--green)" : gd < 0 ? "var(--red)" : "var(--text-muted)" },
+                ].map(({ label, value, color }) => (
                   <div key={label} style={{
                     background: "var(--surface2)",
-                    border: "1px solid var(--border)",
+                    border: `1px solid ${color ?? "var(--border)"}22`,
+                    borderLeft: `3px solid ${color ?? "var(--border)"}`,
                     borderRadius: 8,
                     padding: "12px 16px",
                     textAlign: "center",
                   }}>
-                    <div style={{ fontSize: 20, fontWeight: 700, color: "var(--text)" }}>{value}</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: color ?? "var(--text)" }}>{value}</div>
                     <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{label}</div>
                   </div>
                 ))}
@@ -429,7 +463,7 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
                           padding: "10px 14px",
                           display: "flex",
                           alignItems: "center",
-                          gap: 10,
+                          gap: 8,
                           cursor: m.status === "finalizado" ? "pointer" : "default",
                         }}
                         onClick={() => {
@@ -437,6 +471,7 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
                           setExpandedGame(expanded ? null : m.match_id);
                         }}
                       >
+                        {/* Badge resultado */}
                         {m.status === "finalizado" ? resultBadge(win, draw) : (
                           <span style={{
                             display: "inline-block",
@@ -451,16 +486,25 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
                             {m.status === "agendado" ? "—" : "AO VIVO"}
                           </span>
                         )}
-                        <span style={{ color: "var(--text)", fontSize: 13, fontWeight: 500 }}>
-                          vs {opp ?? "?"}
-                        </span>
-                        {m.status === "finalizado" && gf != null && ga != null && (
-                          <span style={{ color: "var(--text)", fontSize: 13, fontWeight: 700, marginLeft: "auto" }}>
-                            {gf} – {ga}
+
+                        {/* Confronto com bandeiras */}
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1 }}>
+                          <span style={{ fontSize: 16 }}>{flag(team.name)}</span>
+                          <span style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>
+                            {m.status === "finalizado" && gf != null ? gf : "—"}
                           </span>
-                        )}
-                        <span style={{ fontSize: 11, color: "var(--text-muted)", marginLeft: m.status === "finalizado" ? 8 : "auto" }}>
-                          {m.group ? `Grupo ${m.group}` : m.stage ?? ""} · {formatDate(m.date_utc)}
+                          <span style={{ color: "var(--text-muted)", fontSize: 12 }}>×</span>
+                          <span style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>
+                            {m.status === "finalizado" && ga != null ? ga : "—"}
+                          </span>
+                          <span style={{ fontSize: 16 }}>{flag(opp ?? null)}</span>
+                          <span style={{ color: "var(--text-muted)", fontSize: 13 }}>
+                            {opp ?? "?"}
+                          </span>
+                        </div>
+
+                        <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                          {m.group ? `Gr.${m.group}` : m.stage ?? ""} · {formatDate(m.date_utc)}
                         </span>
                         {m.status === "finalizado" && (
                           <span style={{ color: "var(--text-muted)", fontSize: 13 }}>
@@ -484,37 +528,90 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
               {!elencoLoading && roster.length === 0 && (
                 <p style={{ color: "var(--text-muted)", fontSize: 13 }}>Sem dados de escalação disponíveis.</p>
               )}
-              {roster.length > 0 && (
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                      {["#", "Jogador", "Pos", "Jogos"].map(h => (
-                        <th key={h} style={{ padding: "6px 10px", textAlign: "left", color: "var(--text-muted)", fontSize: 11, fontWeight: 600 }}>
-                          {h}
-                        </th>
+              {roster.length > 0 && (() => {
+                const mostGames = roster.reduce((best, r) => r.games > best.games ? r : best, roster[0]);
+                const captains = roster.filter(r => r.player.captain);
+                const gks = roster.filter(r => (r.player.position ?? "").toUpperCase().startsWith("G"));
+
+                const leaders = [
+                  { label: "Mais jogos", value: mostGames?.games, name: mostGames?.player.player_name },
+                  { label: "Capitão", value: captains[0]?.player.shirt_number ? `#${captains[0].player.shirt_number}` : "—", name: captains[0]?.player.player_name },
+                  { label: "Goleiro", value: gks[0]?.player.shirt_number ? `#${gks[0].player.shirt_number}` : "—", name: gks[0]?.player.player_name },
+                  { label: "Jogadores", value: roster.length, name: "no torneio" },
+                ];
+
+                return (
+                  <>
+                    {/* Leader cards */}
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 16 }}>
+                      {leaders.map(l => (
+                        <div key={l.label} style={{
+                          background: "var(--surface2)",
+                          border: "1px solid var(--border)",
+                          borderRadius: 8,
+                          padding: "10px 12px",
+                          textAlign: "center",
+                        }}>
+                          <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>{l.label}</div>
+                          <div style={{ fontSize: 18, fontWeight: 700, color: "var(--accent)" }}>{l.value ?? "—"}</div>
+                          <div style={{ fontSize: 11, color: "var(--text)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {l.name ?? "—"}
+                          </div>
+                        </div>
                       ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {roster.map(({ player: p, games }) => (
-                      <tr key={p.id_player} style={{ borderBottom: "1px solid var(--border)" }}>
-                        <td style={{ padding: "6px 10px", color: "var(--text-muted)" }}>
-                          {p.shirt_number ?? "—"}
-                        </td>
-                        <td style={{ padding: "6px 10px", color: "var(--text)", fontWeight: p.captain ? 600 : 400 }}>
-                          {p.player_name ?? "?"}{p.captain && " ©"}
-                        </td>
-                        <td style={{ padding: "6px 10px", color: "var(--text-muted)" }}>
-                          {p.position ?? "—"}
-                        </td>
-                        <td style={{ padding: "6px 10px", color: "var(--text-muted)" }}>
-                          {games}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
+                    </div>
+
+                    {/* Tabela do elenco */}
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                      <thead>
+                        <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                          {["#", "Jogador", "Pos", "Jogos"].map(h => (
+                            <th key={h} style={{ padding: "6px 10px", textAlign: "left", color: "var(--text-muted)", fontSize: 11, fontWeight: 600 }}>
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {roster.map(({ player: p, games }) => (
+                          <tr key={p.id_player} style={{ borderBottom: "1px solid var(--border)" }}>
+                            <td style={{ padding: "6px 10px", color: "var(--text-muted)", textAlign: "center" }}>
+                              {/* Jersey visual */}
+                              <span style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                width: 24,
+                                height: 24,
+                                borderRadius: 4,
+                                background: kit.main,
+                                color: kit.text,
+                                fontSize: 10,
+                                fontWeight: 700,
+                                border: `1px solid ${kit.border}`,
+                              }}>
+                                {p.shirt_number ?? "?"}
+                              </span>
+                            </td>
+                            <td style={{ padding: "6px 10px", color: "var(--text)", fontWeight: p.captain ? 700 : 400 }}>
+                              {p.player_name ?? "?"}{p.captain && " ©"}
+                              {p.is_starter === false && (
+                                <span style={{ fontSize: 10, color: "var(--text-muted)", marginLeft: 4 }}>res.</span>
+                              )}
+                            </td>
+                            <td style={{ padding: "6px 10px", color: "var(--text-muted)" }}>
+                              {p.position ?? "—"}
+                            </td>
+                            <td style={{ padding: "6px 10px", color: "var(--text-muted)", textAlign: "center" }}>
+                              {games}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </>
+                );
+              })()}
             </div>
           )}
 
@@ -532,38 +629,51 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
                   <p style={{ color: "var(--text-muted)", fontSize: 12, marginBottom: 16 }}>
                     Baseado em médias de {finalized.length} {finalized.length === 1 ? "jogo" : "jogos"}.
                   </p>
+
+                  {/* Eixos de estilo */}
                   {[
-                    { metric: "Possession", label: "Posse de bola", max: 100, unit: "%" },
-                    { metric: "XG", label: "xG por jogo", max: 4 },
-                    { metric: "PitchControl", label: "Controle de campo", max: 100, unit: "%" },
-                    { metric: "ForcedTurnovers", label: "Roubadas de bola", max: 20 },
-                    { metric: "CompletedBallProgressions", label: "Progressões concluídas", max: 60 },
-                    { metric: "ShotsTotal", label: "Finalizações por jogo", max: 25 },
-                  ].map(({ metric, label, max, unit }) => {
-                    const v = avgMetrics[metric];
-                    if (v == null) return null;
-                    const pct = Math.min(100, (v / max) * 100);
+                    { metric: "Possession", label: "Posse de bola", lowLabel: "Jogo direto", highLabel: "Posse alta", max: 100 },
+                    { metric: "XG", label: "Criação de chances", lowLabel: "Discreta", highLabel: "Ofensivo", max: 4 },
+                    { metric: "PitchControl", label: "Controle territorial", lowLabel: "Reativo", highLabel: "Dominante", max: 100 },
+                    { metric: "ForcedTurnovers", label: "Pressão alta", lowLabel: "Baixa", highLabel: "Intensa", max: 20 },
+                  ].map(({ metric, label, lowLabel, highLabel, max }) => {
+                    const v = avgMetrics?.[metric];
+                    const pct = v != null ? Math.min(100, (v / max) * 100) : null;
                     return (
-                      <div key={metric} style={{ marginBottom: 14 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                          <span style={{ fontSize: 13, color: "var(--text)" }}>{label}</span>
-                          <span style={{ fontSize: 13, color: "var(--accent)", fontWeight: 600 }}>
-                            {v.toFixed(1)}{unit ?? ""}
-                          </span>
+                      <div key={metric} style={{ marginBottom: 20 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                          <span style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>{label}</span>
+                          {v != null && (
+                            <span style={{ fontSize: 12, color: "var(--accent)", fontWeight: 700 }}>
+                              {v.toFixed(1)}
+                            </span>
+                          )}
                         </div>
-                        <div style={{
-                          height: 6,
-                          background: "var(--surface2)",
-                          borderRadius: 3,
-                          overflow: "hidden",
-                        }}>
-                          <div style={{
-                            height: "100%",
-                            width: `${pct}%`,
-                            background: "var(--accent)",
-                            borderRadius: 3,
-                            transition: "width 0.4s ease",
-                          }} />
+                        {/* Track com dot deslizante */}
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ fontSize: 11, color: "var(--text-muted)", width: 60, textAlign: "right", flexShrink: 0 }}>{lowLabel}</span>
+                          <div style={{ flex: 1, height: 8, background: "var(--surface2)", borderRadius: 4, position: "relative" }}>
+                            {/* Linha central */}
+                            <div style={{ position: "absolute", top: 2, bottom: 2, left: "50%", width: 1, background: "var(--border)", transform: "translateX(-50%)" }} />
+                            {pct != null ? (
+                              <div style={{
+                                position: "absolute",
+                                top: "50%",
+                                left: `${pct}%`,
+                                width: 14,
+                                height: 14,
+                                borderRadius: "50%",
+                                background: "var(--accent)",
+                                border: "2px solid var(--background)",
+                                transform: "translate(-50%, -50%)",
+                                transition: "left 0.4s ease",
+                                boxShadow: "0 0 6px var(--accent)88",
+                              }} />
+                            ) : (
+                              <div style={{ position: "absolute", inset: 0, borderRadius: 4, background: "var(--surface2)", opacity: 0.5 }} />
+                            )}
+                          </div>
+                          <span style={{ fontSize: 11, color: "var(--text-muted)", width: 60, flexShrink: 0 }}>{highLabel}</span>
                         </div>
                       </div>
                     );
@@ -571,7 +681,7 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
 
                   {/* Texto descritivo */}
                   <div style={{
-                    marginTop: 20,
+                    marginTop: 8,
                     padding: "12px 16px",
                     background: "var(--surface2)",
                     border: "1px solid var(--border)",

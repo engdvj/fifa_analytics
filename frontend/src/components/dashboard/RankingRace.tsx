@@ -1,9 +1,12 @@
 "use client";
 
+import React from "react";
 import useSWR from "swr";
 import { analytics, Match } from "@/lib/api";
 import { useAvailableMetrics } from "@/lib/hooks";
 import Spinner from "@/components/ui/Spinner";
+import { flag } from "@/lib/teamUtils";
+import { rankBarColor } from "@/lib/playerUtils";
 
 // High-interest metrics shown first in the dropdown
 const PRIORITY_METRICS = [
@@ -140,9 +143,30 @@ export default function RankingRace({
       {!statsLoading && snapshot.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
           {snapshot.map((row, idx) => {
+            const rank = idx + 1;
             const label = nameMap.get(row.id_team) ?? row.id_team;
             const isSelected = selectedTeams.includes(label);
             const pct = maxValue > 0 ? (row.value / maxValue) * 100 : 0;
+            const barColor = isSelected ? "var(--accent)" : rankBarColor(rank, snapshot.length);
+
+            // Badge de rank com cores ouro/prata/bronze
+            const rankBadgeStyle: React.CSSProperties = {
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: 24,
+              height: 24,
+              borderRadius: "50%",
+              fontSize: 11,
+              fontWeight: 700,
+              flexShrink: 0,
+              background: rank === 1 ? "#f5c542"
+                : rank === 2 ? "#c0c0c0"
+                : rank === 3 ? "#cd7f32"
+                : "var(--surface2)",
+              color: rank <= 3 ? "#111827" : "var(--text-muted)",
+              border: rank <= 3 ? "none" : "1px solid var(--border)",
+            };
 
             return (
               <button
@@ -152,79 +176,60 @@ export default function RankingRace({
                   display: "flex",
                   alignItems: "center",
                   gap: 8,
-                  padding: "6px 10px",
+                  padding: "5px 8px",
                   borderRadius: 7,
-                  border: isSelected
-                    ? "1px solid var(--accent)"
-                    : "1px solid transparent",
+                  border: isSelected ? "1px solid var(--accent)" : "1px solid transparent",
                   background: isSelected ? "rgba(88,166,255,0.07)" : "transparent",
                   cursor: "pointer",
-                  textAlign: "left",
                   width: "100%",
+                  textAlign: "left",
                   transition: "all 0.15s",
                 }}
               >
-                <span
-                  style={{
-                    color: "var(--text-muted)",
-                    fontSize: "0.72rem",
-                    minWidth: 22,
-                    textAlign: "right",
-                  }}
-                >
-                  #{idx + 1}
-                </span>
+                {/* Rank badge */}
+                <span style={rankBadgeStyle}>{rank}</span>
 
-                <span
-                  style={{
-                    fontSize: "0.82rem",
-                    fontWeight: isSelected ? 600 : 400,
-                    color: isSelected ? "var(--accent)" : "var(--text)",
-                    minWidth: 140,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
+                {/* Flag */}
+                <span style={{ fontSize: 16, lineHeight: 1, flexShrink: 0 }}>{flag(label)}</span>
+
+                {/* Team name */}
+                <span style={{
+                  fontSize: 13,
+                  fontWeight: isSelected ? 600 : 400,
+                  color: isSelected ? "var(--accent)" : "var(--text)",
+                  minWidth: 120,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}>
                   {label}
                 </span>
 
-                <div style={{ flex: 1, height: 18, position: "relative" }}>
-                  <div
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      borderRadius: 4,
-                      background: "var(--surface2)",
-                    }}
-                  />
-                  <div
-                    style={{
-                      position: "absolute",
-                      top: 0,
-                      left: 0,
-                      bottom: 0,
-                      width: `${pct}%`,
-                      borderRadius: 4,
-                      background: isSelected
-                        ? "var(--accent)"
-                        : rawStats
-                        ? "var(--green)"
-                        : "var(--border)",
-                      transition: "width 0.6s ease",
-                    }}
-                  />
+                {/* Bar */}
+                <div style={{ flex: 1, height: 20, position: "relative" }}>
+                  <div style={{
+                    position: "absolute", inset: 0, borderRadius: 4,
+                    background: "var(--surface2)",
+                  }} />
+                  <div style={{
+                    position: "absolute", top: 0, left: 0, bottom: 0,
+                    width: `${pct}%`,
+                    borderRadius: 4,
+                    background: barColor,
+                    transition: "width 0.55s cubic-bezier(0.4,0,0.2,1), background 0.45s ease",
+                    opacity: isSelected ? 1 : 0.85,
+                  }} />
                 </div>
 
-                <span
-                  style={{
-                    fontSize: "0.8rem",
-                    fontWeight: 600,
-                    minWidth: 60,
-                    textAlign: "right",
-                    color: isSelected ? "var(--accent)" : "var(--text)",
-                  }}
-                >
+                {/* Value */}
+                <span style={{
+                  fontSize: 12,
+                  fontWeight: 700,
+                  minWidth: 64,
+                  textAlign: "right",
+                  color: isSelected ? "var(--accent)" : "var(--text)",
+                  flexShrink: 0,
+                }}>
                   {row.value.toLocaleString("pt-BR", { maximumFractionDigits: 2 })}
                 </span>
               </button>

@@ -4,6 +4,7 @@ import { useState, useMemo } from "react";
 import useSWR from "swr";
 import { analytics, PowerRankingPlayer } from "@/lib/api";
 import { scoreColor, positionLabel, compositeScore, rankLabel } from "@/lib/playerUtils";
+import { flag, getKit } from "@/lib/teamUtils";
 import PlayerModal from "@/components/dashboard/PlayerModal";
 
 const PAGE_SIZE = 25;
@@ -268,6 +269,7 @@ export default function PlayersTable() {
                 const rowNum = (page - 1) * PAGE_SIZE + idx + 1;
                 const comp = compositeScore(p);
                 const isGoalkeeper = p.player_type === "goalkeeper";
+                const kit = getKit(p.team_name);
                 return (
                   <tr
                     key={p.id_player}
@@ -278,11 +280,25 @@ export default function PlayersTable() {
                     <td className="py-2.5 px-2" style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>
                       {rowNum}
                     </td>
-                    <td className="py-2.5 px-2 font-medium" style={{ color: "var(--text)" }}>
-                      {p.player_name ?? "—"}
+                    {/* Jogador: mini jersey + nome */}
+                    <td style={{ padding: "8px 10px", minWidth: 160 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{
+                          display: "inline-flex", alignItems: "center", justifyContent: "center",
+                          width: 20, height: 20, borderRadius: 4, flexShrink: 0,
+                          background: kit.main, border: `1px solid ${kit.border}`,
+                          fontSize: 9, fontWeight: 700, color: kit.text,
+                        }}>
+                          {isGoalkeeper ? "GK" : "LN"}
+                        </span>
+                        <span style={{ color: "var(--text)", fontSize: 13 }}>
+                          {p.player_name ?? "?"}
+                        </span>
+                      </div>
                     </td>
-                    <td className="py-2.5 px-2" style={{ color: "var(--text-muted)" }}>
-                      {p.team_name ?? "—"}
+                    {/* Seleção: bandeira + nome */}
+                    <td style={{ padding: "8px 10px", color: "var(--text-muted)", fontSize: 12 }}>
+                      {flag(p.team_name)} {p.team_name ?? "?"}
                     </td>
                     <td className="py-2.5 px-2" style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>
                       {positionLabel(p.player_type)}
@@ -300,10 +316,23 @@ export default function PlayersTable() {
                         <ScoreCell value={p.creativity_score} change={p.creativity_rank_change} />
                       )}
                     </td>
-                    <td className="py-2.5 px-2 text-right">
-                      <span style={{ color: scoreColor(comp), fontWeight: 700 }}>
-                        {comp !== null ? comp.toFixed(1) : "—"}
-                      </span>
+                    {/* Score composto com mini barra */}
+                    <td style={{ padding: "8px 10px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end" }}>
+                        <span style={{ color: scoreColor(comp), fontWeight: 700, fontSize: 13 }}>
+                          {comp !== null ? comp.toFixed(1) : "—"}
+                        </span>
+                        {comp !== null && (
+                          <div style={{ width: 40, height: 4, background: "var(--surface2)", borderRadius: 2, overflow: "hidden" }}>
+                            <div style={{
+                              height: "100%",
+                              width: `${(comp / 10) * 100}%`,
+                              background: scoreColor(comp),
+                              borderRadius: 2,
+                            }} />
+                          </div>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );

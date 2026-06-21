@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { LineupPlayer, MatchEvent } from "@/lib/api";
+import { getKit } from "@/lib/teamUtils";
 
 const W = 620;
 const H = 420;
@@ -78,6 +79,9 @@ export default function PitchView({
 }: PitchViewProps) {
   const [hovered, setHovered] = useState<string | null>(null);
 
+  const homeKit = getKit(homeTeam);
+  const awayKit = getKit(awayTeam);
+
   const goalPlayers = new Set(events.filter(e => e.event_type === "goal").map(e => e.id_player));
   const yellowCards = new Set(
     events
@@ -113,7 +117,7 @@ export default function PitchView({
   function renderPlayer(p: LineupPlayer, side: "home" | "away", idx: number) {
     const [cx, cy] = toSVG(p.lineup_x, p.lineup_y, p.position, idx, side);
     const isHovered = hovered === p.id_player;
-    const fill = side === "home" ? "#1d4ed8" : "#b91c1c";
+    const kit = side === "home" ? homeKit : awayKit;
     const r = isHovered ? 19 : 15;
 
     return (
@@ -125,15 +129,15 @@ export default function PitchView({
       >
         <circle
           cx={cx} cy={cy} r={r}
-          fill={fill}
-          stroke={isHovered ? "#58a6ff" : "rgba(255,255,255,0.28)"}
-          strokeWidth={isHovered ? 2.5 : 1.5}
+          fill={kit.main}
+          stroke={isHovered ? "#58a6ff" : kit.border}
+          strokeWidth={isHovered ? 2.5 : 2}
           style={{ transition: "r 0.12s, stroke 0.12s" }}
         />
-        <text x={cx} y={cy + 4} textAnchor="middle" fill="white" fontSize={9.5} fontWeight="700">
+        <text x={cx} y={cy + 4} textAnchor="middle" fill={kit.text} fontSize={9.5} fontWeight="700">
           {p.shirt_number ?? "?"}
         </text>
-        <text x={cx} y={cy + 27} textAnchor="middle" fill="rgba(255,255,255,0.82)" fontSize={8}>
+        <text x={cx} y={cy + 27} textAnchor="middle" fill={`${kit.text}99`} fontSize={8}>
           {shortName(p.player_name)}
         </text>
         {p.captain && (
@@ -167,8 +171,15 @@ export default function PitchView({
         viewBox={`0 0 ${W} ${H}`}
         style={{ width: "100%", maxWidth: W, display: "block", margin: "0 auto", borderRadius: 8 }}
       >
-        {/* Grass */}
-        <rect width={W} height={H} fill="#14532d" rx={8} />
+        <defs>
+          <pattern id="pitch-stripes" patternUnits="userSpaceOnUse" width="100%" height={H / 9}>
+            <rect width="100%" height={H / 9} fill="#166534" />
+            <rect y={H / 18} width="100%" height={H / 18} fill="#14532d" />
+          </pattern>
+        </defs>
+
+        {/* Grass with stripes */}
+        <rect width={W} height={H} fill="url(#pitch-stripes)" rx={8} />
 
         {/* Pitch lines */}
         <rect x={PAD} y={PAD} width={W - PAD * 2} height={H - PAD * 2}

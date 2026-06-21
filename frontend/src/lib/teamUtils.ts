@@ -33,6 +33,87 @@ export interface TeamSummary {
   confederation: string;
 }
 
+export const FLAGS: Record<string, string> = {
+  "África do Sul": "🇿🇦", "Alemanha": "🇩🇪", "Argélia": "🇩🇿",
+  "Arábia Saudita": "🇸🇦", "Argentina": "🇦🇷", "Austrália": "🇦🇺",
+  "Bélgica": "🇧🇪", "Bósnia e Herzegovina": "🇧🇦", "Brasil": "🇧🇷",
+  "Cabo Verde": "🇨🇻", "Canadá": "🇨🇦", "Catar": "🇶🇦",
+  "Colômbia": "🇨🇴", "Coreia do Sul": "🇰🇷", "Costa do Marfim": "🇨🇮",
+  "Côte d'Ivoire": "🇨🇮", "Croácia": "🇭🇷", "Curaçao": "🇨🇼",
+  "Egito": "🇪🇬", "Equador": "🇪🇨", "Escócia": "🏴󠁧󠁢󠁳󠁣󠁴󠁿",
+  "Espanha": "🇪🇸", "Estados Unidos": "🇺🇸", "França": "🇫🇷",
+  "Gana": "🇬🇭", "Haiti": "🇭🇹", "Inglaterra": "🏴󠁧󠁢󠁥󠁮󠁧󠁿",
+  "Iraque": "🇮🇶", "Irã": "🇮🇷", "Japão": "🇯🇵",
+  "Jordânia": "🇯🇴", "Marrocos": "🇲🇦", "México": "🇲🇽",
+  "Noruega": "🇳🇴", "Nova Zelândia": "🇳🇿", "Panamá": "🇵🇦",
+  "Paraguai": "🇵🇾", "Países Baixos": "🇳🇱", "Portugal": "🇵🇹",
+  "RD Congo": "🇨🇩", "Senegal": "🇸🇳", "Suécia": "🇸🇪",
+  "Suíça": "🇨🇭", "Tchéquia": "🇨🇿", "Tunísia": "🇹🇳",
+  "Turquia": "🇹🇷", "Uruguai": "🇺🇾", "Uzbequistão": "🇺🇿", "Áustria": "🇦🇹",
+};
+
+export function flag(team: string | null): string {
+  return team ? (FLAGS[team] ?? "🏳️") : "🏳️";
+}
+
+export interface KitColors {
+  main: string;
+  border: string;
+  text: string;
+}
+
+export const KIT_COLORS: Record<string, KitColors> = {
+  "Alemanha": { main: "#f8fafc", border: "#111827", text: "#111827" },
+  "Argentina": { main: "#75aadb", border: "#f8fafc", text: "#111827" },
+  "Austrália": { main: "#facc15", border: "#15803d", text: "#15803d" },
+  "Bélgica": { main: "#dc2626", border: "#111827", text: "#f8fafc" },
+  "Brasil": { main: "#f4d21f", border: "#078930", text: "#1d4ed8" },
+  "Cabo Verde": { main: "#2563eb", border: "#f8fafc", text: "#f8fafc" },
+  "Canadá": { main: "#dc2626", border: "#f8fafc", text: "#f8fafc" },
+  "Colômbia": { main: "#facc15", border: "#2563eb", text: "#111827" },
+  "Coreia do Sul": { main: "#f8fafc", border: "#dc2626", text: "#111827" },
+  "Costa do Marfim": { main: "#f97316", border: "#15803d", text: "#f8fafc" },
+  "Côte d'Ivoire": { main: "#f97316", border: "#15803d", text: "#f8fafc" },
+  "Croácia": { main: "#f8fafc", border: "#dc2626", text: "#111827" },
+  "Egito": { main: "#dc2626", border: "#f8fafc", text: "#f8fafc" },
+  "Equador": { main: "#facc15", border: "#2563eb", text: "#111827" },
+  "Escócia": { main: "#2563eb", border: "#f8fafc", text: "#f8fafc" },
+  "Espanha": { main: "#dc2626", border: "#facc15", text: "#f8fafc" },
+  "Estados Unidos": { main: "#f8fafc", border: "#1d4ed8", text: "#1f2a44" },
+  "França": { main: "#1d4ed8", border: "#f8fafc", text: "#f8fafc" },
+  "Gana": { main: "#facc15", border: "#111827", text: "#111827" },
+  "Inglaterra": { main: "#f8fafc", border: "#dc2626", text: "#1f2a44" },
+  "Irã": { main: "#f8fafc", border: "#15803d", text: "#111827" },
+  "Iraque": { main: "#15803d", border: "#f8fafc", text: "#f8fafc" },
+  "Japão": { main: "#2563eb", border: "#f8fafc", text: "#f8fafc" },
+  "Jordânia": { main: "#dc2626", border: "#f8fafc", text: "#f8fafc" },
+  "Marrocos": { main: "#dc2626", border: "#15803d", text: "#f8fafc" },
+  "México": { main: "#15803d", border: "#f8fafc", text: "#f8fafc" },
+  "Noruega": { main: "#dc2626", border: "#1d4ed8", text: "#f8fafc" },
+  "Nova Zelândia": { main: "#111827", border: "#f8fafc", text: "#f8fafc" },
+  "Países Baixos": { main: "#f97316", border: "#111827", text: "#111827" },
+  "Panamá": { main: "#dc2626", border: "#f8fafc", text: "#f8fafc" },
+  "Paraguai": { main: "#dc2626", border: "#f8fafc", text: "#f8fafc" },
+  "Portugal": { main: "#7f1d1d", border: "#15803d", text: "#f8fafc" },
+  "RD Congo": { main: "#dc2626", border: "#facc15", text: "#f8fafc" },
+  "Senegal": { main: "#15803d", border: "#f8fafc", text: "#f8fafc" },
+  "Suécia": { main: "#2563eb", border: "#facc15", text: "#facc15" },
+  "Suíça": { main: "#dc2626", border: "#f8fafc", text: "#f8fafc" },
+  "Turquia": { main: "#dc2626", border: "#f8fafc", text: "#f8fafc" },
+  "Tchéquia": { main: "#dc2626", border: "#f8fafc", text: "#f8fafc" },
+  "Tunísia": { main: "#dc2626", border: "#f8fafc", text: "#f8fafc" },
+  "Uruguai": { main: "#60a5fa", border: "#111827", text: "#111827" },
+  "Uzbequistão": { main: "#2563eb", border: "#f8fafc", text: "#f8fafc" },
+  "Áustria": { main: "#dc2626", border: "#f8fafc", text: "#f8fafc" },
+  "Curaçao": { main: "#1d4ed8", border: "#f8fafc", text: "#f8fafc" },
+  "Haiti": { main: "#1d4ed8", border: "#dc2626", text: "#f8fafc" },
+  "Bósnia e Herzegovina": { main: "#1d4ed8", border: "#facc15", text: "#facc15" },
+};
+
+export function getKit(team: string | null): KitColors {
+  return (team && KIT_COLORS[team]) ? KIT_COLORS[team] : { main: "#374151", border: "#6b7280", text: "#f8fafc" };
+}
+
 export function deriveTeams(matches: Match[]): TeamSummary[] {
   const map = new Map<string, TeamSummary>();
 
