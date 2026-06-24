@@ -39,6 +39,25 @@ const TAB_LABEL: Record<Tab, string> = {
   estilo: "Estilo",
 };
 
+// 6 arquétipos de estilo (do `estilo_jogo` no snapshot) — rótulo + descrição +
+// id da definição ESPECÍFICA daquele estilo (não a genérica "estilo_jogo").
+const ARCHETYPES: Record<string, { emoji: string; desc: string; def: string }> = {
+  "Posse": { emoji: "🎯", desc: "Domina com a bola — constrói com paciência e progride em posse.", def: "estilo_posse" },
+  "Pressão Alta": { emoji: "🔥", desc: "Sufoca no campo adversário: recupera alto e pressiona a saída de bola.", def: "estilo_pressao_alta" },
+  "Contra-ataque": { emoji: "⚡", desc: "Cede a bola e ataca na transição — rápido e vertical.", def: "estilo_contra_ataque" },
+  "Retranca": { emoji: "🧱", desc: "Bloco baixo, defende compacto e cede o território ao rival.", def: "estilo_retranca" },
+  "Jogo Direto": { emoji: "🚀", desc: "Pula o meio-campo com bola longa, busca o ataque direto.", def: "estilo_jogo_direto" },
+  "Bola Parada": { emoji: "⛳", desc: "Tira proveito das bolas paradas — escanteios e faltas.", def: "estilo_bola_parada" },
+};
+// 4 eixos bipolares do snapshot (z-score 0-100, 50 = média do torneio).
+// `hint` explica o eixo em uma linha; low/high são os polos.
+const STYLE_AXES: { key: string; label: string; low: string; high: string; hint: string }[] = [
+  { key: "estilo_posse", label: "Construção", low: "Jogo direto", high: "Posse apoiada", hint: "Como leva a bola ao ataque: chutão/lançamento vs. trocar passes e progredir com posse." },
+  { key: "estilo_pressao", label: "Linha de pressão", low: "Bloco recuado", high: "Pressão alta", hint: "Onde defende: espera no campo de defesa vs. pressiona a saída de bola adversária." },
+  { key: "estilo_verticalidade", label: "Ritmo de ataque", low: "Cadenciado", high: "Vertical", hint: "Velocidade ao atacar: circula com calma (toque a toque) vs. busca o gol rápido em transição/bola longa." },
+  { key: "estilo_bola_parada", label: "Bola parada", low: "Rara", high: "Frequente", hint: "Quanto do perigo vem de escanteios e faltas em vez de jogadas com a bola rolando." },
+];
+
 const DISPLAY_METRICS: [string, string][] = [
   ["Possession", "Posse"],
   ["XG", "xG"],
@@ -224,7 +243,6 @@ function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
   const teamSide = match.home_team === team.name ? "home" : "away";
   const teamIdTeam = lineups?.find(p => p.team_side === teamSide)?.id_team ?? "";
   const oppIdTeam = lineups?.find(p => p.team_side !== teamSide)?.id_team ?? "";
-  const homeIdTeam = lineups?.find(p => p.team_side === "home")?.id_team ?? "";
 
   const teamStats = statsData?.teams?.[teamIdTeam] ?? [];
   const oppStats = statsData?.teams?.[oppIdTeam] ?? [];
@@ -232,6 +250,15 @@ function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
   const homePlayers: LineupPlayer[] = lineups?.filter(p => p.team_side === "home") ?? [];
   const awayPlayers: LineupPlayer[] = lineups?.filter(p => p.team_side === "away") ?? [];
   const oppName = teamSide === "home" ? match.away_team : match.home_team;
+
+  // Campo e linha do tempo orientam o TIME VISTO à esquerda (igual ao cabeçalho,
+  // que lista a seleção do modal primeiro). Se o time visto é o visitante,
+  // inverte os lados — como lineup_x/y vêm nulos, o layout é simétrico.
+  const viewedIsHome = teamSide === "home";
+  const leftPlayers = viewedIsHome ? homePlayers : awayPlayers;
+  const rightPlayers = viewedIsHome ? awayPlayers : homePlayers;
+  const leftTeam = team.name;
+  const rightTeam = oppName ?? "";
 
   return (
     <div style={{
@@ -291,12 +318,12 @@ function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
           <p style={{ fontSize: 12, color: "var(--text-muted)" }}>Sem dados de escalação.</p>
         ) : (
           <PitchView
-            homePlayers={homePlayers}
-            awayPlayers={awayPlayers}
-            homeTeam={match.home_team ?? ""}
-            awayTeam={match.away_team ?? ""}
+            homePlayers={leftPlayers}
+            awayPlayers={rightPlayers}
+            homeTeam={leftTeam}
+            awayTeam={rightTeam}
             events={events ?? []}
-            homeIdTeam={homeIdTeam}
+            homeIdTeam={teamIdTeam}
             playerStats={playerStatsMap}
             playerScores={scoreById}
           />
@@ -309,11 +336,11 @@ function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
         ) : (
           <MatchTimeline
             events={events}
-            homePlayers={homePlayers}
-            awayPlayers={awayPlayers}
-            homeTeam={match.home_team ?? ""}
-            awayTeam={match.away_team ?? ""}
-            homeIdTeam={homeIdTeam}
+            homePlayers={leftPlayers}
+            awayPlayers={rightPlayers}
+            homeTeam={leftTeam}
+            awayTeam={rightTeam}
+            homeIdTeam={teamIdTeam}
           />
         )
       )}
@@ -352,43 +379,15 @@ export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
     () => analytics.teamsInfo(team.name)
   );
 
-  // Estilo metrics: need id_team from first game lineup
-  const { data: firstLineups } = useSWR(
-    activeTab === "estilo" && firstGame
-      ? `lineups-first-${team.name}`
-      : null,
-    () => analytics.matchLineups(firstGame!.match_id)
+  // Estilo: usa os eixos JÁ normalizados do snapshot (z-score 0-100, 50=média),
+  // não os stats crus — assim a bolinha fica na posição certa e comparável.
+  const { data: teamSnaps } = useSWR(
+    activeTab === "estilo" ? `team-snaps-${snapshot ?? "last"}` : null,
+    () => analytics.teamSnapshots(snapshot)
   );
-  const teamIdTeam = useMemo(() => {
-    if (!firstLineups || !firstGame) return null;
-    const side = firstGame.home_team === team.name ? "home" : "away";
-    return firstLineups.find(p => p.team_side === side)?.id_team ?? null;
-  }, [firstLineups, firstGame, team.name]);
-
-  // Aggregate stats for Estilo metrics
-  const { data: avgMetrics } = useSWR(
-    activeTab === "estilo" && teamIdTeam && finalized.length > 0
-      ? `avg-metrics-${team.name}`
-      : null,
-    async () => {
-      const results = await Promise.all(
-        finalized.map(m => analytics.matchStats(m.match_id).catch(() => null))
-      );
-      const sums = new Map<string, { sum: number; count: number }>();
-      for (const r of results) {
-        if (!r || !teamIdTeam) continue;
-        for (const s of r.teams[teamIdTeam] ?? []) {
-          if (s.value == null) continue;
-          const cur = sums.get(s.metric) ?? { sum: 0, count: 0 };
-          cur.sum += s.value;
-          cur.count++;
-          sums.set(s.metric, cur);
-        }
-      }
-      const avgs: Record<string, number> = {};
-      for (const [k, v] of sums) avgs[k] = v.sum / v.count;
-      return avgs;
-    }
+  const estilo = useMemo(
+    () => teamSnaps?.find((s) => s.team === team.name) ?? null,
+    [teamSnaps, team.name]
   );
 
   // Stats por jogador (elenco rico + artilheiro do Resumo) — do snapshot atual
@@ -664,92 +663,87 @@ export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
           {activeTab === "estilo" && (
             <div>
               {finalized.length === 0 ? (
-                <p style={{ color: "var(--text-muted)", fontSize: 13 }}>
-                  Sem jogos finalizados para análise de estilo.
-                </p>
-              ) : !avgMetrics ? (
-                <p style={{ color: "var(--text-muted)", fontSize: 13 }}>Calculando...</p>
+                <p style={{ color: "var(--text-muted)", fontSize: 13 }}>Sem jogos finalizados para análise de estilo.</p>
+              ) : !estilo ? (
+                <p style={{ color: "var(--text-muted)", fontSize: 13 }}>Calculando…</p>
+              ) : !estilo.estilo_jogo ? (
+                <p style={{ color: "var(--text-muted)", fontSize: 13 }}>Sem dados de estilo (métricas de fase indisponíveis para esta seleção).</p>
               ) : (
                 <div>
-                  <p style={{ color: "var(--text-muted)", fontSize: 12, marginBottom: 16 }}>
-                    Estilo de jogo<DefinitionBubble id="estilo_jogo" size={12} /> · baseado em médias de {finalized.length} {finalized.length === 1 ? "jogo" : "jogos"}.
-                  </p>
-
-                  {/* Eixos de estilo */}
-                  {[
-                    { metric: "Possession", label: "Posse de bola", lowLabel: "Jogo direto", highLabel: "Posse alta", max: 100 },
-                    { metric: "XG", label: "Criação de chances", lowLabel: "Discreta", highLabel: "Ofensivo", max: 4 },
-                    { metric: "PitchControl", label: "Controle territorial", lowLabel: "Reativo", highLabel: "Dominante", max: 100 },
-                    { metric: "ForcedTurnovers", label: "Pressão alta", lowLabel: "Baixa", highLabel: "Intensa", max: 20 },
-                  ].map(({ metric, label, lowLabel, highLabel, max }) => {
-                    const v = avgMetrics?.[metric];
-                    const pct = v != null ? Math.min(100, (v / max) * 100) : null;
+                  {/* Arquétipo dominante */}
+                  {(() => {
+                    const arch = String(estilo.estilo_jogo);
+                    const info = ARCHETYPES[arch] ?? { emoji: "🎲", desc: "Estilo equilibrado, sem traço dominante.", def: "estilo_jogo" };
                     return (
-                      <div key={metric} style={{ marginBottom: 20 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                          <span style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>{label}{fifaDefId(metric) && <DefinitionBubble id={fifaDefId(metric)!} size={12} />}</span>
-                          {v != null && (
-                            <span style={{ fontSize: 12, color: "var(--accent)", fontWeight: 700 }}>
-                              {v.toFixed(1)}
-                            </span>
-                          )}
+                      <div style={{ display: "flex", alignItems: "center", gap: 14, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", marginBottom: 18 }}>
+                        <span style={{ fontSize: 30, lineHeight: 1, flexShrink: 0 }}>{info.emoji}</span>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                            <span style={{ fontSize: 17, fontWeight: 800, color: "var(--accent2)" }}>{arch}</span>
+                            <DefinitionBubble id={info.def} size={13} />
+                          </div>
+                          <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 3, lineHeight: 1.4 }}>{info.desc}</div>
                         </div>
-                        {/* Track com dot deslizante */}
+                      </div>
+                    );
+                  })()}
+
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.6px", color: "var(--accent)" }}>Perfil tático</span>
+                    <span style={{ fontSize: 10.5, color: "var(--text-muted)" }}>50 = média do torneio · {finalized.length} {finalized.length === 1 ? "jogo" : "jogos"}</span>
+                  </div>
+
+                  {/* Eixos bipolares (z-score 0-100, 50 = média; barra do centro até o valor) */}
+                  {STYLE_AXES.map(({ key, label, low, high, hint }) => {
+                    const raw = estilo[key];
+                    const v = typeof raw === "number" ? raw : null;
+                    const pct = v != null ? Math.max(0, Math.min(100, v)) : null;
+                    const above = v != null && v >= 50;
+                    return (
+                      <div key={key} style={{ marginBottom: 16 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                          <span title={hint} style={{ fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "help", borderBottom: "1px dotted var(--text-muted)" }}>{label}</span>
+                          {v != null && <span style={{ fontSize: 12, color: above ? "var(--accent)" : "var(--text-muted)", fontWeight: 700 }}>{Math.round(v)}</span>}
+                        </div>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <span style={{ fontSize: 11, color: "var(--text-muted)", width: 60, textAlign: "right", flexShrink: 0 }}>{lowLabel}</span>
+                          <span style={{ fontSize: 11, color: "var(--text-muted)", width: 78, textAlign: "right", flexShrink: 0 }}>{low}</span>
                           <div style={{ flex: 1, height: 8, background: "var(--surface2)", borderRadius: 4, position: "relative" }}>
-                            {/* Linha central */}
-                            <div style={{ position: "absolute", top: 2, bottom: 2, left: "50%", width: 1, background: "var(--border)", transform: "translateX(-50%)" }} />
-                            {pct != null ? (
-                              <div style={{
-                                position: "absolute",
-                                top: "50%",
-                                left: `${pct}%`,
-                                width: 14,
-                                height: 14,
-                                borderRadius: "50%",
-                                background: "var(--accent)",
-                                border: "2px solid var(--background)",
-                                transform: "translate(-50%, -50%)",
-                                transition: "left 0.4s ease",
-                                boxShadow: "0 0 6px var(--accent)88",
-                              }} />
-                            ) : (
-                              <div style={{ position: "absolute", inset: 0, borderRadius: 4, background: "var(--surface2)", opacity: 0.5 }} />
+                            <div style={{ position: "absolute", top: -2, bottom: -2, left: "50%", width: 1, background: "var(--border)", transform: "translateX(-50%)" }} />
+                            {pct != null && (
+                              <>
+                                <div style={{ position: "absolute", top: 0, bottom: 0, borderRadius: 4, background: "var(--accent)", opacity: 0.22, left: `${Math.min(50, pct)}%`, width: `${Math.abs(pct - 50)}%` }} />
+                                <div style={{ position: "absolute", top: "50%", left: `${pct}%`, width: 14, height: 14, borderRadius: "50%", background: "var(--accent)", border: "2px solid var(--background)", transform: "translate(-50%, -50%)", transition: "left 0.4s ease", boxShadow: "0 0 6px var(--accent)88" }} />
+                              </>
                             )}
                           </div>
-                          <span style={{ fontSize: 11, color: "var(--text-muted)", width: 60, flexShrink: 0 }}>{highLabel}</span>
+                          <span style={{ fontSize: 11, color: "var(--text-muted)", width: 78, flexShrink: 0 }}>{high}</span>
                         </div>
                       </div>
                     );
                   })}
 
-                  {/* Texto descritivo */}
-                  <div style={{
-                    marginTop: 8,
-                    padding: "12px 16px",
-                    background: "var(--surface2)",
-                    border: "1px solid var(--border)",
-                    borderRadius: 8,
-                    fontSize: 13,
-                    color: "var(--text)",
-                    lineHeight: 1.6,
-                  }}>
-                    {(() => {
-                      const pos = avgMetrics["Possession"] ?? 50;
-                      const xg = avgMetrics["XG"] ?? 1;
-                      const ctrl = avgMetrics["PitchControl"] ?? 50;
-                      const tags: string[] = [];
-                      if (pos >= 55) tags.push("posse elevada");
-                      else if (pos < 45) tags.push("jogo direto");
-                      if (xg >= 2.0) tags.push("ataque eficiente");
-                      else if (xg < 1.0) tags.push("fase ofensiva discreta");
-                      if (ctrl >= 55) tags.push("domínio territorial");
-                      return tags.length > 0
-                        ? `${team.name}: ${tags.join(", ")}.`
-                        : `Estilo de jogo equilibrado com base nas médias do torneio.`;
-                    })()}
-                  </div>
+                  {/* Leitura: traduz o perfil em uma frase */}
+                  {(() => {
+                    const ax = (k: string) => (typeof estilo[k] === "number" ? (estilo[k] as number) : 50);
+                    const reads: string[] = [];
+                    const p = ax("estilo_posse");
+                    if (p >= 58) reads.push("constrói com posse apoiada"); else if (p <= 42) reads.push("prefere o jogo direto");
+                    const pr = ax("estilo_pressao");
+                    if (pr >= 58) reads.push("pressiona alto"); else if (pr <= 42) reads.push("defende em bloco recuado");
+                    const ve = ax("estilo_verticalidade");
+                    if (ve >= 58) reads.push("ataca vertical, em transição rápida"); else if (ve <= 42) reads.push("ataca com cadência, em ritmo controlado");
+                    const bp = ax("estilo_bola_parada");
+                    if (bp >= 58) reads.push("explora bem a bola parada"); else if (bp <= 42) reads.push("depende pouco de bola parada");
+                    const frase = reads.length
+                      ? `${team.name} ${reads.join(", ")}.`
+                      : `${team.name} tem um perfil equilibrado, sem um traço tático que se destaque da média.`;
+                    return (
+                      <div style={{ marginTop: 6, padding: "12px 14px", background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 13, lineHeight: 1.55, color: "var(--text)" }}>
+                        <span style={{ color: "var(--text-muted)", fontWeight: 700, fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.5px", display: "block", marginBottom: 4 }}>Leitura</span>
+                        {frase}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>

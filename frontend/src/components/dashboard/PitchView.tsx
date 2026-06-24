@@ -329,13 +329,16 @@ export default function PitchView({
         if (!p) return null;
         const pair = subPair.get(id);
         const subInfo = pair ? { dir: pair.dir, min: pair.min, partnerName: nameById.get(pair.partnerId) ?? "?", onGo: () => togglePlayer(pair.partnerId) } : null;
+        // lado pela LISTA em que o jogador está (homePlayers = esquerda), não pelo
+        // team_side original — os lados podem estar invertidos p/ o time do modal.
+        const isHomeSide = homePlayers.some(x => x.id_player === id);
         return (
           <PlayerDetailCard
             key={id}
             player={p}
             stats={playerStats?.get(id) ?? {}}
             score={playerScores?.get(id) ?? null}
-            kit={getKit(p.team_side === "home" ? homeTeam : awayTeam)}
+            kit={getKit(isHomeSide ? homeTeam : awayTeam)}
             index={i}
             sub={subInfo}
             onClose={() => setSelectedIds(prev => prev.filter(x => x !== id))}
@@ -346,14 +349,14 @@ export default function PitchView({
 
       {/* Reservas dos dois times (a linha do tempo virou sub-aba própria) */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginTop: 16, alignItems: "start", maxWidth: DISPLAY_MAX, marginLeft: "auto", marginRight: "auto" }}>
-        <ReservesCol title={homeTeam} subs={subs.home} subInMinute={subInMinute} align="left" onSelect={togglePlayer} />
-        <ReservesCol title={awayTeam} subs={subs.away} subInMinute={subInMinute} align="right" onSelect={togglePlayer} />
+        <ReservesCol title={homeTeam} subs={subs.home} subInMinute={subInMinute} align="left" onSelect={togglePlayer} goalPlayers={goalPlayers} yellowCards={yellowCards} redCards={redCards} />
+        <ReservesCol title={awayTeam} subs={subs.away} subInMinute={subInMinute} align="right" onSelect={togglePlayer} goalPlayers={goalPlayers} yellowCards={yellowCards} redCards={redCards} />
       </div>
     </div>
   );
 }
 
-function ReservesCol({ title, subs, subInMinute, align, onSelect }: { title: string; subs: LineupPlayer[]; subInMinute: Map<string, string>; align: "left" | "right"; onSelect: (id: string) => void }) {
+function ReservesCol({ title, subs, subInMinute, align, onSelect, goalPlayers, yellowCards, redCards }: { title: string; subs: LineupPlayer[]; subInMinute: Map<string, string>; align: "left" | "right"; onSelect: (id: string) => void; goalPlayers: Set<string>; yellowCards: Set<string>; redCards: Set<string> }) {
   return (
     <div>
       <p style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8, textAlign: align }}>
@@ -374,6 +377,12 @@ function ReservesCol({ title, subs, subInMinute, align, onSelect }: { title: str
             >
               {align === "left" && <span style={{ opacity: 0.7, minWidth: 16 }}>{p.shirt_number ?? ""}</span>}
               <span style={{ color: "var(--text)" }}>{p.player_name}</span>
+              {(goalPlayers.has(p.id_player) || yellowCards.has(p.id_player) || redCards.has(p.id_player)) && (
+                <span style={{ fontSize: 10, display: "inline-flex", gap: 2 }}>
+                  {goalPlayers.has(p.id_player) && <span>⚽</span>}
+                  {redCards.has(p.id_player) ? <span>🟥</span> : yellowCards.has(p.id_player) ? <span>🟨</span> : null}
+                </span>
+              )}
               {minute && <span>↑{minute}</span>}
               {align === "right" && <span style={{ opacity: 0.7, minWidth: 16, textAlign: "right" }}>{p.shirt_number ?? ""}</span>}
             </button>

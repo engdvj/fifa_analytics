@@ -99,6 +99,8 @@ export default function SelecoesTab({ matches, snapshots, activeSnapshot, matchS
     const built = deriveTeams(matches)
       .filter((t) => passesFilters(t.name))
       .filter((t) => !q || t.name.toLowerCase().includes(q))
+      // ao selecionar uma ou mais seleções (na Ranking Race), a grade mostra só elas
+      .filter((t) => selectedTeams.length === 0 || selectedTeams.includes(t.name))
       .map((base) => {
         const gamesUpTo = base.games.filter(playedUpTo);
         const s = statsFromGames(base.name, gamesUpTo);
@@ -118,7 +120,7 @@ export default function SelecoesTab({ matches, snapshots, activeSnapshot, matchS
     for (const c of built) if (c.active) c.rank = ++r;
     return built;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [matches, search, rowByTeam, passesFilters, playedUpTo, metric, metricLabel, sortDir]);
+  }, [matches, search, rowByTeam, passesFilters, playedUpTo, metric, metricLabel, sortDir, selectedTeams]);
 
   const pageCount = Math.max(1, Math.ceil(cards.length / PAGE_SIZE));
   const safePage = Math.min(page, pageCount - 1);
