@@ -5,8 +5,9 @@ import useSWR from "swr";
 import { analytics, PlayerSnapshot } from "@/lib/api";
 import Flag from "@/components/ui/Flag";
 import { DefinitionBubble } from "@/components/DefinitionLink";
+import FixedPager from "./FixedPager";
 
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 12;
 
 // Mapeia a chave da métrica do jogador → id da definição. Sem id → sem bolinha.
 const DEF_BY_KEY: Record<string, string> = {
@@ -22,17 +23,25 @@ const LABEL: Record<string, string> = {
   expected_goals: "xG", key_passes: "Passes-chave", shots: "Finalizações", shots_on_target: "No alvo",
   dribbles_won: "Dribles", tackles_won: "Desarmes", interceptions: "Interceptações",
   ball_recovery: "Recuperações", duels_won: "Duelos", saves: "Defesas", goals_conceded: "Gols sofridos",
-  score_geral: "PR FIFA",
+  score_geral: "PR FIFA", score_proprio: "Score",
 };
-const DEC: Record<string, number> = { expected_goals: 2, score_geral: 1 };
+const DEC: Record<string, number> = { expected_goals: 2, score_geral: 1, score_proprio: 1 };
 
 // "Ordenar por" RELEVANTE a cada perfil (default = stat concreta; PR FIFA por último, só onde existe)
 const SORT_BY_PERFIL: Record<string, string[]> = {
-  "": ["goals", "assists", "participacoes_gol", "key_passes", "dribbles_won", "tackles_won", "interceptions", "duels_won", "score_geral"],
-  goleiro: ["saves", "goals_conceded", "ball_recovery", "duels_won", "score_geral"],
-  defensor: ["tackles_won", "interceptions", "ball_recovery", "duels_won", "goals", "assists", "score_geral"],
-  meio: ["assists", "key_passes", "goals", "dribbles_won", "participacoes_gol", "tackles_won", "interceptions", "score_geral"],
-  atacante: ["goals", "expected_goals", "shots", "shots_on_target", "assists", "key_passes", "dribbles_won", "score_geral"],
+  "": ["score_proprio", "goals", "assists", "participacoes_gol", "key_passes", "dribbles_won", "tackles_won", "interceptions", "duels_won", "score_geral"],
+  goleiro: ["score_proprio", "saves", "goals_conceded", "ball_recovery", "duels_won", "score_geral"],
+  defensor: ["score_proprio", "tackles_won", "interceptions", "ball_recovery", "duels_won", "goals", "assists", "score_geral"],
+  meio: ["score_proprio", "assists", "key_passes", "goals", "dribbles_won", "participacoes_gol", "tackles_won", "interceptions", "score_geral"],
+  atacante: ["score_proprio", "goals", "expected_goals", "shots", "shots_on_target", "assists", "key_passes", "dribbles_won", "score_geral"],
+};
+
+// Componentes do nosso score por posição (espelha PROFILE_WEIGHTS do backend).
+const PROP_BY_PERFIL: Record<string, Col[]> = {
+  atacante: [["prop_finalizacao", "Finalização"], ["prop_criacao", "Criação"], ["prop_eficiencia", "Eficiência"], ["prop_progressao", "Progressão"], ["prop_defesa", "Defesa"]],
+  meio: [["prop_criacao", "Criação"], ["prop_progressao", "Progressão"], ["prop_defesa", "Defesa"], ["prop_finalizacao", "Finalização"], ["prop_eficiencia", "Eficiência"]],
+  defensor: [["prop_defesa", "Defesa"], ["prop_progressao", "Progressão"], ["prop_criacao", "Criação"], ["prop_finalizacao", "Finalização"], ["prop_eficiencia", "Eficiência"]],
+  goleiro: [["prop_goleiro", "Goleiro"], ["prop_progressao", "Distribuição"]],
 };
 
 const PERFIS: { key: string; label: string }[] = [
@@ -74,6 +83,12 @@ function prColor(v: number | null): string {
   if (v == null) return "#8b949e";
   return v >= 65 ? "#3fb950" : v >= 55 ? "#56d364" : v >= 50 ? "#d29922" : "#f85149";
 }
+// Nosso score: z-score por posição, média da posição = 50. Cores centradas em 50.
+function scoreColor(v: number | null): string {
+  if (v == null) return "#8b949e";
+  return v >= 62 ? "#3fb950" : v >= 54 ? "#56d364" : v >= 46 ? "#d29922" : "#f85149";
+}
+const CONF_DOT: Record<string, string> = { alta: "#3fb950", media: "#d29922", baixa: "#f85149" };
 
 interface Props {
   activeSnapshot: number;
@@ -109,7 +124,7 @@ export default function PlayersTab({ activeSnapshot, passesFilters, selectedTeam
   React.useEffect(() => { setPage(0); }, [search, sortKey, sortDir, onlyPlayed, activeSnapshot, useSelection]);
 
   const statCols = STAT_COLS[perfil] ?? STAT_COLS[""];
-  const baseKeys = new Set(["score_geral", "jogos", ...statCols.map((c) => c[0])]);
+  const baseKeys = new Set(["score_geral", "score_proprio", "jogos", ...statCols.map((c) => c[0])]);
   const metricCol = baseKeys.has(sortKey) ? null : sortKey;
 
   const players = React.useMemo(() => {
@@ -150,7 +165,7 @@ export default function PlayersTab({ activeSnapshot, passesFilters, selectedTeam
   const arrow = (key: string) => (key === sortKey ? (sortDir === "asc" ? " ▲" : " ▼") : "");
 
   return (
-    <div>
+    <div style={{ paddingBottom: pageCount > 1 ? 56 : 0 }}>
       {/* filtros */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8b949e" }}>
@@ -201,6 +216,7 @@ export default function PlayersTab({ activeSnapshot, passesFilters, selectedTeam
                 <Th>Time</Th>
                 <Th w={48}>Pos</Th>
                 {metricCol && <ThSort active onClick={() => sortByCol(metricCol)} metric>{LABEL[metricCol] ?? metricCol}{arrow(metricCol)}</ThSort>}
+                <ThSort active={sortKey === "score_proprio"} onClick={() => sortByCol("score_proprio")} title="Nosso score analítico (0-100, por posição · 50 = média da posição)">Score{arrow("score_proprio")}</ThSort>
                 <ThSort active={sortKey === "score_geral"} onClick={() => sortByCol("score_geral")} title="Power Ranking FIFA (oficial · só ~244 jogadores)">PR FIFA<DefinitionBubble id="powerranking" size={13} />{arrow("score_geral")}</ThSort>
                 {statCols.map((c) => <ThSort key={c[0]} active={sortKey === c[0]} onClick={() => sortByCol(c[0])}>{c[1]}{arrow(c[0])}</ThSort>)}
                 <ThSort active={sortKey === "jogos"} onClick={() => sortByCol("jogos")}>Jogos{arrow("jogos")}</ThSort>
@@ -220,6 +236,12 @@ export default function PlayersTab({ activeSnapshot, passesFilters, selectedTeam
                     <Td><span style={{ color: "#9db3cf" }}>{p.team}</span></Td>
                     <Td dim>{PERFIL_ABBR[(p.perfil ?? "").toLowerCase()] ?? (p.position ?? "")}</Td>
                     {metricCol && <Td align="right" metric><b>{fmt(num(p, metricCol), DEC[metricCol])}</b></Td>}
+                    <Td align="right">
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 5, justifyContent: "flex-end" }}>
+                        <span title={`Confiança: ${(p.nivel_confianca as string) ?? "—"}`} style={{ width: 6, height: 6, borderRadius: "50%", background: CONF_DOT[(p.nivel_confianca as string) ?? ""] ?? "#30363d", flexShrink: 0 }} />
+                        <span style={{ color: scoreColor(num(p, "score_proprio")), fontWeight: 700 }}>{fmt(num(p, "score_proprio"), 1)}</span>
+                      </span>
+                    </Td>
                     <Td align="right"><span style={{ color: prColor(pr), fontWeight: 700 }}>{fmt(pr, 1)}</span></Td>
                     {statCols.map((c) => <Td key={c[0]} align="right">{fmt(num(p, c[0]), c[2])}</Td>)}
                     <Td align="right" dim>{fmt(num(p, "jogos"))}</Td>
@@ -231,13 +253,7 @@ export default function PlayersTab({ activeSnapshot, passesFilters, selectedTeam
         </div>
       )}
 
-      {!isLoading && pageCount > 1 && (
-        <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 14 }}>
-          <PageBtn disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>← Anterior</PageBtn>
-          <span style={{ color: "#8b949e", fontSize: 12, alignSelf: "center" }}>{safePage + 1} / {pageCount}</span>
-          <PageBtn disabled={safePage >= pageCount - 1} onClick={() => setPage(safePage + 1)}>Próxima →</PageBtn>
-        </div>
-      )}
+      {!isLoading && <FixedPager page={safePage} pageCount={pageCount} onPage={setPage} total={players.length} unit="jogadores" />}
 
       {openCards.map((p, i) => (
         <PlayerCard key={p.player_slug ?? p.id_player} player={p} index={i} onClose={() => closeCard(p.player_slug ?? p.id_player)} />
@@ -280,6 +296,10 @@ function PlayerCard({ player, index = 0, onClose }: { player: PlayerSnapshot; in
             </div>
             <div style={{ fontSize: 11, color: "#8b949e", marginTop: 1 }}>{player.team} · {PERFIL_ABBR[(player.perfil ?? "").toLowerCase()] ?? player.position} · {fmt(num(player, "jogos"))} jogos</div>
           </div>
+          <div style={{ textAlign: "center" }} title={`Nosso score por posição (0-100 · 50 = média) · confiança ${(player.nivel_confianca as string) ?? "—"}`}>
+            <div style={{ fontSize: 20, fontWeight: 800, color: scoreColor(num(player, "score_proprio")) }}>{fmt(num(player, "score_proprio"), 1)}</div>
+            <div style={{ fontSize: 9, color: "#8b949e", textTransform: "uppercase" }}>Score</div>
+          </div>
           <div style={{ textAlign: "center" }} title="Power Ranking FIFA (oficial · só ~244 jogadores)">
             <div style={{ fontSize: 20, fontWeight: 800, color: prColor(pr) }}>{fmt(pr, 1)}</div>
             <div style={{ fontSize: 9, color: "#8b949e", textTransform: "uppercase" }}>PR FIFA<DefinitionBubble id="powerranking" size={11} /></div>
@@ -289,6 +309,32 @@ function PlayerCard({ player, index = 0, onClose }: { player: PlayerSnapshot; in
 
         {/* seções */}
         <div style={{ padding: "10px 13px 13px", maxHeight: "72vh", overflowY: "auto" }}>
+          {/* decomposição do nosso score por componente da posição */}
+          {(() => {
+            const comps = PROP_BY_PERFIL[(player.perfil ?? "").toLowerCase()] ?? PROP_BY_PERFIL.atacante;
+            const conf = (player.nivel_confianca as string) ?? null;
+            return (
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                  <span style={{ fontSize: 10, fontWeight: 800, color: "#58a6ff", textTransform: "uppercase", letterSpacing: "0.05em" }}>Nosso score · componentes</span>
+                  {conf && <span style={{ fontSize: 9, color: CONF_DOT[conf] ?? "#8b949e" }}>● confiança {conf}</span>}
+                </div>
+                {comps.map((c) => {
+                  const v = num(player, c[0]);
+                  const pct = v == null ? 0 : Math.max(0, Math.min(100, v));
+                  return (
+                    <div key={c[0]} style={{ display: "grid", gridTemplateColumns: "84px 1fr 34px", alignItems: "center", gap: 8, padding: "2px 0" }}>
+                      <span style={{ fontSize: 11.5, color: "#9aa4af" }}>{c[1]}</span>
+                      <span style={{ height: 6, borderRadius: 3, background: "#161b22", position: "relative", overflow: "hidden" }}>
+                        <span style={{ position: "absolute", inset: 0, width: `${pct}%`, background: scoreColor(v), borderRadius: 3 }} />
+                      </span>
+                      <span style={{ fontSize: 11.5, fontWeight: 700, color: "#e6edf3", textAlign: "right" }}>{fmt(v, 1)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
           {sections.map((s) => (
             <div key={s.title} style={{ marginBottom: 10 }}>
               <div style={{ fontSize: 10, fontWeight: 800, color: "#58a6ff", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>{s.title}</div>
@@ -319,7 +365,4 @@ function ThSort({ children, active, metric, onClick, title }: { children: React.
 }
 function Td({ children, align = "left", dim, metric }: { children?: React.ReactNode; align?: "left" | "right" | "center"; dim?: boolean; metric?: boolean }) {
   return <td style={{ padding: "7px 10px", textAlign: align, whiteSpace: "nowrap", color: dim ? "#8b949e" : "#e6edf3", background: metric ? "#1f6feb12" : undefined }}>{children}</td>;
-}
-function PageBtn({ children, disabled, onClick }: { children: React.ReactNode; disabled: boolean; onClick: () => void }) {
-  return <button onClick={onClick} disabled={disabled} style={{ background: "#161b22", border: "1px solid #30363d", borderRadius: 6, color: disabled ? "#484f58" : "#e6edf3", padding: "6px 12px", fontSize: 12, cursor: disabled ? "default" : "pointer", fontFamily: "inherit" }}>{children}</button>;
 }
