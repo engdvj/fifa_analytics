@@ -25,12 +25,13 @@ EXPECTED_FRAGMENT_IDS = [
 ]
 
 
-def run_tournament_status(source: str = "canonical") -> dict[str, Path | str | int]:
-    matches_path = _matches_path(source)
-    standings_path = _standings_path(source)
-
+def run_tournament_status(source: str = "fifa") -> dict[str, Path | str | int]:
+    # Fonte única FIFA: lê o dim_match do gold e calcula a classificação de grupos
+    # a partir dos jogos finalizados (sem parquet de standings pré-computado).
+    matches_path = GOLD_DIR / "dim_match.parquet"
     matches = read_dataframe(matches_path)
-    standings = read_dataframe(standings_path) if standings_path.exists() else pd.DataFrame()
+    standings = compute_group_standings(matches)
+    standings_path = write_dataframe(GOLD_DIR / "standings" / "fifa_group_standings.parquet", standings) if not standings.empty else None
     status = build_tournament_status(matches)
 
     status_path = write_dataframe(GOLD_DIR / "tournament_status" / "tournament_status.parquet", status)
@@ -104,24 +105,53 @@ def build_tournament_status(matches: pd.DataFrame) -> pd.DataFrame:
     return status
 
 
-def _matches_path(source: str) -> Path:
-    if source == "canonical":
-        return GOLD_DIR / "dim_match" / "canonical_matches.parquet"
-    if source == "wikipedia":
-        return SILVER_DIR / "matches" / "wikipedia_matches.parquet"
-    if source == "sample":
-        return SILVER_DIR / "matches" / "matches.parquet"
-    return SILVER_DIR / "matches" / f"{source}_matches.parquet"
+def compute_group_standings(matches: pd.DataFrame) -> pd.DataFrame:
+    """Classificação de grupos a partir dos jogos FINALIZADOS da fase de grupos.
 
+    Vitória=3, empate=1. Colunas: group, team, played, won, drawn, lost,
+    goals_for, goals_against, goal_difference, points — ordenadas por grupo e
+    pontos (desempate por saldo e gols pró)."""
+    if matches.empty or "group" not in matches.columns:
+        return pd.DataFrame()
+    fin = matches[
+        (matches["status"] == "finalizado")
+        & matches["group"].notna()
+        & matches["home_score"].notna()
+        & matches["away_score"].notna()
+    ]
+    if fin.empty:
+        return pd.DataFrame()
 
-def _standings_path(source: str) -> Path:
-    if source == "canonical":
-        return GOLD_DIR / "standings" / "worldcup2026_calculated_group_standings.parquet"
-    if source == "wikipedia":
-        return SILVER_DIR / "standings" / "wikipedia_standings.parquet"
-    if source == "sample":
-        return SILVER_DIR / "standings" / "standings.parquet"
-    return SILVER_DIR / "standings" / f"{source}_standings.parquet"
+    acc: dict[tuple, dict] = {}
+
+    def _row(group, team) -> dict:
+        return acc.setdefault(
+            (group, team),
+            {"group": group, "team": team, "played": 0, "won": 0, "drawn": 0,
+             "lost": 0, "goals_for": 0, "goals_against": 0, "points": 0},
+        )
+
+    for _, m in fin.iterrows():
+        g = m["group"]
+        hs, as_ = int(m["home_score"]), int(m["away_score"])
+        h, a = _row(g, m["home_team"]), _row(g, m["away_team"])
+        for side, gf, ga in ((h, hs, as_), (a, as_, hs)):
+            side["played"] += 1
+            side["goals_for"] += gf
+            side["goals_against"] += ga
+        if hs > as_:
+            h["won"] += 1; h["points"] += 3; a["lost"] += 1
+        elif hs < as_:
+            a["won"] += 1; a["points"] += 3; h["lost"] += 1
+        else:
+            h["drawn"] += 1; a["drawn"] += 1; h["points"] += 1; a["points"] += 1
+
+    df = pd.DataFrame(acc.values())
+    df["goal_difference"] = df["goals_for"] - df["goals_against"]
+    return df.sort_values(
+        ["group", "points", "goal_difference", "goals_for"],
+        ascending=[True, False, False, False],
+    ).reset_index(drop=True)
 
 
 def _read_manifest(match_id: str) -> dict[str, Any]:

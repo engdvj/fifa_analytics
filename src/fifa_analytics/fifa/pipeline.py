@@ -1,17 +1,21 @@
-"""Pipeline FIFA: coleta -> raw -> silver -> gold (parquet).
+"""Pipeline FIFA: coleta -> raw -> silver -> gold -> analytics.
 
 Fonte única FIFA. Saídas:
-- raw    data/raw/fifa/<endpoint>/date=YYYYMMDD/collected_at=TS/*.json
-- silver data/silver/fifa/*.parquet
-- gold   data/gold/*.parquet
+- raw      data/raw/fifa/<endpoint>/date=YYYYMMDD/collected_at=TS/*.json
+- silver   data/silver/fifa/*.parquet
+- gold     data/gold/*.parquet
+- analytics data/gold/analytics/*.parquet + weights.json
 
 Tabelas geradas:
-  dim_match                  — todos os 104 jogos (calendário)
-  fact_team_match_stats      — 145 métricas por time por jogo (fdh)
-  fact_player_match_stats    — métricas por jogador por jogo (fdh)
-  fact_lineups               — escalações com posição tática (v3/live)
-  fact_events                — gols, cartões, substituições (v3/live)
-  fact_power_ranking         — power ranking por jogador na temporada (fdh)
+  dim_match                        — todos os 104 jogos (calendário)
+  fact_team_match_stats            — 145 métricas por time por jogo (fdh, long)
+  fact_player_match_stats          — métricas por jogador por jogo (fdh, long)
+  fact_lineups                     — escalações com posição tática (v3/live)
+  fact_events                      — gols, cartões, substituições (v3/live)
+  fact_power_ranking               — power ranking por jogador (fdh)
+  analytics/team_match_wide        — pivot wide das métricas por time/jogo
+  analytics/snapshot_timeline      — scores históricos jogo a jogo
+  analytics/weights.json           — pesos fixos para o dashboard
 """
 
 from __future__ import annotations
@@ -20,7 +24,10 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+from fifa_analytics.analytics.player_snapshot import build_player_snapshots
+from fifa_analytics.analytics.snapshot import build_snapshots
 from fifa_analytics.fifa import client, transforms
+from fifa_analytics.fifa.pivot import build_team_match_wide
 from fifa_analytics.paths import GOLD_DIR, RAW_DIR, SILVER_DIR
 from fifa_analytics.utils.io import write_dataframe, write_json
 from fifa_analytics.utils.logging import get_logger
@@ -110,12 +117,17 @@ def run(*, only_finished: bool = True) -> dict[str, int]:
         logger.warning("FIFA power ranking: %s", exc)
 
     # 4. gravar silver + gold --------------------------------------------------
+    team_stats = _concat(team_stats_frames)
+    player_stats = _concat(player_stats_frames)
+    lineups = _concat(lineup_frames)
+    events = _concat(event_frames)
+
     tables = {
         "dim_match.parquet": matches,
-        "fact_team_match_stats.parquet": _concat(team_stats_frames),
-        "fact_player_match_stats.parquet": _concat(player_stats_frames),
-        "fact_lineups.parquet": _concat(lineup_frames),
-        "fact_events.parquet": _concat(event_frames),
+        "fact_team_match_stats.parquet": team_stats,
+        "fact_player_match_stats.parquet": player_stats,
+        "fact_lineups.parquet": lineups,
+        "fact_events.parquet": events,
         "fact_power_ranking.parquet": power_ranking,
     }
 
@@ -123,6 +135,26 @@ def run(*, only_finished: bool = True) -> dict[str, int]:
         for name, df in tables.items():
             if not df.empty:
                 write_dataframe(base / name, df)
+
+    # 5. pivot wide + analytics ------------------------------------------------
+    wide = pd.DataFrame()
+    n_snapshots = 0
+    if not team_stats.empty:
+        wide = build_team_match_wide(team_stats, matches)
+        write_dataframe(GOLD_DIR / "analytics" / "team_match_wide.parquet", wide)
+        logger.info("FIFA: team_match_wide gravado — %d linhas", len(wide))
+
+        timeline = build_snapshots(wide, matches)
+        n_snapshots = timeline["snapshot_jogo"].nunique() if not timeline.empty else 0
+        logger.info("FIFA: %d snapshots gerados", n_snapshots)
+
+        # 6. snapshot de JOGADORES (espelha o de times) ----------------------
+        if not player_stats.empty:
+            player_tl = build_player_snapshots(player_stats, lineups, matches, timeline, power_ranking)
+            n_players = player_tl["id_player"].nunique() if not player_tl.empty else 0
+            logger.info("FIFA: player_snapshot_timeline — %d jogadores", n_players)
+    else:
+        logger.warning("FIFA: sem team_stats — pivot e snapshots pulados")
 
     logger.info(
         "FIFA: gold gravado — team_stats=%d/%d, player_stats=%d/%d, live=%d/%d",
@@ -140,4 +172,6 @@ def run(*, only_finished: bool = True) -> dict[str, int]:
         "live_ok": ok_live,
         "live_missing": miss_live,
         "power_ranking_players": len(power_ranking),
+        "wide_rows": len(wide),
+        "snapshots": n_snapshots,
     }
