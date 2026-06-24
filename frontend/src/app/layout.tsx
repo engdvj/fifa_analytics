@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import SWRProvider from "@/components/SWRProvider";
+import { AuthProvider } from "@/lib/auth-context";
+import Header from "@/components/Header";
 
 export const metadata: Metadata = {
   title: "Copa 2026 — Analytics & Bolão",
@@ -13,7 +15,13 @@ export default function RootLayout({
   return (
     <html lang="pt-BR" className="h-full">
       <body className="min-h-full flex flex-col">
-        <SWRProvider>{children}</SWRProvider>
+        <SWRProvider>
+          <AuthProvider>
+            {/* Barra global fixa — só aparece logado (some no login/registro) */}
+            <Header />
+            {children}
+          </AuthProvider>
+        </SWRProvider>
       </body>
     </html>
   );
