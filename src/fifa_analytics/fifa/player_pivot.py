@@ -90,6 +90,62 @@ def _team_name_map(dim_match: pd.DataFrame) -> dict[str, str]:
     return out
 
 
+def _opponent_goals_map(dim_match: pd.DataFrame) -> dict[tuple[str, str], float]:
+    """(match_id, nome_time) → gols sofridos por aquele time (gols do adversário)."""
+    out: dict[tuple[str, str], float] = {}
+    for _, m in dim_match.iterrows():
+        hs, as_ = m.get("home_score"), m.get("away_score")
+        if pd.isna(hs) or pd.isna(as_):
+            continue
+        h, a = m.get("home_team"), m.get("away_team")
+        if h:
+            out[(m["match_id"], h)] = float(as_)
+        if a:
+            out[(m["match_id"], a)] = float(hs)
+    return out
+
+
+def _backfill_goalkeeper_conceded(
+    wide: pd.DataFrame,
+    player_stats_long: pd.DataFrame,
+    dim_match: pd.DataFrame,
+) -> pd.DataFrame:
+    """Preenche `gols_sofridos`/`jogos_sem_sofrer` do goleiro titular pelo placar
+    quando a fonte fdh não trouxe GoalsConceded para aquele jogo."""
+    if wide.empty or "position" not in wide.columns:
+        return wide
+
+    # (match_id, id_player) que TÊM GoalsConceded de verdade na fonte.
+    has_gc: set[tuple[str, str]] = set()
+    if not player_stats_long.empty:
+        gc = player_stats_long[player_stats_long["metric"] == "GoalsConceded"]
+        has_gc = set(zip(gc["match_id"], gc["id_player"].astype(str)))
+
+    opp_goals = _opponent_goals_map(dim_match)
+    minutos = wide["minutos"] if "minutos" in wide.columns else pd.Series(1.0, index=wide.index)
+    starter = wide["is_starter"] if "is_starter" in wide.columns else pd.Series(True, index=wide.index)
+
+    def _fill(row, idx) -> float | None:
+        played = pd.to_numeric(minutos.loc[idx], errors="coerce") or 0
+        if row["position"] != "G" or not bool(starter.loc[idx]) or played <= 0:
+            return None
+        if (row["match_id"], str(row["id_player"])) in has_gc:
+            return None  # fonte trouxe — não sobrescreve
+        return opp_goals.get((row["match_id"], row.get("team")))
+
+    if "gols_sofridos" not in wide.columns:
+        wide["gols_sofridos"] = 0.0
+    if "jogos_sem_sofrer" not in wide.columns:
+        wide["jogos_sem_sofrer"] = 0.0
+
+    for idx, row in wide.iterrows():
+        val = _fill(row, idx)
+        if val is not None:
+            wide.at[idx, "gols_sofridos"] = val
+            wide.at[idx, "jogos_sem_sofrer"] = 1.0 if val == 0 else 0.0
+    return wide
+
+
 def build_player_match_wide(
     player_stats_long: pd.DataFrame,
     lineups: pd.DataFrame,
@@ -142,6 +198,24 @@ def build_player_match_wide(
     metric_cols = [c for c in METRICS_MAP.values() if c in wide.columns]
     for c in metric_cols:
         wide[c] = pd.to_numeric(wide[c], errors="coerce").fillna(0)
+
+    # Quem não entrou em campo (minutos==0) não tem estatística. A fonte fdh às
+    # vezes credita métricas de súmula a quem ficou no banco — em especial os
+    # GoalsConceded/CleanSheets do time vão para TODOS os goleiros, mesmo reservas
+    # que não jogaram. Isso inflava o acumulado de goleiros que revezam. Zeramos
+    # tudo de quem não jogou; o backfill abaixo recompõe só o goleiro titular.
+    if "minutos" in wide.columns:
+        nao_jogou = pd.to_numeric(wide["minutos"], errors="coerce").fillna(0) <= 0
+        stat_cols = [c for c in metric_cols if c != "minutos"]
+        wide.loc[nao_jogou, stat_cols] = 0.0
+
+    # Backfill de gols sofridos do GOLEIRO pelo placar. A fonte fdh omite
+    # GoalsConceded/CleanSheets de goleiros em jogos recentes (lag do Data Hub:
+    # ~38% dos jogos), o que faria o goleiro parecer sofrer menos do que sofreu.
+    # Para o goleiro titular que jogou, o placar é a verdade: gols sofridos = gols
+    # do adversário. Só preenchemos quando a fonte NÃO trouxe a métrica (não
+    # sobrescreve dado real); o reserva que entrou fica como está (raro).
+    wide = _backfill_goalkeeper_conceded(wide, player_stats_long, dim_match)
 
     # métricas derivadas
     wide["participacoes_gol"] = wide.get("gols", pd.Series(0, index=wide.index)).fillna(0) + wide.get("assistencias", pd.Series(0, index=wide.index)).fillna(0)
