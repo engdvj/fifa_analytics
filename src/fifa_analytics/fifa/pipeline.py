@@ -29,6 +29,7 @@ from fifa_analytics.analytics.snapshot import build_snapshots
 from fifa_analytics.fifa import client, transforms
 from fifa_analytics.fifa.pivot import build_team_match_wide
 from fifa_analytics.paths import GOLD_DIR, RAW_DIR, SILVER_DIR
+from fifa_analytics.utils.gold_guard import prune_unknown_gold
 from fifa_analytics.utils.io import write_dataframe, write_json
 from fifa_analytics.utils.logging import get_logger
 
@@ -155,6 +156,10 @@ def run(*, only_finished: bool = True) -> dict[str, int]:
             logger.info("FIFA: player_snapshot_timeline — %d jogadores", n_players)
     else:
         logger.warning("FIFA: sem team_stats — pivot e snapshots pulados")
+
+    # 7. guard anti-stale: remove parquets antigos fora do conjunto canônico
+    # (caminhos que mudaram, legado, duplicatas) para o gold não acumular lixo.
+    prune_unknown_gold()
 
     logger.info(
         "FIFA: gold gravado — team_stats=%d/%d, player_stats=%d/%d, live=%d/%d",
