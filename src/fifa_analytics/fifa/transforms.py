@@ -92,8 +92,11 @@ def normalize_matches(results: list[dict[str, Any]]) -> pd.DataFrame:
 
 # Posição numérica v3 → abreviação.
 _POSITION = {0: "G", 1: "D", 2: "M", 3: "F"}
-# Campo Card da v3 (Bookings): 1=yellow, 3=red_direct, 5=second_yellow.
-_CARD_TYPE = {1: "yellow", 3: "red", 5: "second_yellow"}
+# Campo Card da v3 (Bookings). Os dados reais da Copa 2026 usam SOMENTE 1 e 2
+# (verificado no raw: 1=amarelo, 2=expulsão/vermelho). O mapeamento antigo
+# (1/3/5) estava errado e, com o default "yellow", mascarava TODOS os vermelhos.
+# Mantém 3 como vermelho direto por robustez (algumas competições usam).
+_CARD_TYPE = {1: "yellow", 2: "red", 3: "red"}
 # Campo Type dos gols: 0=normal, 1=own_goal, 2=penalty.
 _GOAL_TYPE = {0: "normal", 1: "own_goal", 2: "penalty"}
 
