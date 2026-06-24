@@ -34,9 +34,16 @@ export default function Modal({ open, onClose, title, children, size = "md" }: M
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: "rgba(0,0,0,0.72)" }}
+      style={{
+        background: "rgba(0,0,0,0.72)", animation: "modalFade .16s ease", backdropFilter: "blur(2px)",
+        // Reset de propriedades herdadas: o modal renderiza inline (sem portal),
+        // então herda estilos do gatilho (ex.: bolinha "?" dentro de um <th>
+        // uppercase/nowrap). Isso garante texto normal em qualquer contexto.
+        textTransform: "none", whiteSpace: "normal", textAlign: "left", letterSpacing: "normal", fontStyle: "normal",
+      }}
       onClick={onClose}
     >
+      <style>{`@keyframes modalFade{from{opacity:0}to{opacity:1}}@keyframes modalPop{from{opacity:0;transform:translateY(12px) scale(.97)}to{opacity:1;transform:none}}`}</style>
       <div
         ref={dialogRef}
         style={{
@@ -48,6 +55,8 @@ export default function Modal({ open, onClose, title, children, size = "md" }: M
           maxHeight: "85vh",
           display: "flex",
           flexDirection: "column",
+          boxShadow: "0 24px 64px -16px rgba(0,0,0,0.6)",
+          animation: "modalPop .22s cubic-bezier(.2,.8,.25,1)",
         }}
         onClick={(e) => e.stopPropagation()}
       >

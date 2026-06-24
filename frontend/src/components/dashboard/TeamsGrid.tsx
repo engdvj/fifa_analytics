@@ -4,6 +4,7 @@ import { useState, useMemo } from "react";
 import { useMatches } from "@/lib/hooks";
 import { deriveTeams, TeamSummary, CONFEDERATION, flag, getKit } from "@/lib/teamUtils";
 import TeamModal from "./TeamModal";
+import { DefinitionBubble } from "@/components/DefinitionLink";
 
 const ALL_CONFS = ["UEFA", "CONMEBOL", "CAF", "AFC", "CONCACAF", "OFC"];
 
@@ -91,7 +92,7 @@ function TeamCard({ team, onClick }: { team: TeamSummary; onClick: () => void })
                 }}>
                   {gd > 0 ? `+${gd}` : gd}
                 </div>
-                <div style={{ fontSize: 10, color: "var(--text-muted)" }}>Saldo</div>
+                <div style={{ fontSize: 10, color: "var(--text-muted)" }}>Saldo<DefinitionBubble id="saldo_gols" size={11} /></div>
               </div>
             </div>
 

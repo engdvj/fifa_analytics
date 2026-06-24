@@ -7,6 +7,7 @@ interface GameSliderProps {
   matches: Match[];
   currentGame: number;
   onGameChange: (n: number) => void;
+  compact?: boolean; // versão enxuta p/ o header (Play + Jogo N/Max + slider + velocidade)
 }
 
 type Speed = "slow" | "normal" | "fast";
@@ -19,7 +20,7 @@ function matchLabel(m: Match | undefined) {
   return `${home} vs ${away}`;
 }
 
-export default function GameSlider({ matches, currentGame, onGameChange }: GameSliderProps) {
+export default function GameSlider({ matches, currentGame, onGameChange, compact }: GameSliderProps) {
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState<Speed>("normal");
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -71,6 +72,43 @@ export default function GameSlider({ matches, currentGame, onGameChange }: GameS
   }, [step]);
 
   const currentMatch = matches.find((m) => m.match_number === currentGame);
+
+  // ── Versão compacta para o header ──────────────────────────────────────────
+  if (compact) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+        <button
+          onClick={() => setPlaying((p) => !p)}
+          aria-label={playing ? "Pausar" : "Reproduzir"}
+          style={{ background: "#1f6feb", color: "#fff", border: "none", borderRadius: 6, width: 28, height: 28, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontWeight: 700 }}
+        >
+          {playing ? "⏸" : "▶"}
+        </button>
+        <span style={{ fontSize: 12, fontWeight: 700, color: "#58a6ff", whiteSpace: "nowrap" }}>
+          Jogo {currentGame}/{maxGame}
+        </span>
+        <input
+          type="range"
+          min={minGame}
+          max={maxGame}
+          value={currentGame}
+          onChange={(e) => onGameChange(Number(e.target.value))}
+          style={{ width: 200, accentColor: "#1f6feb", cursor: "pointer" }}
+          aria-label="Navegar jogos"
+        />
+        <select
+          value={speed}
+          onChange={(e) => setSpeed(e.target.value as Speed)}
+          aria-label="Velocidade"
+          style={{ background: "#161b22", border: "1px solid #30363d", borderRadius: 6, color: "#e6edf3", padding: "4px 6px", fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}
+        >
+          <option value="slow">Lenta</option>
+          <option value="normal">Normal</option>
+          <option value="fast">Rápida</option>
+        </select>
+      </div>
+    );
+  }
 
   return (
     <div

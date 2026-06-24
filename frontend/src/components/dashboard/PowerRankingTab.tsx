@@ -3,6 +3,7 @@
 import { useState } from "react";
 import useSWR from "swr";
 import { analytics, PowerRankingPlayer } from "@/lib/api";
+import { DefinitionBubble } from "@/components/DefinitionLink";
 
 function changeArrow(v: number | null) {
   if (v == null) return null;
@@ -56,7 +57,7 @@ export default function PowerRankingTab() {
   return (
     <div className="p-6 max-w-5xl mx-auto">
       <div className="flex flex-wrap items-center gap-3 mb-5">
-        <h2 className="text-lg font-semibold mr-2">Power Ranking FIFA</h2>
+        <h2 className="text-lg font-semibold mr-2">Power Ranking FIFA<DefinitionBubble id="powerranking" /></h2>
 
         <div style={{ display: "flex", gap: 4 }}>
           {(["outfield", "goalkeeper"] as PlayerType[]).map((t) => (
@@ -143,11 +144,17 @@ export default function PowerRankingTab() {
               <th className="py-2 text-left">Seleção</th>
               <th className="py-2 text-right">
                 {playerType === "goalkeeper" ? "Jogo de bola" : "Ataque"}
+                <DefinitionBubble id="attacking_score" size={13} />
               </th>
               <th className="py-2 text-right">
                 {playerType === "goalkeeper" ? "Defesa do gol" : "Defesa"}
+                <DefinitionBubble id="defensive_score" size={13} />
               </th>
-              {playerType === "outfield" && <th className="py-2 text-right">Criatividade</th>}
+              {playerType === "outfield" && (
+                <th className="py-2 text-right">
+                  Criatividade<DefinitionBubble id="creativity_score" size={13} />
+                </th>
+              )}
             </tr>
           </thead>
           <tbody>

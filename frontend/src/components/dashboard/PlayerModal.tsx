@@ -4,6 +4,14 @@ import { useEffect, useCallback } from "react";
 import { PowerRankingPlayer } from "@/lib/api";
 import { scoreColor, positionLabel, compositeScore, rankLabel } from "@/lib/playerUtils";
 import { flag, getKit } from "@/lib/teamUtils";
+import { DefinitionBubble } from "@/components/DefinitionLink";
+
+// Mapeia o componente do Power Ranking → id da definição (ataque/defesa/criatividade).
+const KPI_DEF: Record<string, string> = {
+  attacking: "attacking_score",
+  defensive: "defensive_score",
+  creativity: "creativity_score",
+};
 
 interface PlayerModalProps {
   player: PowerRankingPlayer;
@@ -73,12 +81,14 @@ export default function PlayerModal({ player, allPlayers, onClose }: PlayerModal
     ? [
         {
           label: "Jogo de Bola",
+          defId: KPI_DEF.attacking,
           score: player.attacking_score,
           rankInfo: atkRank,
           change: player.attacking_rank_change,
         },
         {
           label: "Defesa do Gol",
+          defId: KPI_DEF.defensive,
           score: player.defensive_score,
           rankInfo: defRank,
           change: player.defensive_rank_change,
@@ -87,18 +97,21 @@ export default function PlayerModal({ player, allPlayers, onClose }: PlayerModal
     : [
         {
           label: "Ataque",
+          defId: KPI_DEF.attacking,
           score: player.attacking_score,
           rankInfo: atkRank,
           change: player.attacking_rank_change,
         },
         {
           label: "Defesa",
+          defId: KPI_DEF.defensive,
           score: player.defensive_score,
           rankInfo: defRank,
           change: player.defensive_rank_change,
         },
         {
           label: "Criatividade",
+          defId: KPI_DEF.creativity,
           score: player.creativity_score,
           rankInfo: crtRank,
           change: player.creativity_rank_change,
@@ -108,16 +121,18 @@ export default function PlayerModal({ player, allPlayers, onClose }: PlayerModal
   const comparisonItems = [
     {
       label: isGoalkeeper ? "Jogo de bola" : "Ataque",
+      defId: KPI_DEF.attacking,
       playerVal: player.attacking_score,
       avgVal: avgAtk,
     },
     {
       label: isGoalkeeper ? "Defesa do gol" : "Defesa",
+      defId: KPI_DEF.defensive,
       playerVal: player.defensive_score,
       avgVal: avgDef,
     },
     ...(!isGoalkeeper
-      ? [{ label: "Criatividade", playerVal: player.creativity_score, avgVal: avgCrt }]
+      ? [{ label: "Criatividade", defId: KPI_DEF.creativity, playerVal: player.creativity_score, avgVal: avgCrt }]
       : []),
   ];
 
@@ -194,7 +209,7 @@ export default function PlayerModal({ player, allPlayers, onClose }: PlayerModal
             gap: 12,
             marginBottom: 20,
           }}>
-            {kpiItems.map(({ label, score, rankInfo, change }) => (
+            {kpiItems.map(({ label, defId, score, rankInfo, change }) => (
               <div
                 key={label}
                 style={{
@@ -206,7 +221,7 @@ export default function PlayerModal({ player, allPlayers, onClose }: PlayerModal
                   borderTop: `3px solid ${scoreColor(score)}`,
                 }}
               >
-                <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>{label}</div>
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>{label}{defId && <DefinitionBubble id={defId} size={13} />}</div>
                 <div style={{
                   fontSize: 28, fontWeight: 900, color: scoreColor(score), lineHeight: 1,
                 }}>
@@ -243,7 +258,7 @@ export default function PlayerModal({ player, allPlayers, onClose }: PlayerModal
                 borderRadius: 10,
               }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-                  <span style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>Score Composto</span>
+                  <span style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>Score Composto<DefinitionBubble id="player_score_geral" size={13} /></span>
                   <span style={{ fontSize: 20, fontWeight: 800, color }}>{composite.toFixed(1)}</span>
                 </div>
                 <div style={{ height: 8, background: "var(--surface)", borderRadius: 4, overflow: "hidden" }}>
@@ -277,12 +292,12 @@ export default function PlayerModal({ player, allPlayers, onClose }: PlayerModal
           </div>
 
           {/* Comparison bars — barras duplas */}
-          {comparisonItems.map(({ label, playerVal, avgVal }) => {
+          {comparisonItems.map(({ label, defId, playerVal, avgVal }) => {
             if (playerVal === null && avgVal === null) return null;
             return (
               <div key={label} style={{ marginBottom: 14 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                  <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{label}</span>
+                  <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{label}{defId && <DefinitionBubble id={defId} size={12} />}</span>
                   <div style={{ display: "flex", gap: 12 }}>
                     <span style={{ fontSize: 12, color: "var(--accent)", fontWeight: 700 }}>
                       {playerVal !== null ? playerVal.toFixed(1) : "—"}

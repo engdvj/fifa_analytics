@@ -6,6 +6,7 @@ import { analytics, PowerRankingPlayer } from "@/lib/api";
 import { scoreColor, positionLabel, compositeScore, rankLabel } from "@/lib/playerUtils";
 import { flag, getKit } from "@/lib/teamUtils";
 import PlayerModal from "@/components/dashboard/PlayerModal";
+import { DefinitionBubble } from "@/components/DefinitionLink";
 
 const PAGE_SIZE = 25;
 
@@ -230,25 +231,25 @@ export default function PlayersTable() {
                 style={{ ...thStyle("attacking_score"), textAlign: "right" }}
                 onClick={() => handleSort("attacking_score")}
               >
-                Ataque{sortArrow("attacking_score")}
+                Ataque<DefinitionBubble id="attacking_score" size={13} />{sortArrow("attacking_score")}
               </th>
               <th
                 style={{ ...thStyle("defensive_score"), textAlign: "right" }}
                 onClick={() => handleSort("defensive_score")}
               >
-                Defesa{sortArrow("defensive_score")}
+                Defesa<DefinitionBubble id="defensive_score" size={13} />{sortArrow("defensive_score")}
               </th>
               <th
                 style={{ ...thStyle("creativity_score"), textAlign: "right" }}
                 onClick={() => handleSort("creativity_score")}
               >
-                Criatividade{sortArrow("creativity_score")}
+                Criatividade<DefinitionBubble id="creativity_score" size={13} />{sortArrow("creativity_score")}
               </th>
               <th
                 style={{ ...thStyle("composite"), textAlign: "right" }}
                 onClick={() => handleSort("composite")}
               >
-                Score{sortArrow("composite")}
+                Score<DefinitionBubble id="player_score_geral" size={13} />{sortArrow("composite")}
               </th>
             </tr>
           </thead>

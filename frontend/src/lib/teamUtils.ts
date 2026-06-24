@@ -56,6 +56,23 @@ export function flag(team: string | null): string {
   return team ? (FLAGS[team] ?? "🏳️") : "🏳️";
 }
 
+// URL de imagem da bandeira (flagcdn). O Windows não tem fonte de emoji-bandeira
+// nativa (🇩🇪 vira "DE"), então renderizamos por imagem. O ISO-2 é derivado do
+// próprio emoji em FLAGS (regional indicators U+1F1E6..U+1F1FF = A..Z).
+export function flagUrl(team: string | null, height = 20): string | null {
+  if (!team) return null;
+  // subdivisões (Inglaterra/Escócia usam bandeira com tag, não 2 indicadores)
+  if (team === "Inglaterra") return `https://flagcdn.com/h${height}/gb-eng.png`;
+  if (team === "Escócia") return `https://flagcdn.com/h${height}/gb-sct.png`;
+  const emoji = FLAGS[team];
+  if (!emoji) return null;
+  const letters = [...emoji]
+    .map((c) => c.codePointAt(0)!)
+    .filter((cp) => cp >= 0x1f1e6 && cp <= 0x1f1ff)
+    .map((cp) => String.fromCharCode(cp - 0x1f1e6 + 97));
+  return letters.length === 2 ? `https://flagcdn.com/h${height}/${letters.join("")}.png` : null;
+}
+
 export interface KitColors {
   main: string;
   border: string;
@@ -161,4 +178,17 @@ export function deriveTeams(matches: Match[]): TeamSummary[] {
   }
 
   return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+}
+
+// Paleta de cores de seleção (compartilhada entre Seleções e Ranking Race).
+// A cor é atribuída pela ORDEM em que a seleção foi escolhida.
+export const SELECTION_COLORS = [
+  "#58a6ff", "#f0883e", "#3fb950", "#f5c542", "#a78bfa", "#ec4899",
+  "#22d3ee", "#fb7185", "#34d399", "#facc15", "#818cf8", "#fb923c",
+  "#2dd4bf", "#e879f9", "#4ade80", "#60a5fa",
+];
+
+export function selectionColor(team: string, selectedTeams: string[]): string | null {
+  const i = selectedTeams.indexOf(team);
+  return i >= 0 ? SELECTION_COLORS[i % SELECTION_COLORS.length] : null;
 }

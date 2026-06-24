@@ -29,3 +29,26 @@ export function useFinalizedMatches() {
     error,
   };
 }
+
+// Scores de seleção por snapshot. Sem argumento → todos os snapshots (base da
+// Ranking Race). Com `snapshot` → só aquele momento.
+export function useTeamSnapshots(snapshot?: number) {
+  const { data, isLoading, error } = useSWR(
+    ["team-snapshots", snapshot ?? "all"],
+    () => analytics.teamSnapshots(snapshot)
+  );
+  return { snapshots: data ?? [], isLoading, error };
+}
+
+export function usePlayerSnapshots(params?: { snapshot?: number; team?: string }) {
+  const { data, isLoading, error } = useSWR(
+    ["player-snapshots", params?.snapshot ?? "last", params?.team ?? "all"],
+    () => analytics.playerSnapshots(params)
+  );
+  return { players: data ?? [], isLoading, error };
+}
+
+export function useWeights() {
+  const { data, isLoading, error } = useSWR("weights", () => analytics.weights());
+  return { weights: data, isLoading, error };
+}

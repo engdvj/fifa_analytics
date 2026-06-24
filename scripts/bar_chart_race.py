@@ -11,8 +11,12 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-SNAPSHOTS_DIR = Path("data/gold/analytics/snapshots")
-OUTPUT = Path("reports/tournament/ranking_race.html")
+SNAPSHOTS_DIR = Path("data/gold/analytics")
+# Output primário: frontend/public/ (Next.js serve como estático)
+# Fallback: reports/tournament/ (legado / watcher)
+_FRONTEND_PUBLIC = Path("frontend/public/ranking_race.html")
+_REPORTS_OUTPUT = Path("reports/tournament/ranking_race.html")
+OUTPUT = _FRONTEND_PUBLIC if _FRONTEND_PUBLIC.parent.exists() else _REPORTS_OUTPUT
 OUTPUT.parent.mkdir(parents=True, exist_ok=True)
 
 # Bandeiras dos 48 times — fonte única em watcher/flags.py
@@ -20,79 +24,87 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "watcher"))
 from flags import FLAGS  # noqa: E402
 
 # Campos exportados por time por snapshot — o JS rankeia/ordena por qualquer um
+# Formato: "chave_js": "coluna_no_parquet"
 METRIC_COLS = {
     # scores
-    "score_geral": "score_geral",
-    "score_resultado": "score_resultado",
-    "score_ataque": "score_ataque",
-    "score_defesa": "score_defesa",
-    "score_eficiencia": "score_eficiencia",
-    "score_controle": "score_controle",
-    "score_forca_relativa": "score_forca_relativa",
-    "score_disciplina": "score_disciplina",
+    "score_geral":            "score_geral",
+    "score_resultado":        "score_resultado",
+    "score_ataque":           "score_ataque",
+    "score_defesa":           "score_defesa",
+    "score_eficiencia":       "score_eficiencia",
+    "score_controle":         "score_controle",
+    "score_forca_relativa":   "score_forca_relativa",
+    "score_disciplina":       "score_disciplina",
     # resultado acumulado
-    "saldo_gols": "saldo_gols",
-    "gols_pro": "gols_pro",
-    "gols_contra": "gols_contra",
-    "aproveitamento": "aproveitamento",
-    "pontos": "points",
-    "elo_rating": "elo_rating",
-    # médias ofensivas por jogo
-    "gols_por_jogo": "gols_por_jogo",
-    "xg_por_jogo": "xg_por_jogo",                 # xG agregado do elenco (365Scores)
-    "chutes_por_jogo": "_chutes_por_jogo",       # calculado abaixo
-    "chutes_no_alvo_por_jogo": "chutes_no_alvo_por_jogo",
-    "precisao_chute": "chutes_no_alvo_por_chute", # % chutes no alvo
-    "escanteios_por_jogo": "_escanteios_por_jogo", # calculado abaixo
-    "key_passes_por_jogo": "key_passes_por_jogo",
-    "dribbles_won_por_jogo": "dribbles_won_por_jogo",
-    # médias defensivas por jogo
-    "gols_contra_por_jogo": "gols_contra_por_jogo",
-    "xgp_por_jogo": "xgp_por_jogo",               # xGP: gols evitados acima do esperado (365Scores)
-    "chutes_sofridos_por_jogo": "chutes_sofridos_por_jogo",
-    "shots_blocked_por_jogo": "shots_blocked_por_jogo",
-    "duels_won_por_jogo": "duels_won_por_jogo",
-    "defesas_por_jogo": "_defesas_por_jogo",
-    "jogos_sem_sofrer_gol": "jogos_sem_sofrer_gol",
-    # cobertura de dados avançados (365Scores) — usado pelo filtro, não exibido como métrica
-    "advanced_coverage": "advanced_coverage",
-    # controle por jogo
-    "posse_media": "posse_media",
-    "passes_por_jogo": "passes_por_jogo",
-    "precisao_passes": "precisao_passes_media",   # % passes certos
-    # disciplina por jogo
-    "faltas_por_jogo": "faltas_por_jogo",
-    "amarelos_por_jogo": "amarelos_por_jogo",
-    "vermelhos_por_jogo": "vermelhos_por_jogo",
-    # estilo de jogo (eixos descritivos 0-100, 50 = média do torneio)
-    "estilo_posse": "estilo_posse",
-    "estilo_pressao": "estilo_pressao",
-    "estilo_verticalidade": "estilo_verticalidade",
-    "estilo_largura": "estilo_largura",
+    "saldo_gols":             "saldo_gols",
+    "gols_pro":               "gols",
+    "gols_contra":            "gols_contra",
+    "aproveitamento":         "aproveitamento",
+    "pontos":                 "points",
+    "elo_rating":             "elo_rating",
+    "clean_sheet":            "clean_sheet",
+    # ataque · média/jogo
+    "gols_pj":                "gols_pj",
+    "xg_pj":                  "xg_pj",
+    "chutes_pj":              "chutes_pj",
+    "chutes_no_alvo_pj":      "chutes_no_alvo_pj",
+    "precisao_chutes":        "precisao_chutes",        # fração 0-1
+    "threat_pj":              "threat_pj",
+    "escanteios_pj":          "escanteios_pj",
+    "impedimentos_pj":        "impedimentos_pj",
+    # defesa · média/jogo
+    "gols_contra_pj":         "gols_contra_pj",
+    "chutes_sofridos_pj":     "chutes_sofridos_pj",
+    "chutes_sof_alvo_pj":     "chutes_sofridos_no_alvo_pj",
+    "defesas_goleiro_pj":     "defesas_goleiro_pj",
+    "save_pct_goleiro":       "save_pct_goleiro",       # fração 0-1
+    "turnovers_forcados_pj":  "turnovers_forcados_pj",
+    # controle · média/jogo
+    "posse":                  "posse",                  # fração 0-1
+    "pitch_control":          "pitch_control",          # 0-100 direto
+    "final_third_control":    "final_third_control",    # 0-100 direto
+    "passes_pj":              "passes_pj",
+    "precisao_passes":        "precisao_passes",        # fração 0-1
+    "progressoes_pj":         "progressoes_bola_pj",
+    "linebreaks_pj":          "linebreaks_pj",
+    "dribles_pj":             "dribles_certos_pj",
+    # físico · média/jogo
+    "distancia_km_pj":        "distancia_total_km_pj",
+    "sprints_pj":             "sprints_pj",
+    "corridas_av_pj":         "corridas_alta_vel_pj",
+    "pressoes_def_pj":        "pressoes_defensivas_pj",
+    # disciplina · média/jogo
+    "faltas_pj":              "faltas_cometidas_pj",
+    "amarelos_pj":            "amarelos_pj",
+    "vermelhos_pj":           "vermelhos_pj",
+    # estilo de jogo (eixos descritivos 0-100)
+    "estilo_posse":           "estilo_posse",
+    "estilo_pressao":         "estilo_pressao",
+    "estilo_verticalidade":   "estilo_verticalidade",
+    "estilo_bola_parada":     "estilo_bola_parada",
 }
 
-matches_df = pd.read_parquet(Path("data/gold/dim_match/canonical_matches.parquet"))
+matches_df = pd.read_parquet(Path("data/gold/dim_match.parquet"))
+# Colunas derivadas necessárias para ordenação e agrupamento de dots.
+# `match_number` define rodada/grupo; `date/kickoff_time` define a ordem visual.
+if "temporal_order" not in matches_df.columns:
+    matches_df["temporal_order"] = matches_df["match_number"]
+if "date" not in matches_df.columns:
+    matches_df["date"] = pd.to_datetime(matches_df["date_utc"], utc=True, errors="coerce").dt.strftime("%Y-%m-%d")
+if "kickoff_time" not in matches_df.columns:
+    matches_df["kickoff_time"] = pd.to_datetime(matches_df["date_utc"], utc=True, errors="coerce").dt.strftime("%H:%M")
 match_info = matches_df.set_index("match_id")[["home_team", "away_team", "home_score", "away_score"]].to_dict("index")
+match_number_map = matches_df.set_index("match_id")["match_number"].to_dict()
 
 tl = pd.read_parquet(SNAPSHOTS_DIR / "snapshot_timeline.parquet")
 snapshot_match_by_n = tl.groupby("snapshot_jogo")["match_id_referencia"].first().to_dict()
 match_snapshot_n = {mid: int(n) for n, mid in snapshot_match_by_n.items()}
-match_temporal_order = matches_df.set_index("match_id")["temporal_order"].to_dict() if "temporal_order" in matches_df.columns else {}
 
-
-def _snapshot_order_key(n: int) -> tuple[float, int]:
-    mid = snapshot_match_by_n.get(n)
-    order = match_temporal_order.get(mid)
-    try:
-        order_num = float(order)
-    except (TypeError, ValueError):
-        order_num = float("inf")
-    if pd.isna(order_num):
-        order_num = float("inf")
-    return order_num, int(n)
-
-
-jogos = sorted(tl["snapshot_jogo"].unique(), key=_snapshot_order_key)
+# A navegação no tempo segue a ORDEM CRONOLÓGICA (por data) dos jogos, que é
+# exatamente como `snapshot.py` numera os snapshots: snapshot_jogo=1 é o 1º jogo
+# por data, =2 o 2º, etc. Logo basta ordenar pelo número do snapshot. (Os dots
+# do rodapé seguem a ordem do calendário/match_number — visualização distinta.)
+jogos = sorted(int(n) for n in tl["snapshot_jogo"].unique())
 valid_snapshots = set(int(n) for n in jogos)
 prev_jogo_by_n = {n: (jogos[i - 1] if i else None) for i, n in enumerate(jogos)}
 
@@ -103,8 +115,8 @@ prev_jogo_by_n = {n: (jogos[i - 1] if i else None) for i, n in enumerate(jogos)}
 data: dict = {}
 for n in jogos:
     snap = tl[tl["snapshot_jogo"] == n].copy()
-    wp = SNAPSHOTS_DIR / f"weights_jogo_{n:03d}.json"
-    pesos = json.loads(wp.read_text())["pesos"] if wp.exists() else {}
+    _wp = SNAPSHOTS_DIR / "weights.json"
+    pesos = json.loads(_wp.read_text())["pesos"] if _wp.exists() else {}
     match_id = snap["match_id_referencia"].iloc[0]
     match_source_n = str(match_id).rsplit("_", 1)[-1] if "_" in str(match_id) else str(n).zfill(3)
 
@@ -125,18 +137,6 @@ for n in jogos:
         playing = curr[curr > prev.reindex(curr.index).fillna(0)].index.tolist()
     else:
         playing = snap["team"].tolist()
-
-    # Calcula médias por jogo para métricas sem coluna própria
-    snap = snap.copy()
-    snap["_chutes_por_jogo"] = snap.apply(
-        lambda r: round(r["chutes"] / r["jogos"], 2) if r.get("jogos", 0) > 0 else None, axis=1
-    )
-    snap["_escanteios_por_jogo"] = snap.apply(
-        lambda r: round(r["escanteios"] / r["jogos"], 2) if r.get("jogos", 0) > 0 else None, axis=1
-    )
-    snap["_defesas_por_jogo"] = snap.apply(
-        lambda r: round(r["defesas"] / r["jogos"], 2) if r.get("jogos", 0) > 0 else None, axis=1
-    )
 
     teams = []
     for _, row in snap.sort_values("score_geral", ascending=False).iterrows():
@@ -176,7 +176,7 @@ data_json = json.dumps(data, ensure_ascii=False)
 # snapshot do jogo n (scores acumulados até ali). PLAYER_META = metadados
 # estáticos (time/perfil/slug) usados para filtro e link. Gerado pelo
 # snapshot_pipeline em player_snapshot_timeline.parquet.
-_PLAYER_TL_PATH = SNAPSHOTS_DIR / "player_snapshot_timeline.parquet"
+_PLAYER_TL_PATH = SNAPSHOTS_DIR / "snapshots" / "player_snapshot_timeline.parquet"
 player_data: dict = {}
 player_meta: dict = {}
 if _PLAYER_TL_PATH.exists():
@@ -260,13 +260,86 @@ def _read_optional(path: Path) -> pd.DataFrame:
     return pd.read_parquet(path) if path.exists() else pd.DataFrame()
 
 
-_lineups = _read_optional(Path("data/gold/lineups/canonical_lineups.parquet"))
-_pstats = _read_optional(Path("data/gold/fact_player_match_stats/canonical_player_stats.parquet"))
-_pfeatures = _read_optional(Path("data/gold/analytics/player_match_features.parquet"))
-_events = _read_optional(Path("data/gold/fact_events/canonical_events.parquet"))
-_tstats = _read_optional(Path("data/gold/fact_team_match_stats/canonical_team_stats.parquet"))
-_commentary = _read_optional(Path("data/gold/fact_commentary/canonical_commentary.parquet"))
-_rosters = _read_optional(Path("data/gold/rosters/espn_rosters.parquet"))
+# ── Fonte ÚNICA FIFA: escalações, eventos, stats por jogador e roster ─────────
+# Constrói os DataFrames no schema que o restante do dashboard espera a partir do
+# gold FIFA (fact_lineups, fact_events, analytics/player_match_wide). Sem ESPN/
+# 365scores/canonical.
+_team_by_id: dict[str, str] = {}
+for _, _m in matches_df.iterrows():
+    if pd.notna(_m.get("id_team_home")) and pd.notna(_m.get("home_team")):
+        _team_by_id[str(_m["id_team_home"])] = _m["home_team"]
+    if pd.notna(_m.get("id_team_away")) and pd.notna(_m.get("away_team")):
+        _team_by_id[str(_m["id_team_away"])] = _m["away_team"]
+
+_fact_lineups = _read_optional(Path("data/gold/fact_lineups.parquet"))
+_fact_events = _read_optional(Path("data/gold/fact_events.parquet"))
+_player_wide = _read_optional(Path("data/gold/analytics/player_match_wide.parquet"))
+
+# _lineups: fact_lineups + coluna `team` (nome). A formação é derivada no builder.
+_lineups = _fact_lineups.copy()
+if not _lineups.empty:
+    _lineups["team"] = _lineups["id_team"].astype(str).map(_team_by_id)
+    if "formation" not in _lineups.columns:
+        _lineups["formation"] = None
+
+# id_player -> nome (do lineup) p/ resolver nomes nos eventos (37% vêm sem nome).
+_pname_by_id: dict[str, str] = {}
+if not _fact_lineups.empty:
+    for _, _r in _fact_lineups.iterrows():
+        _pname_by_id[str(_r["id_player"])] = _r.get("player_name")
+
+# _events: schema do dashboard (match_id, team, event_type pt-BR, player, minute).
+def _map_event_type(et: str, detail: str) -> str | None:
+    if et == "goal":
+        return "gol_penalti" if detail == "penalty" else "gol"
+    if et == "card":
+        return "cartao_vermelho" if detail in ("red", "vermelho") else "cartao_amarelo"
+    return None  # substituições tratadas à parte
+
+if not _fact_events.empty:
+    _ev = _fact_events.copy()
+    _ev["team"] = _ev["id_team"].astype(str).map(_team_by_id)
+    _ev["event_type"] = [
+        _map_event_type(et, dt) for et, dt in zip(_ev["event_type"], _ev["detail"].fillna(""))
+    ]
+    _ev["player"] = [
+        nm if isinstance(nm, str) and nm else _pname_by_id.get(str(pid))
+        for nm, pid in zip(_ev["player_name"], _ev["id_player"])
+    ]
+    _events = _ev[_ev["event_type"].notna()][["match_id", "team", "event_type", "player", "minute"]].copy()
+else:
+    _events = pd.DataFrame()
+
+# _pstats: stats por jogador por jogo (player_match_wide pt-BR → schema inglês).
+_PSTATS_RENAME = {
+    "gols": "goals", "assistencias": "assists", "chutes": "shots",
+    "chutes_no_alvo": "shots_on_target", "defesas": "saves",
+    "gols_sofridos": "goals_conceded", "faltas_cometidas": "fouls_committed",
+    "faltas_sofridas": "fouls_drawn", "impedimentos": "offsides",
+    "amarelos": "yellow_cards", "vermelhos": "red_cards", "gols_contra": "own_goals",
+    "xg": "expected_goals", "sequencias_com_chute": "key_passes",
+    "dribles_certos": "dribbles_won", "turnovers_forcados": "tackles_won",
+    "pressoes_diretas": "interceptions", "pressoes_defensivas": "ball_recovery",
+    "threat": "threat", "progressoes": "progressions", "linebreaks": "linebreaks",
+}
+if not _player_wide.empty:
+    _pstats = _player_wide.rename(columns={k: v for k, v in _PSTATS_RENAME.items() if k in _player_wide.columns}).copy()
+    if "goals" not in _pstats.columns:
+        _pstats["goals"] = 0
+else:
+    _pstats = pd.DataFrame()
+
+# _rosters: jogadores distintos por time (de todas as escalações FIFA).
+if not _fact_lineups.empty:
+    _rosters = _fact_lineups.copy()
+    _rosters["team"] = _rosters["id_team"].astype(str).map(_team_by_id)
+    _rosters = _rosters[["team", "player_name", "position", "shirt_number"]].dropna(subset=["team", "player_name"]).drop_duplicates(subset=["team", "player_name"])
+else:
+    _rosters = pd.DataFrame()
+
+_pfeatures = pd.DataFrame()
+_tstats = _read_optional(Path("data/gold/analytics/team_match_wide.parquet"))
+_commentary = pd.DataFrame()
 
 
 try:
@@ -303,7 +376,7 @@ def _strip_name_cols(df: pd.DataFrame, cols: tuple[str, ...]) -> pd.DataFrame:
     return df
 
 
-_p365 = _read_optional(Path("data/gold/fact_player_match_stats/365scores.parquet"))
+_p365 = pd.DataFrame()  # 365scores removido — fonte única FIFA
 
 _lineups = _strip_name_cols(_lineups, ("player_name",))
 _pstats = _strip_name_cols(_pstats, ("player_name",))
@@ -312,6 +385,35 @@ _events = _strip_name_cols(_events, ("player", "related_player"))
 _commentary = _strip_name_cols(_commentary, ("player", "participants"))
 _p365 = _strip_name_cols(_p365, ("player_name",))
 _rosters = _strip_name_cols(_rosters, ("player_name",))
+
+# Os arquivos canonical_* são adaptadores derivados e podem carregar nomes de
+# seleção desatualizados em relação ao config/teams_mapping.yaml (ex.: uma seleção
+# cujo apelido foi adicionado depois da última geração: "Côte d'Ivoire"→"Costa do
+# Marfim", "IR Iran"→"Irã"). Re-traduz a coluna `team` na carga para casar com o
+# resto do dashboard (fonte única de nomes = teams_mapping.yaml). Idempotente.
+try:
+    from fifa_analytics.transforms.team_names import traduzir_selecao as _traduzir_selecao
+except Exception:  # standalone sem o pacote instalado: usa o YAML direto
+    _team_map = (yaml.safe_load(Path("config/teams_mapping.yaml").read_text(encoding="utf-8")) or {}).get("teams", {})
+    def _traduzir_selecao(nome):
+        return _team_map.get(nome, nome) if nome is not None else None
+
+
+def _translate_team_col(df: pd.DataFrame) -> pd.DataFrame:
+    if not df.empty and "team" in df.columns:
+        df = df.copy()
+        df["team"] = df["team"].map(_traduzir_selecao)
+    return df
+
+
+_pstats = _translate_team_col(_pstats)
+_pfeatures = _translate_team_col(_pfeatures)
+_lineups = _translate_team_col(_lineups)
+_p365 = _translate_team_col(_p365)
+_rosters = _translate_team_col(_rosters)
+_events = _translate_team_col(_events)
+_tstats = _translate_team_col(_tstats)
+_commentary = _translate_team_col(_commentary)
 
 # Aplica os apelidos curados (config/player_aliases.yaml) ao nome do jogador,
 # pela MESMA fonte única usada no pipeline — assim o detalhe do jogo no dashboard
@@ -326,7 +428,83 @@ try:
 except Exception:  # standalone sem o pacote instalado: segue sem aliases
     pass
 
+
+def _titlecase_player_names(df: pd.DataFrame) -> pd.DataFrame:
+    """A fonte FIFA grava o sobrenome em CAIXA ALTA ('Manuel NEUER', 'VOZINHA').
+    Title-case para exibição — e p/ casar com PLAYER_DATA (aba Jogadores), que já
+    aplica .str.title() em generate_player_timeline. Mantém os dois views coerentes."""
+    if not df.empty and "player_name" in df.columns:
+        df = df.copy()
+        df["player_name"] = df["player_name"].astype("string").str.title()
+    return df
+
+
+_lineups = _titlecase_player_names(_lineups)
+_pstats = _titlecase_player_names(_pstats)
+_pfeatures = _titlecase_player_names(_pfeatures)
+
 import re as _re
+
+
+def _normalize_fifa_player_stats(df: pd.DataFrame) -> pd.DataFrame:
+    """Traduz as colunas brutas FIFA (PascalCase) do canonical_player_stats para o
+    schema snake_case que o elenco (TEAMS_DETAIL.players) espera. Sem isto a fonte
+    única FIFA fica ilegível para a build do elenco e a aba Seleções some os jogadores.
+
+    Mapeia o que existe na fonte FIFA (incluindo os proxies defensivos já usados em
+    generate_player_timeline) e anexa `rating` = score_geral do power ranking FIFA."""
+    if df.empty:
+        return df
+    # já normalizado? (schema legado tinha 'goals' minúsculo) — não mexe
+    if "goals" in df.columns or "Goals" not in df.columns:
+        return df
+    rename = {
+        "Goals": "goals", "Assists": "assists",
+        "AttemptAtGoal": "shots", "AttemptAtGoalOnTarget": "shots_on_target",
+        "YellowCards": "yellow_cards", "RedCards": "red_cards",
+        "GoalkeeperSaves": "saves",
+        "FoulsAgainst": "fouls_committed", "FoulsFor": "fouls_drawn",
+        "Offsides": "offsides", "OwnGoals": "own_goals",
+        "XG": "expected_goals",
+        "NumberOfShotEndingSequences": "key_passes",  # proxy: sequências com chute
+        "TakeOnsCompleted": "dribbles_won",
+        "ForcedTurnovers": "tackles_won",                  # proxy: desarmes
+        "DirectDefensivePressuresApplied": "interceptions",  # proxy: interceptações
+        "DefensivePressuresApplied": "ball_recovery",      # proxy: recuperações
+    }
+    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+    # aparições: 1 por linha de stats (cada linha = um jogo do jogador)
+    if "MatchesPlayed" in df.columns:
+        mp = pd.to_numeric(df["MatchesPlayed"], errors="coerce").fillna(0)
+        df["appearances"] = mp.where(mp > 0, 1).astype(int)
+    else:
+        df["appearances"] = 1
+    # duelos ganhos (proxy): turnovers forçados + dribles completos — mesma combinação
+    # de generate_player_timeline; expostos como ground/aerial p/ a build somar.
+    tw = pd.to_numeric(df.get("tackles_won", 0), errors="coerce").fillna(0)
+    dw = pd.to_numeric(df.get("dribbles_won", 0), errors="coerce").fillna(0)
+    df["ground_duels_won"] = tw + dw
+    df["aerial_duels_won"] = 0
+    # rating (Nota): score_geral do power ranking FIFA, casado por id_player
+    pr_path = Path("data/gold/fact_power_ranking.parquet")
+    if pr_path.exists() and "id_player" in df.columns:
+        pr = pd.read_parquet(pr_path)
+        if not pr.empty and "id_player" in pr.columns:
+            def _score(r):
+                a = r.get("attacking_score") or 0
+                d = r.get("defensive_score") or 0
+                c = r.get("creativity_score") or 0
+                if str(r.get("player_type", "outfield")) == "goalkeeper":
+                    return d * 0.6 + c * 0.25 + a * 0.15
+                return a * 0.4 + c * 0.35 + d * 0.25
+            pr = pr.assign(rating=pr.apply(_score, axis=1))
+            rmap = pr.drop_duplicates("id_player").set_index(pr["id_player"].astype(str))["rating"]
+            df["rating"] = df["id_player"].astype(str).map(rmap)
+    return df
+
+
+_pstats = _normalize_fifa_player_stats(_pstats)
+_pfeatures = _normalize_fifa_player_stats(_pfeatures)
 
 
 def _name_key(s) -> str:
@@ -641,6 +819,7 @@ def _pos_x_hint(position: str | None) -> float | None:
 # maior = mais ofensivo. Usado para agrupar os jogadores nas linhas da formação.
 _POS_DEPTH = {
     "G": 0, "GK": 0,
+    "D": 2,  # grupo amplo da fonte FIFA (sem desmembrar CB/LB/RB)
     "SW": 1, "CD": 2, "CD-L": 2, "CD-R": 2, "CB": 2, "LB": 2, "RB": 2, "LWB": 2, "RWB": 2,
     "DM": 3, "CDM": 3,
     "CM": 4, "CM-L": 4, "CM-R": 4, "LM": 4, "RM": 4, "M": 4, "MF": 4,
@@ -814,6 +993,14 @@ def _build_team_lineup(mid: str, team: str, date: str = "", opponent: str = "") 
                 "pos": _position_label(pos_code),
             }
             (starters if bool(p.get("is_starter")) else subs).append(item)
+        # A fonte FIFA não traz a string de formação; deriva-a das contagens por
+        # grupo de posição dos titulares (ex.: 4 D + 5 M + 1 F → "4-5-1") para que
+        # o campo (escalação visual) renderize em vez de ficar vazio.
+        if not formation and len(starters) == 11:
+            groups = [_position_group(p.get("pos_code")) for p in starters]
+            d, m, f = (groups.count("Defensores"), groups.count("Meias"), groups.count("Atacantes"))
+            if d + m + f == 10 and d and f:  # 10 de linha, com defesa e ataque definidos
+                formation = f"{d}-{m}-{f}"
 
     # chave de match tolerante: minúsculas, sem acento, hífen→espaço, espaços
     # colapsados. Necessária porque lineup e commentary divergem (ex.: lineup
@@ -938,7 +1125,7 @@ for _team in _all_cup_teams:
     # confrontos de mata-mata ainda indefinidos (sem adversário) ficam de fora.
     mine = matches_df[
         (matches_df["home_team"] == _team) | (matches_df["away_team"] == _team)
-    ].sort_values(["temporal_order", "date", "kickoff_time"])
+    ].sort_values(["date", "kickoff_time", "match_number"])
 
     # — jogos + escalações
     jogos_list = []
@@ -1111,7 +1298,10 @@ for _team in _all_cup_teams:
                 "bolas_altas": ("high_claims", "sum"), "socos": ("punches", "sum"),
             }
             available_agg = {out_col: spec for out_col, spec in agg_spec.items() if spec[0] in ps.columns}
-            agg = ps.groupby("player_name", dropna=True).agg(**available_agg).reset_index()
+            if available_agg:
+                agg = ps.groupby("player_name", dropna=True).agg(**available_agg).reset_index()
+            else:
+                agg = pd.DataFrame(columns=["player_name"])
             if {"ground_duels_won", "aerial_duels_won"}.issubset(ps.columns):
                 duels = (
                     ps.assign(_duels=pd.to_numeric(ps["ground_duels_won"], errors="coerce").fillna(0) + pd.to_numeric(ps["aerial_duels_won"], errors="coerce").fillna(0))
@@ -1225,18 +1415,25 @@ for _team in _all_cup_teams:
             "pressao": _num(srow.get("estilo_pressao"), 1),
             "verticalidade": _num(srow.get("estilo_verticalidade"), 1),
             "largura": _num(srow.get("estilo_largura"), 1),
-            # stats brutas por jogo que alimentam os eixos / arquétipos
-            "posse_media": _num(srow.get("posse_media"), 1),
-            "passes_pj": _pg("passes"),
-            "precisao": _num((srow.get("precisao_passes_media") or 0) * 100, 0),
-            "dribles_pj": _pg("dribbles_won"),
-            "key_passes_pj": _pg("key_passes"),
-            "cruzamentos_pj": _pg("accurate_crosses"),
-            "chutes_pj": _pg("chutes"),
-            "no_alvo_pj": _pg("chutes_no_alvo"),
-            "gols_pj": _pg("gols_pro"),
-            "clearances_pj": _pg("clearances"),
-            "chutes_sofridos_pj": _pg("chutes_sofridos"),
+            # stats brutas por jogo que alimentam os eixos / arquétipos (colunas _pj já são médias)
+            "posse_media": _num(srow.get("posse"), 1),  # fração 0-1
+            "passes_pj": _num(srow.get("passes_pj"), 1),
+            "precisao": _num((srow.get("precisao_passes") or 0) * 100, 0),  # 0-1 → %
+            "dribles_pj": _num(srow.get("dribles_certos_pj"), 1),
+            "linebreaks_pj": _num(srow.get("linebreaks_pj"), 1),
+            "progressoes_pj": _num(srow.get("progressoes_bola_pj"), 1),
+            "chutes_pj": _num(srow.get("chutes_pj"), 1),
+            "no_alvo_pj": _num(srow.get("chutes_no_alvo_pj"), 1),
+            "gols_pj": _num(srow.get("gols_pj"), 1),
+            "sprints_pj": _num(srow.get("sprints_pj"), 1),
+            "pressoes_pj": _num(srow.get("pressoes_defensivas_pj"), 1),
+            "turnovers_pj": _num(srow.get("turnovers_forcados_pj"), 1),
+            "chutes_sofridos_pj": _num(srow.get("chutes_sofridos_pj"), 1),
+            "xg_pj": _num(srow.get("xg_pj"), 2),
+            "threat_pj": _num(srow.get("threat_pj"), 1),
+            "pitch_control": _num(srow.get("pitch_control"), 1),
+            "final_third_control": _num(srow.get("final_third_control"), 1),
+            "bola_parada_pj": _num(srow.get("escanteios_pj"), 1),
         }
 
     # — fase atual (do último jogo) e flag de eliminada
@@ -1314,17 +1511,39 @@ ROUND_LABELS = {
 # canônica pode ser corrigida sem mudar imediatamente os arquivos antigos.
 snapshot_n_by_mid = {frame["match_id"]: int(n) for n, frame in data.items()}
 
-# Dots de TODOS os 104 jogos, em ordem cronológica (temporal_order).
+# Mapeia nomes de fase em inglês (fonte FIFA) para slugs usados em STAGE_META.
+_STAGE_SLUG = {
+    "First Stage":              "fase_de_grupos",
+    "Round of 32":              "dezesseis_avos",
+    "Round of 16":              "oitavas_de_final",
+    "Quarter-final":            "quartas_de_final",
+    "Semi-final":               "semifinal",
+    "Play-off for third place": "terceiro_lugar",
+    "Final":                    "final",
+}
+
+# Dots de TODOS os 104 jogos em ordem cronológica real.
 # Cada um carrega o status (done/live/pending) para colorir.
-matches_sorted = matches.sort_values(["temporal_order", "date", "kickoff_time"])
+matches_sorted = matches.sort_values(["date", "kickoff_time", "match_number"])
 snapshot_meta = []
 for _ord, (_, mrow) in enumerate(matches_sorted.iterrows()):
     mid = mrow["match_id"]
-    stage = mrow.get("stage") or "fase_de_grupos"
-    try:
-        rnd = int(mrow.get("round") or 1)
-    except (TypeError, ValueError):
-        rnd = 1
+    stage_raw = mrow.get("stage") or "First Stage"
+    stage = _STAGE_SLUG.get(stage_raw, stage_raw)
+    if stage == "fase_de_grupos":
+        # Fase de grupos: 72 jogos, 3 rodadas de 24 cada (Copa 2026).
+        # Usa match_number/temporal_order para derivar a rodada, pois a fonte
+        # FIFA não fornece coluna "round" para a fase de grupos.
+        try:
+            mn = int(mrow.get("match_number") or mrow.get("temporal_order") or _ord + 1)
+        except (TypeError, ValueError):
+            mn = _ord + 1
+        rnd = 1 if mn <= 24 else (2 if mn <= 48 else 3)
+    else:
+        try:
+            rnd = int(mrow.get("round") or 1)
+        except (TypeError, ValueError):
+            rnd = 1
     sm    = STAGE_META.get(stage, {"label": stage, "color": "#6b7280"})
     label = ROUND_LABELS.get((stage, rnd), sm["label"])
     status = mrow.get("status", "agendado")
@@ -1373,67 +1592,77 @@ for item in snapshot_meta:
     item["phase_end"] = stage not in {"fase_de_grupos", *_GOLD_PHASE_END} and is_last_of_stage
 
 snapshot_meta_json = json.dumps(snapshot_meta, ensure_ascii=False)
-snapshot_order_json = json.dumps([m["n"] for m in snapshot_meta if m["n"] is not None], ensure_ascii=False)
+# Ordem de NAVEGAÇÃO (setas/timeline) = cronológica por data = número do snapshot
+# ascendente. Independente da ordem visual dos dots (que é o calendário).
+snapshot_order_json = json.dumps(sorted(m["n"] for m in snapshot_meta if m["n"] is not None), ensure_ascii=False)
 
-# Grupos de métricas para o seletor agrupado no HTML (4 colunas no card)
+# Grupos de métricas para o seletor agrupado no HTML.
 METRIC_GROUPS = [
     ("Scores", "tt-col-scores", [
-        ("score_geral", "Geral"),
-        ("score_resultado", "Resultado"),
-        ("score_ataque", "Ataque"),
-        ("score_defesa", "Defesa"),
-        ("score_eficiencia", "Eficiência"),
-        ("score_controle", "Controle"),
-        ("score_forca_relativa", "Força Relativa"),
-        ("score_disciplina", "Disciplina"),
+        ("score_geral",           "Geral"),
+        ("score_resultado",       "Resultado"),
+        ("score_ataque",          "Ataque"),
+        ("score_defesa",          "Defesa"),
+        ("score_eficiencia",      "Eficiência"),
+        ("score_controle",        "Controle"),
+        ("score_forca_relativa",  "Força Relativa"),
+        ("score_disciplina",      "Disciplina"),
     ]),
     ("Campanha · Totais", "tt-col-campanha", [
-        ("pontos", "Pontos"),
-        ("aproveitamento", "Aproveitamento %"),
-        ("saldo_gols", "Saldo de Gols"),
-        ("gols_pro", "Gols Marcados"),
-        ("gols_contra", "Gols Sofridos"),
-        ("elo_rating", "Rating Elo"),
+        ("pontos",        "Pontos"),
+        ("aproveitamento","Aproveitamento %"),
+        ("saldo_gols",    "Saldo de Gols"),
+        ("gols_pro",      "Gols Marcados"),
+        ("gols_contra",   "Gols Sofridos"),
+        ("elo_rating",    "Rating Elo"),
+        ("clean_sheet",   "Jogos Sem Sofrer Gol"),
     ]),
     ("Ataque · Média/jogo", "tt-col-ataque", [
-        ("gols_por_jogo", "Gols"),
-        ("xg_por_jogo", "xG (Gols Esperados)"),
-        ("chutes_por_jogo", "Chutes"),
-        ("chutes_no_alvo_por_jogo", "No Alvo"),
-        ("precisao_chute", "Precisão de Chute %"),
-        ("escanteios_por_jogo", "Escanteios"),
+        ("gols_pj",           "Gols"),
+        ("xg_pj",             "xG (Esperados)"),
+        ("chutes_pj",         "Chutes"),
+        ("chutes_no_alvo_pj", "No Alvo"),
+        ("precisao_chutes",   "Precisão de Chute %"),
+        ("threat_pj",         "Ameaça (Threat)"),
+        ("escanteios_pj",     "Escanteios"),
+        ("impedimentos_pj",   "Impedimentos"),
     ]),
     ("Defesa · Média/jogo", "tt-col-defesa", [
-        ("gols_contra_por_jogo", "Gols Sofridos"),
-        ("xgp_por_jogo", "xGP (Gols Evitados)"),
-        ("chutes_sofridos_por_jogo", "Chutes Sofridos"),
-        ("shots_blocked_por_jogo", "Bloqueios"),
-        ("duels_won_por_jogo", "Duelos Ganhos"),
-        ("defesas_por_jogo", "Defesas do Goleiro"),
-        ("jogos_sem_sofrer_gol", "Jogos Sem Sofrer Gol"),
+        ("gols_contra_pj",        "Gols Sofridos"),
+        ("chutes_sofridos_pj",    "Chutes Sofridos"),
+        ("chutes_sof_alvo_pj",    "Chutes no Alvo Sofridos"),
+        ("defesas_goleiro_pj",    "Defesas do Goleiro"),
+        ("save_pct_goleiro",      "Save % Goleiro"),
+        ("turnovers_forcados_pj", "Turnovers Forçados"),
     ]),
     ("Controle · Média/jogo", "tt-col-controle", [
-        ("posse_media", "Posse Média %"),
-        ("passes_por_jogo", "Passes"),
-        ("precisao_passes", "Precisão de Passes %"),
-        ("key_passes_por_jogo", "Passes-Chave"),
-        ("dribbles_won_por_jogo", "Dribles"),
+        ("posse",              "Posse %"),
+        ("pitch_control",      "Pitch Control %"),
+        ("final_third_control","Controle 3º Final %"),
+        ("passes_pj",          "Passes"),
+        ("precisao_passes",    "Precisão de Passes %"),
+        ("progressoes_pj",     "Progressões"),
+        ("linebreaks_pj",      "Linebreaks"),
+        ("dribles_pj",         "Dribles"),
+    ]),
+    ("Intensidade · Time", "tt-col-intensidade", [
+        ("distancia_km_pj",  "Distância coletiva"),
+        ("sprints_pj",       "Sprints coletivos"),
+        ("corridas_av_pj",   "Corridas alta vel."),
+        ("pressoes_def_pj",  "Pressões defensivas"),
     ]),
     ("Disciplina · Média/jogo", "tt-col-disciplina", [
-        ("faltas_por_jogo", "Faltas"),
-        ("amarelos_por_jogo", "Amarelos"),
-        ("vermelhos_por_jogo", "Vermelhos"),
+        ("faltas_pj",    "Faltas"),
+        ("amarelos_pj",  "Amarelos"),
+        ("vermelhos_pj", "Vermelhos"),
     ]),
-    # Estilo de jogo NÃO entra no painel de métricas do card — virava sopa
-    # visual no espaço estreito. A flag (estilo_jogo) + o "porquê" aparecem só
-    # no cabeçalho do modal (ver buildCardHeader / styleWhy); os 4 eixos
-    # detalhados ficam nos relatórios Markdown da seleção.
 ]
 
-# Métricas onde menor = melhor (barra mais comprida = mais destaque negativo)
+# Métricas onde menor = melhor
 LOWER_IS_BETTER = {
-    "gols_contra", "gols_contra_por_jogo", "chutes_sofridos_por_jogo",
-    "faltas_por_jogo", "amarelos_por_jogo", "vermelhos_por_jogo",
+    "gols_contra", "gols_contra_pj",
+    "chutes_sofridos_pj", "chutes_sof_alvo_pj",
+    "faltas_pj", "amarelos_pj", "vermelhos_pj", "impedimentos_pj",
 }
 
 metric_groups_json = json.dumps(METRIC_GROUPS, ensure_ascii=False)
@@ -1443,118 +1672,126 @@ snapshot_order_json_var = snapshot_order_json
 
 # Métricas relacionadas: ao selecionar uma, as outras ficam destacadas no card
 METRIC_RELATIONS: dict[str, list[str]] = {
-    # ── score_resultado ← aproveitamento_ponderado + saldo_gols/jogo
-    "score_resultado":         ["aproveitamento", "pontos", "saldo_gols", "gols_pro", "gols_contra", "score_geral"],
-    "aproveitamento":          ["pontos", "saldo_gols", "score_resultado"],
-    "pontos":                  ["aproveitamento", "saldo_gols", "score_resultado"],
-    "saldo_gols":              ["gols_pro", "gols_contra", "aproveitamento", "score_resultado"],
-    "gols_pro":                ["saldo_gols", "gols_por_jogo", "score_resultado", "score_ataque"],
-    "gols_contra":             ["saldo_gols", "gols_contra_por_jogo", "jogos_sem_sofrer_gol", "score_resultado", "score_defesa"],
+    # ── score_resultado ← aproveitamento ponderado + saldo_gols/jogo
+    "score_resultado":        ["aproveitamento", "pontos", "saldo_gols", "gols_pro", "gols_contra", "score_geral"],
+    "aproveitamento":         ["pontos", "saldo_gols", "score_resultado"],
+    "pontos":                 ["aproveitamento", "saldo_gols", "score_resultado"],
+    "saldo_gols":             ["gols_pro", "gols_contra", "aproveitamento", "score_resultado"],
+    "gols_pro":               ["saldo_gols", "gols_pj", "score_resultado", "score_ataque"],
+    "gols_contra":            ["saldo_gols", "gols_contra_pj", "clean_sheet", "score_resultado", "score_defesa"],
 
-    # ── score_ataque ← gols/jogo + xG/jogo (qualidade) + chutes_no_alvo/jogo (× contexto adversário)
-    "score_ataque":            ["gols_por_jogo", "xg_por_jogo", "chutes_no_alvo_por_jogo", "score_eficiencia"],
-    "gols_por_jogo":           ["gols_pro", "xg_por_jogo", "chutes_no_alvo_por_jogo", "precisao_chute", "score_ataque", "score_eficiencia"],
-    "xg_por_jogo":             ["gols_por_jogo", "chutes_no_alvo_por_jogo", "score_ataque", "score_eficiencia"],
-    "chutes_no_alvo_por_jogo": ["chutes_por_jogo", "precisao_chute", "gols_por_jogo", "score_ataque", "score_eficiencia"],
-    "chutes_por_jogo":         ["chutes_no_alvo_por_jogo", "precisao_chute", "escanteios_por_jogo"],
-    "escanteios_por_jogo":     ["chutes_por_jogo", "key_passes_por_jogo"],
+    # ── score_ataque ← xG + gols + chutes_no_alvo + Threat
+    "score_ataque":           ["xg_pj", "gols_pj", "chutes_no_alvo_pj", "threat_pj", "score_eficiencia"],
+    "gols_pj":                ["gols_pro", "xg_pj", "chutes_no_alvo_pj", "score_ataque", "score_eficiencia"],
+    "xg_pj":                  ["gols_pj", "chutes_no_alvo_pj", "threat_pj", "score_ataque", "score_eficiencia"],
+    "chutes_no_alvo_pj":      ["chutes_pj", "precisao_chutes", "gols_pj", "score_ataque"],
+    "chutes_pj":              ["chutes_no_alvo_pj", "precisao_chutes", "escanteios_pj"],
+    "threat_pj":              ["xg_pj", "gols_pj", "score_ataque"],
+    "escanteios_pj":          ["chutes_pj", "chutes_no_alvo_pj"],
+    "impedimentos_pj":        ["chutes_no_alvo_pj", "score_ataque"],
 
-    # ── score_eficiencia ← gols/chute (precisao_chute) + gols vs xG + chutes_no_alvo/chute + key_passes/jogo
-    "score_eficiencia":        ["precisao_chute", "xg_por_jogo", "chutes_no_alvo_por_jogo", "gols_por_jogo", "key_passes_por_jogo", "score_ataque"],
-    "precisao_chute":          ["chutes_por_jogo", "chutes_no_alvo_por_jogo", "gols_por_jogo", "score_eficiencia"],
-    "key_passes_por_jogo":     ["gols_por_jogo", "escanteios_por_jogo", "score_eficiencia", "score_controle"],
+    # ── score_eficiencia ← gols/xG + conversão chutes + progressões
+    "score_eficiencia":       ["precisao_chutes", "xg_pj", "gols_pj", "progressoes_pj", "score_ataque"],
+    "precisao_chutes":        ["chutes_pj", "chutes_no_alvo_pj", "gols_pj", "score_eficiencia"],
+    "progressoes_pj":         ["passes_pj", "linebreaks_pj", "score_eficiencia", "score_controle"],
 
-    # ── score_defesa ← gols sofridos/jogo (eixo dominante, gol contra pesa +) +
-    #    QUALIDADE defensiva (xGP, bloqueios, duelos) ponderada pela força do adversário (Elo)
-    "score_defesa":            ["gols_contra_por_jogo", "gols_contra", "chutes_sofridos_por_jogo", "xgp_por_jogo", "shots_blocked_por_jogo", "duels_won_por_jogo"],
-    "gols_contra_por_jogo":    ["gols_contra", "chutes_sofridos_por_jogo", "score_defesa"],
-    "chutes_sofridos_por_jogo":["gols_contra_por_jogo", "score_defesa", "shots_blocked_por_jogo"],
-    "xgp_por_jogo":            ["gols_contra_por_jogo", "defesas_por_jogo", "score_defesa"],
-    "shots_blocked_por_jogo":  ["chutes_sofridos_por_jogo", "score_defesa"],
-    "duels_won_por_jogo":      ["score_defesa", "chutes_sofridos_por_jogo"],
-    "defesas_por_jogo":        ["chutes_sofridos_por_jogo", "gols_contra_por_jogo", "xgp_por_jogo"],
-    "jogos_sem_sofrer_gol":    ["gols_contra_por_jogo", "gols_contra"],
+    # ── score_defesa ← gols sofridos/jogo (dominante) + save_pct + turnovers
+    "score_defesa":           ["gols_contra_pj", "gols_contra", "chutes_sofridos_pj", "save_pct_goleiro", "turnovers_forcados_pj"],
+    "gols_contra_pj":         ["gols_contra", "chutes_sofridos_pj", "clean_sheet", "score_defesa"],
+    "chutes_sofridos_pj":     ["gols_contra_pj", "score_defesa", "chutes_sof_alvo_pj"],
+    "chutes_sof_alvo_pj":     ["chutes_sofridos_pj", "defesas_goleiro_pj", "score_defesa"],
+    "defesas_goleiro_pj":     ["chutes_sof_alvo_pj", "gols_contra_pj", "save_pct_goleiro"],
+    "save_pct_goleiro":       ["defesas_goleiro_pj", "chutes_sof_alvo_pj", "score_defesa"],
+    "turnovers_forcados_pj":  ["score_defesa"],
+    "clean_sheet":            ["gols_contra_pj", "gols_contra"],
 
-    # ── score_controle ← posse + passes + precisao_passes + posse_produtiva (chutes_no_alvo/posse) + dribbles
-    "score_controle":          ["posse_media", "passes_por_jogo", "precisao_passes", "dribbles_won_por_jogo", "chutes_no_alvo_por_jogo"],
-    "posse_media":             ["passes_por_jogo", "precisao_passes", "chutes_no_alvo_por_jogo", "score_controle", "estilo_posse"],
-    "passes_por_jogo":         ["posse_media", "precisao_passes", "key_passes_por_jogo", "score_controle", "estilo_posse"],
-    "precisao_passes":         ["passes_por_jogo", "posse_media", "score_controle", "estilo_posse"],
-    "dribbles_won_por_jogo":   ["posse_media", "key_passes_por_jogo", "score_controle", "estilo_largura"],
+    # ── score_controle ← posse + pitch_control + final_third_control + precisao_passes
+    "score_controle":         ["posse", "pitch_control", "final_third_control", "passes_pj", "precisao_passes"],
+    "posse":                  ["passes_pj", "precisao_passes", "pitch_control", "score_controle", "estilo_posse"],
+    "pitch_control":          ["posse", "final_third_control", "score_controle"],
+    "final_third_control":    ["pitch_control", "posse", "score_controle"],
+    "passes_pj":              ["posse", "precisao_passes", "progressoes_pj", "score_controle"],
+    "precisao_passes":        ["passes_pj", "posse", "score_controle"],
+    "linebreaks_pj":          ["progressoes_pj", "passes_pj", "score_controle"],
+    "dribles_pj":             ["posse", "score_controle"],
+
+    # ── Intensidade coletiva (descritivo — não entra no score_geral)
+    "distancia_km_pj":        ["sprints_pj", "corridas_av_pj"],
+    "sprints_pj":             ["distancia_km_pj", "corridas_av_pj", "pressoes_def_pj"],
+    "corridas_av_pj":         ["sprints_pj", "distancia_km_pj"],
+    "pressoes_def_pj":        ["turnovers_forcados_pj", "sprints_pj"],
 
     # ── score_disciplina ← faltas + amarelos + vermelhos por jogo
-    "score_disciplina":        ["faltas_por_jogo", "amarelos_por_jogo", "vermelhos_por_jogo"],
-    "faltas_por_jogo":         ["amarelos_por_jogo", "vermelhos_por_jogo", "score_disciplina"],
-    "amarelos_por_jogo":       ["faltas_por_jogo", "vermelhos_por_jogo", "score_disciplina"],
-    "vermelhos_por_jogo":      ["amarelos_por_jogo", "faltas_por_jogo", "score_disciplina"],
+    "score_disciplina":       ["faltas_pj", "amarelos_pj", "vermelhos_pj"],
+    "faltas_pj":              ["amarelos_pj", "vermelhos_pj", "score_disciplina"],
+    "amarelos_pj":            ["faltas_pj", "vermelhos_pj", "score_disciplina"],
+    "vermelhos_pj":           ["amarelos_pj", "faltas_pj", "score_disciplina"],
 
-    # ── score_forca_relativa ← elo_rating puro (acumulado da campanha)
-    "score_forca_relativa":    ["elo_rating", "aproveitamento", "pontos"],
-    "elo_rating":              ["score_forca_relativa", "aproveitamento", "pontos"],
+    # ── score_forca_relativa ← Elo
+    "score_forca_relativa":   ["elo_rating", "aproveitamento", "pontos"],
+    "elo_rating":             ["score_forca_relativa", "aproveitamento", "pontos"],
 
     # ── score_geral ← todos os 6 componentes
-    "score_geral":             ["score_resultado", "score_ataque", "score_defesa",
-                                "score_eficiencia", "score_controle", "score_forca_relativa", "score_disciplina"],
+    "score_geral":            ["score_resultado", "score_ataque", "score_defesa",
+                               "score_eficiencia", "score_controle", "score_forca_relativa"],
 
-    # ── Estilo de jogo (descritivo): acende as métricas brutas do painel que
-    # compõem cada eixo. Insumos sem coluna no painel (recuperação no terço
-    # final, desarmes, cruzamentos certos) entram só como indireta (amarelo).
-    "estilo_posse":            ["posse_media", "passes_por_jogo", "precisao_passes"],
-    "estilo_verticalidade":    ["chutes_por_jogo", "chutes_no_alvo_por_jogo"],
-    "estilo_largura":          ["dribbles_won_por_jogo", "key_passes_por_jogo"],
-    "estilo_pressao":          [],  # nenhum insumo direto tem coluna no painel
+    # ── Estilo (descritivo)
+    "estilo_posse":           ["posse", "passes_pj", "precisao_passes", "pitch_control"],
+    "estilo_verticalidade":   ["chutes_pj", "chutes_no_alvo_pj", "linebreaks_pj"],
+    "estilo_pressao":         ["pressoes_def_pj", "turnovers_forcados_pj", "sprints_pj"],
+    "estilo_bola_parada":     ["escanteios_pj"],
 }
 
 # Relações indiretas: correlações naturais que NÃO entram diretamente no cálculo do score,
 # mas são contextualmente relevantes (ex: mais chutes totais → mais no alvo → influencia ataque)
 METRIC_RELATIONS_INDIRECT: dict[str, list[str]] = {
     # chutes totais são contexto de volume, não insumo direto
-    "score_ataque":            ["chutes_por_jogo", "escanteios_por_jogo", "key_passes_por_jogo"],
-    "chutes_no_alvo_por_jogo": ["escanteios_por_jogo", "key_passes_por_jogo"],
-    "gols_por_jogo":           ["chutes_por_jogo", "escanteios_por_jogo"],
-    "gols_pro":                ["chutes_no_alvo_por_jogo", "precisao_chute"],
+    "score_ataque":           ["chutes_pj", "escanteios_pj", "impedimentos_pj"],
+    "chutes_no_alvo_pj":      ["escanteios_pj", "chutes_pj"],
+    "gols_pj":                ["chutes_pj", "escanteios_pj"],
+    "gols_pro":               ["chutes_no_alvo_pj", "precisao_chutes"],
 
-    # eficiência: key_passes é insumo quando 365scores disponível (nem sempre)
-    "score_eficiencia":        ["chutes_por_jogo", "escanteios_por_jogo"],
-    "precisao_chute":          ["escanteios_por_jogo"],
+    # eficiência: progressão e linebreaks são insumos secundários
+    "score_eficiencia":       ["chutes_pj", "escanteios_pj", "linebreaks_pj"],
+    "precisao_chutes":        ["escanteios_pj", "threat_pj"],
 
-    # defesa: clean sheet e defesas do goleiro são CONSEQUÊNCIA da solidez, não
-    # insumo direto do score (que usa gols sofridos + volume × Elo do adversário).
-    "score_defesa":            ["jogos_sem_sofrer_gol", "defesas_por_jogo", "faltas_por_jogo"],
-    "gols_contra_por_jogo":    ["faltas_por_jogo", "jogos_sem_sofrer_gol"],
-    "gols_contra":             ["chutes_sofridos_por_jogo", "faltas_por_jogo"],
+    # defesa: clean sheet e defesas do goleiro são CONSEQUÊNCIA da solidez
+    "score_defesa":           ["clean_sheet", "defesas_goleiro_pj", "faltas_pj"],
+    "gols_contra_pj":         ["faltas_pj", "clean_sheet"],
+    "gols_contra":            ["chutes_sofridos_pj", "faltas_pj"],
 
-    # controle: passes-chave e dribles são efeito do controle, não insumo direto
-    "score_controle":          ["key_passes_por_jogo", "escanteios_por_jogo"],
-    "posse_media":             ["key_passes_por_jogo", "dribbles_won_por_jogo"],
-    "passes_por_jogo":         ["escanteios_por_jogo", "dribbles_won_por_jogo"],
+    # controle: dribles e linebreaks são efeito do controle, não insumo direto
+    "score_controle":         ["escanteios_pj", "dribles_pj", "linebreaks_pj"],
+    "posse":                  ["dribles_pj", "progressoes_pj"],
+    "passes_pj":              ["escanteios_pj", "dribles_pj"],
 
-    # resultado: força relativa do adversário influencia indiretamente via ponderação
-    "score_resultado":         ["elo_rating", "score_forca_relativa"],
-    "aproveitamento":          ["elo_rating"],
-    "saldo_gols":              ["gols_por_jogo", "gols_contra_por_jogo"],
+    # resultado: força relativa influencia indiretamente via ponderação
+    "score_resultado":        ["elo_rating", "score_forca_relativa"],
+    "aproveitamento":         ["elo_rating"],
+    "saldo_gols":             ["gols_pj", "gols_contra_pj"],
 
     # força relativa: resultado e aproveitamento são consequência, não insumo
-    "score_forca_relativa":    ["score_resultado", "aproveitamento"],
-    "elo_rating":              ["score_resultado", "saldo_gols"],
+    "score_forca_relativa":   ["score_resultado", "aproveitamento"],
+    "elo_rating":             ["score_resultado", "saldo_gols"],
 
-    # disciplina: faltas geram escanteios/cartões (e correlacionam com pressão alta)
-    "faltas_por_jogo":         ["escanteios_por_jogo", "estilo_pressao"],
-    "amarelos_por_jogo":       ["escanteios_por_jogo"],
+    # disciplina: faltas correlacionam com pressão alta
+    "faltas_pj":              ["escanteios_pj", "estilo_pressao"],
+    "amarelos_pj":            ["escanteios_pj", "faltas_pj"],
 
     # escanteios: resultado de pressão ofensiva
-    "escanteios_por_jogo":     ["score_ataque", "gols_por_jogo", "chutes_por_jogo", "estilo_largura"],
-    "chutes_por_jogo":         ["score_ataque", "gols_por_jogo", "estilo_verticalidade"],
-    "key_passes_por_jogo":     ["chutes_por_jogo", "escanteios_por_jogo", "score_ataque", "estilo_largura"],
+    "escanteios_pj":          ["score_ataque", "gols_pj", "chutes_pj"],
+    "chutes_pj":              ["score_ataque", "gols_pj", "estilo_verticalidade"],
 
-    # ── Estilo (descritivo): correlatos sem coluna própria no painel.
-    # Pressão alta correlaciona com mais faltas (disputa no campo de frente) e
-    # escanteios (pressão ofensiva); verticalidade com escanteios; largura com
-    # escanteios (cruzamentos viram escanteios).
-    "estilo_posse":            ["key_passes_por_jogo", "dribbles_won_por_jogo"],
-    "estilo_pressao":          ["faltas_por_jogo", "escanteios_por_jogo"],
-    "estilo_verticalidade":    ["escanteios_por_jogo", "gols_por_jogo"],
-    "estilo_largura":          ["escanteios_por_jogo"],
+    # intensidade coletiva: distância e sprints correlacionam com pressão
+    "distancia_km_pj":        ["estilo_pressao", "score_defesa"],
+    "sprints_pj":             ["estilo_pressao", "score_ataque"],
+    "pressoes_def_pj":        ["estilo_pressao", "turnovers_forcados_pj"],
+
+    # estilo (descritivo): correlatos sem coluna própria no painel
+    "estilo_posse":           ["dribles_pj", "progressoes_pj"],
+    "estilo_pressao":         ["faltas_pj", "escanteios_pj", "sprints_pj"],
+    "estilo_verticalidade":   ["escanteios_pj", "gols_pj", "linebreaks_pj"],
+    "estilo_bola_parada":     ["escanteios_pj", "faltas_pj"],
 }
 metric_relations_json = json.dumps(METRIC_RELATIONS, ensure_ascii=False)
 metric_relations_indirect_json = json.dumps(METRIC_RELATIONS_INDIRECT, ensure_ascii=False)
@@ -2167,8 +2404,8 @@ input[type=range] {{
   border: 2px solid transparent;
 }}
 /* já disputado/processado: pintado, clicável */
-.dot-done {{ opacity: 0.85; cursor: pointer; }}
-.dot-done:hover {{ opacity: 1; transform: scale(1.4); }}
+.dot-done {{ opacity: 1; cursor: pointer; box-shadow: 0 0 4px 1px rgba(255,255,255,0.12); }}
+.dot-done:hover {{ opacity: 1; transform: scale(1.4); box-shadow: 0 0 8px 2px rgba(255,255,255,0.3); }}
 /* ainda não disputado: vazio (só contorno) */
 .dot-pending {{ opacity: 0.45; cursor: default; }}
 /* finalizado no calendário, mas sem snapshot gerado no dashboard */
@@ -2197,19 +2434,27 @@ input[type=range] {{
   opacity: 1;
   box-shadow: 0 0 0 1px #ffffffaa, 0 0 8px 2px #f5c542cc;
 }}
-.dot-round-end::after, .dot-phase-end::after {{
+.dot-round-end::after, .dot-phase-gold::after {{
   content: "⚽";
   position: absolute; left: 50%; top: 50%; transform: translate(-50%, -52%);
   font-size: calc(var(--dot) * 1.25); line-height: 1;
   filter: drop-shadow(0 1px 2px rgba(0,0,0,0.85));
   pointer-events: none;
 }}
-.dot-phase-end::after {{ content: "🏆"; }}
+.dot-phase-end::after {{
+  content: "🏆";
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -52%);
+  font-size: calc(var(--dot) * 1.25); line-height: 1;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.85));
+  pointer-events: none;
+}}
 .dot-round-end.dot-pending,
+.dot-phase-gold.dot-pending,
 .dot-phase-end.dot-pending {{
   box-shadow: 0 0 0 1px #6b728088, 0 0 7px 1px #6b728055;
 }}
 .dot-round-end.dot-pending::after,
+.dot-phase-gold.dot-pending::after,
 .dot-phase-end.dot-pending::after {{
   filter: grayscale(1) opacity(0.62) drop-shadow(0 1px 2px rgba(0,0,0,0.85));
 }}
@@ -2398,14 +2643,16 @@ input[type=range] {{
   position: fixed;
   background: #0d1117;
   border: 1px solid #30363d;
-  border-radius: 12px;
+  border-radius: 10px;
   padding: 0;
   z-index: 500;
   box-shadow: 0 16px 48px rgba(0,0,0,0.9);
   pointer-events: auto;
   flex-direction: column;
-  min-width: 700px;
-  max-width: 800px;
+  width: min(880px, calc(100vw - 32px));
+  min-width: min(720px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  overflow: hidden;
 }}
 .tt-header {{
   padding: 11px 16px 9px;
@@ -2421,38 +2668,106 @@ input[type=range] {{
   gap: 8px;
 }}
 .tt-subtitle {{ color: #6b7280; font-size: 0.7rem; margin-top: 2px; }}
+.tt-toolbar {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px 0;
+}}
+.tt-modebar {{
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  background: #0b1118;
+  border: 1px solid #21262d;
+  border-radius: 8px;
+}}
+.tt-mode-btn {{
+  border: 0;
+  background: transparent;
+  color: #8b949e;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  cursor: pointer;
+}}
+.tt-mode-btn:hover {{ color: #c8d3e0; background: #151c26; }}
+.tt-mode-btn.active {{
+  color: #79c0ff;
+  background: #1f6feb24;
+  box-shadow: inset 0 0 0 1px #1f6feb66;
+}}
+.tt-context-note {{
+  color: #8b949e;
+  font-size: 0.68rem;
+  line-height: 1.25;
+  text-align: right;
+  min-width: 0;
+}}
 .tt-grid {{
   display: grid;
-  grid-template-columns: 168px 210px repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px 12px 11px;
+  align-items: start;
+}}
+.tt-grid.summary {{
+  grid-template-columns: 1.08fr 1fr 1fr;
+}}
+.tt-grid.advanced {{
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }}
 .tt-col {{
-  border-right: 1px solid #21262d;
-  border-bottom: 1px solid #21262d;
+  min-width: 0;
+  background: #0f141c;
+  border: 1px solid #21262d;
+  border-radius: 8px;
+  overflow: hidden;
 }}
-.tt-col-scores    {{ grid-column: span 1; grid-row: span 2; border-bottom: none; }}
-.tt-col-campanha  {{ grid-column: span 1; grid-row: span 2; border-bottom: none; border-right: 2px solid #30363d; }}
-.tt-col-ataque    {{ grid-column: span 2; }}
-.tt-col-defesa    {{ grid-column: span 2; border-right: none; }}
-.tt-col-controle  {{ grid-column: span 2; }}
-.tt-col-disciplina {{ grid-column: span 2; border-right: none; }}
-/* Estilo ocupa uma 3ª linha inteira (6 colunas): os 4 eixos viram um grid
-   horizontal dentro do bloco, para não esticar uma única coluna estreita. */
+.tt-col-controle {{
+  grid-column: span 2;
+}}
+.tt-grid.summary .tt-col-controle {{
+  grid-column: span 2;
+}}
+.tt-grid.advanced .tt-col-controle {{
+  grid-column: span 2;
+}}
 .tt-col-title {{
   font-size: 0.63rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.8px;
   color: #58a6ff;
-  padding: 7px 12px 5px;
+  padding: 8px 10px 6px;
   border-bottom: 1px solid #21262d;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+.tt-col-intensidade .tt-col-title::after {{
+  content: 'agregado';
+  color: #7dd3fc;
+  background: #0b2533;
+  border: 1px solid #16465e;
+  border-radius: 5px;
+  font-size: 0.52rem;
+  letter-spacing: 0;
+  padding: 1px 4px;
+  margin-left: 6px;
+  vertical-align: 1px;
+  text-transform: none;
 }}
 .tt-row {{
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 5px 12px;
-  gap: 8px;
+  min-height: 27px;
+  padding: 5px 10px;
+  gap: 10px;
   cursor: pointer;
   transition: background 0.1s;
 }}
@@ -2478,9 +2793,10 @@ input[type=range] {{
   opacity: 0.85;
 }}
 .tt-legend {{
-  display: flex; gap: 14px; padding: 6px 10px 5px;
+  display: flex; gap: 14px; padding: 7px 12px 6px;
   border-top: 1px solid #21262d; margin-top: 2px;
   font-size: 10px; color: #8b949e;
+  flex-wrap: wrap;
 }}
 .tt-legend-dot {{
   width: 8px; height: 8px; border-radius: 2px;
@@ -2488,7 +2804,7 @@ input[type=range] {{
   position: relative; top: 1px;
 }}
 .tt-legend-item {{ display: flex; align-items: center; }}
-.tt-label {{ color: #8b949e; font-size: 0.75rem; user-select: none; flex: 1; white-space: nowrap; }}
+.tt-label {{ color: #8b949e; font-size: 0.75rem; line-height: 1.18; user-select: none; flex: 1; min-width: 0; white-space: normal; }}
 .tt-val {{ color: #e6edf3; font-weight: 700; font-size: 0.78rem; white-space: nowrap; }}
 .tt-val.negative {{ color: #f85149; }}
 
@@ -2502,6 +2818,48 @@ input[type=range] {{
 .tt-rank.rk1 {{ color: #1b1b1b; background: #f5c542; border-color: #f5c542; }}
 .tt-rank.rk2 {{ color: #1b1b1b; background: #c0c0c0; border-color: #c0c0c0; }}
 .tt-rank.rk3 {{ color: #1b1b1b; background: #cd7f32; border-color: #cd7f32; }}
+@media (max-width: 960px) {{
+  .tt-grid.summary,
+  .tt-grid.advanced {{
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }}
+  .tt-col-controle {{
+    grid-column: 1 / -1;
+  }}
+}}
+@media (max-width: 760px) {{
+  .bar-tooltip {{
+    width: calc(100vw - 16px);
+    min-width: 0;
+  }}
+  .modal-card {{
+    width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+  }}
+  .tt-grid,
+  .tt-grid.summary,
+  .tt-grid.advanced {{
+    grid-template-columns: 1fr;
+  }}
+  .tt-toolbar {{
+    align-items: stretch;
+    flex-direction: column;
+    gap: 7px;
+  }}
+  .tt-context-note {{
+    text-align: left;
+  }}
+  .tt-col-scores,
+  .tt-col-campanha,
+  .tt-col-ataque,
+  .tt-col-defesa,
+  .tt-col-controle,
+  .tt-col-intensidade,
+  .tt-col-disciplina {{
+    grid-column: 1;
+    grid-row: auto;
+  }}
+}}
 .tt-empty {{
   padding: 18px 18px 20px;
   min-height: 132px;
@@ -2543,16 +2901,23 @@ input[type=range] {{
   z-index: 900;
   background: #0d1117;
   border: 1px solid #30363d;
-  border-radius: 14px;
+  border-radius: 10px;
   box-shadow: 0 24px 64px rgba(0,0,0,0.95);
-  width: 880px;
-  max-width: 95vw;
+  width: min(880px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
   max-height: 88vh;
   overflow-y: auto;
   flex-direction: column;
   display: none;
 }}
 .modal-card.open {{ display: flex; }}
+@media (max-width: 760px) {{
+  .modal-card {{
+    width: calc(100vw - 16px);
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+  }}
+}}
 .modal-drag-bar {{
   display: flex;
   align-items: center;
@@ -2562,16 +2927,16 @@ input[type=range] {{
   border-bottom: 1px solid #21262d;
   cursor: grab;
   flex-shrink: 0;
-  border-radius: 14px 14px 0 0;
+  border-radius: 10px 10px 0 0;
   background: #111720;
 }}
 .modal-drag-bar:active {{ cursor: grabbing; }}
 .modal-drag-label {{ font-size: 0.68rem; color: #6b7280; user-select: none; }}
 /* cabeçalho (bandeira + nome + ranking) dentro da barra de arrastar */
-.drag-header {{ display: flex; align-items: baseline; gap: 8px; min-width: 0; overflow: hidden; }}
+.drag-header {{ display: flex; align-items: baseline; gap: 8px; min-width: 0; overflow: hidden; flex-wrap: wrap; }}
 .drag-flag {{ font-size: 1.1rem; flex-shrink: 0; }}
 .drag-name {{ color: #e6edf3; font-weight: 700; font-size: 0.95rem; white-space: nowrap; }}
-.drag-sub {{ color: #6b7280; font-size: 0.7rem; white-space: nowrap; }}
+.drag-sub {{ color: #6b7280; font-size: 0.7rem; white-space: normal; }}
 .drag-why {{ color: #8b949e; font-style: italic; }}
 .modal-card-close {{
   background: none;
@@ -3657,7 +4022,7 @@ input[type=range] {{
 }}
 .rs-hero-shirt::before {{
   content: ""; position: absolute; inset: 2px 0 0; z-index: 0;
-  background: linear-gradient(180deg, var(--shirt-main, #2f81f7), var(--shirt-main, #2f81f7) 62%, var(--shirt-dark, #1158c7));
+  background: var(--shirt-bg, linear-gradient(180deg, var(--shirt-main, #2f81f7), var(--shirt-main, #2f81f7) 62%, var(--shirt-dark, #1158c7)));
   border: 1px solid var(--shirt-border, #58a6ff70);
   box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10), 0 8px 20px rgba(0,0,0,0.28);
   clip-path: polygon(18% 7%, 34% 0, 43% 10%, 57% 10%, 66% 0, 82% 7%, 100% 34%, 82% 49%, 75% 33%, 75% 100%, 25% 100%, 25% 33%, 18% 49%, 0 34%);
@@ -4029,7 +4394,7 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
 }}
 .kit-shirt::before {{
   content: ""; position: absolute; inset: 1px 0 0; z-index: 0;
-  background: linear-gradient(180deg, var(--shirt-main, #2f81f7), var(--shirt-main, #2f81f7) 62%, var(--shirt-dark, #1158c7));
+  background: var(--shirt-bg, linear-gradient(180deg, var(--shirt-main, #2f81f7), var(--shirt-main, #2f81f7) 62%, var(--shirt-dark, #1158c7)));
   border: 1px solid var(--shirt-border, #58a6ff70);
   box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10), 0 5px 12px rgba(0,0,0,0.24);
   clip-path: polygon(18% 7%, 34% 0, 43% 10%, 57% 10%, 66% 0, 82% 7%, 100% 34%, 82% 49%, 75% 33%, 75% 100%, 25% 100%, 25% 33%, 18% 49%, 0 34%);
@@ -4589,7 +4954,7 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
   <label class="tb-field">Métrica
     <select id="metricSelect" onchange="changeMetric(this.value)"></select>
   </label>
-  <button class="btn" id="btnDir" onclick="toggleDir()">↓ Maior primeiro</button>
+  <button class="btn" id="btnDir" onclick="toggleDir()">↓ Melhores primeiro</button>
   <div style="width:1px;height:18px;background:#30363d;margin:0 4px"></div>
   <label class="tb-field" id="fieldPos" style="display:none">Posição
     <select id="filterPos" onchange="applyTeamFilters()">
@@ -4613,7 +4978,7 @@ table.md-table td.num {{ text-align: center; font-variant-numeric: tabular-nums;
     <span class="filter-hints" id="filterStageHints"></span>
   </label>
   <label class="tb-check"><input type="checkbox" id="filterPlayed" onchange="applyTeamFilters()"> Só com jogos</label>
-  <label class="tb-check" title="Só seleções com cobertura de dados avançados (xG, xGP, duelos) no jogo atual"><input type="checkbox" id="filterAdvanced" onchange="applyTeamFilters()"> Só com dados avançados</label>
+  <label class="tb-check" title="Só seleções com estatísticas disponíveis neste snapshot"><input type="checkbox" id="filterAdvanced" onchange="applyTeamFilters()"> Só com estatísticas</label>
   <div style="flex:1"></div>
   <button class="btn" onclick="resetAllFilters()" title="Limpar filtros">✕ Limpar</button>
   <span class="teams-count" id="teamsCount"></span>
@@ -4761,35 +5126,61 @@ const TEAM_SHIRT_COLORS = {{
   'Suíça': '#dc2626', 'Tunísia': '#dc2626', 'Uruguai': '#60a5fa', 'Uzbequistão': '#2563eb',
   'Venezuela': '#7f1d1d',
 }};
+// pattern: 'stripes-v'=listras verticais, 'check'=xadrez, 'sash'=faixa diagonal
 const TEAM_KIT_COLORS = {{
+  'África do Sul': {{ main: '#facc15', second: '#16a34a', border: '#111827', text: '#111827' }},
   'Alemanha': {{ main: '#f8fafc', border: '#111827', text: '#111827' }},
-  'Argentina': {{ main: '#75aadb', border: '#f8fafc', text: '#111827' }},
-  'Austrália': {{ main: '#facc15', border: '#15803d', text: '#15803d' }},
+  'Angola': {{ main: '#dc2626', second: '#111827', border: '#111827', text: '#f8fafc' }},
+  'Arábia Saudita': {{ main: '#15803d', border: '#f8fafc', text: '#f8fafc' }},
+  'Argélia': {{ main: '#f8fafc', second: '#16a34a', border: '#dc2626', text: '#111827' }},
+  'Argentina': {{ main: '#75aadb', second: '#f8fafc', border: '#75aadb', text: '#1d4ed8', pattern: 'stripes-v' }},
+  'Austrália': {{ main: '#facc15', second: '#15803d', border: '#15803d', text: '#111827' }},
   'Bélgica': {{ main: '#dc2626', border: '#111827', text: '#f8fafc' }},
   'Brasil': {{ main: '#f4d21f', border: '#078930', text: '#1d4ed8' }},
   'Cabo Verde': {{ main: '#2563eb', border: '#f8fafc', text: '#f8fafc' }},
+  'Camarões': {{ main: '#16a34a', second: '#dc2626', border: '#facc15', text: '#f8fafc', pattern: 'stripes-v' }},
   'Canadá': {{ main: '#dc2626', border: '#f8fafc', text: '#f8fafc' }},
-  'Chile': {{ main: '#dc2626', border: '#2563eb', text: '#f8fafc' }},
+  'Chile': {{ main: '#dc2626', second: '#1d4ed8', border: '#f8fafc', text: '#f8fafc' }},
   'Colômbia': {{ main: '#facc15', border: '#2563eb', text: '#111827' }},
-  'Coreia do Sul': {{ main: '#f8fafc', border: '#dc2626', text: '#111827' }},
-  'Croácia': {{ main: '#f8fafc', border: '#dc2626', text: '#111827' }},
+  'Coreia do Sul': {{ main: '#f8fafc', second: '#dc2626', border: '#dc2626', text: '#111827' }},
+  'Costa do Marfim': {{ main: '#f97316', second: '#f8fafc', border: '#16a34a', text: '#f8fafc' }},
+  'Costa Rica': {{ main: '#dc2626', second: '#1d4ed8', border: '#f8fafc', text: '#f8fafc' }},
+  'Croácia': {{ main: '#dc2626', second: '#f8fafc', border: '#9b1c1c', text: '#f8fafc', pattern: 'check' }},
   'Dinamarca': {{ main: '#dc2626', border: '#f8fafc', text: '#f8fafc' }},
+  'Egito': {{ main: '#dc2626', second: '#f8fafc', border: '#111827', text: '#f8fafc' }},
+  'Equador': {{ main: '#facc15', second: '#1d4ed8', border: '#dc2626', text: '#111827' }},
   'Espanha': {{ main: '#dc2626', border: '#facc15', text: '#f8fafc' }},
-  'Estados Unidos': {{ main: '#f8fafc', border: '#1d4ed8', text: '#1f2a44' }},
+  'Estados Unidos': {{ main: '#f8fafc', second: '#1d4ed8', border: '#1d4ed8', text: '#1f2a44' }},
   'França': {{ main: '#1d4ed8', border: '#f8fafc', text: '#f8fafc' }},
+  'Gana': {{ main: '#facc15', second: '#f8fafc', border: '#111827', text: '#111827' }},
   'Holanda': {{ main: '#f97316', border: '#111827', text: '#111827' }},
+  'Honduras': {{ main: '#f8fafc', second: '#1d4ed8', border: '#1d4ed8', text: '#111827', pattern: 'stripes-v' }},
   'Inglaterra': {{ main: '#f8fafc', border: '#dc2626', text: '#1f2a44' }},
+  'Irã': {{ main: '#f8fafc', second: '#15803d', border: '#15803d', text: '#111827' }},
   'Itália': {{ main: '#2563eb', border: '#f8fafc', text: '#f8fafc' }},
-  'Japão': {{ main: '#2563eb', border: '#f8fafc', text: '#f8fafc' }},
+  'Japão': {{ main: '#0f172a', second: '#dc2626', border: '#1e3a8a', text: '#f8fafc' }},
+  'Jordânia': {{ main: '#dc2626', second: '#f8fafc', border: '#111827', text: '#f8fafc' }},
+  'Marrocos': {{ main: '#dc2626', second: '#15803d', border: '#15803d', text: '#f8fafc' }},
   'México': {{ main: '#15803d', border: '#f8fafc', text: '#f8fafc' }},
-  'Nigéria': {{ main: '#16a34a', border: '#f8fafc', text: '#f8fafc' }},
+  'Nigéria': {{ main: '#16a34a', second: '#f8fafc', border: '#f8fafc', text: '#f8fafc' }},
   'Noruega': {{ main: '#dc2626', border: '#1d4ed8', text: '#f8fafc' }},
-  'Peru': {{ main: '#f8fafc', border: '#dc2626', text: '#111827' }},
+  'Nova Zelândia': {{ main: '#111827', second: '#f8fafc', border: '#dc2626', text: '#f8fafc' }},
+  'Panamá': {{ main: '#dc2626', second: '#f8fafc', border: '#1d4ed8', text: '#f8fafc' }},
+  'Paraguai': {{ main: '#dc2626', second: '#f8fafc', border: '#1d4ed8', text: '#f8fafc', pattern: 'stripes-v' }},
+  'Peru': {{ main: '#f8fafc', second: '#dc2626', border: '#dc2626', text: '#111827', pattern: 'sash' }},
   'Polônia': {{ main: '#f8fafc', border: '#dc2626', text: '#111827' }},
   'Portugal': {{ main: '#7f1d1d', border: '#15803d', text: '#f8fafc' }},
+  'Qatar': {{ main: '#7f1d1d', border: '#f8fafc', text: '#f8fafc' }},
+  'RD Congo': {{ main: '#2563eb', second: '#facc15', border: '#dc2626', text: '#f8fafc' }},
+  'Senegal': {{ main: '#f8fafc', second: '#15803d', border: '#dc2626', text: '#111827' }},
+  'Sérvia': {{ main: '#dc2626', second: '#0c0c0c', border: '#0c0c0c', text: '#f8fafc' }},
   'Suécia': {{ main: '#2563eb', border: '#facc15', text: '#facc15' }},
   'Suíça': {{ main: '#dc2626', border: '#f8fafc', text: '#f8fafc' }},
+  'Tunísia': {{ main: '#dc2626', second: '#f8fafc', border: '#f8fafc', text: '#f8fafc' }},
+  'Turquia': {{ main: '#dc2626', border: '#f8fafc', text: '#f8fafc' }},
   'Uruguai': {{ main: '#60a5fa', border: '#111827', text: '#111827' }},
+  'Uzbequistão': {{ main: '#2563eb', second: '#f8fafc', border: '#f8fafc', text: '#f8fafc' }},
+  'Venezuela': {{ main: '#7f1d1d', second: '#facc15', border: '#facc15', text: '#f8fafc' }},
 }};
 
 // dados de JOGADORES por snapshot + metadados estáticos
@@ -4968,7 +5359,18 @@ let selectedTeam = '';
 let teamSuggestItems = [];
 let teamSuggestIndex = -1;
 let currentMetric = 'score_geral';
-let sortDir = 'desc';   // 'desc' = maior primeiro, 'asc' = menor primeiro
+let sortDir = 'desc';   // 'desc' = melhores primeiro, 'asc' = piores primeiro
+
+// Direção EFETIVA de ordenação de valores para uma métrica, respeitando a
+// polaridade (LOWER_IS_BETTER). sortDir é o toggle manual melhor/pior primeiro:
+//   'desc' (padrão) → rank 1 = MELHOR (maior valor, ou menor se lower-is-better)
+//   'asc'           → rank 1 = PIOR
+// Assim faltas/cartões/gols sofridos não colocam o pior time em 1º.
+function effectiveSortDir(metric) {{
+  const natural = LOWER_IS_BETTER.has(metric) ? 'asc' : 'desc';
+  if (sortDir === 'desc') return natural;
+  return natural === 'asc' ? 'desc' : 'asc';
+}}
 let playing = false;
 let timer = null;
 let speed = 900;
@@ -5424,11 +5826,10 @@ function getRow(team) {{
 // ── sort teams: sortDir controla a direção manual do usuário
 function sortedTeams(frameTeams) {{
   // Aplica os filtros GLOBAIS (grupo/confederação/fase) também às barras da Race.
-  const advOnly = document.getElementById('filterAdvanced') && document.getElementById('filterAdvanced').checked;
   const filtered = frameTeams.filter(t =>
-    passesGlobalFilters(t.team) && (!advOnly || (t.advanced_coverage > 0)));
-  // Ordena pela QUANTIDADE bruta: 'desc' = maior primeiro, 'asc' = menor primeiro.
-  const asc = sortDir === 'asc';
+    passesGlobalFilters(t.team));
+  // Ordena por QUALIDADE: rank 1 = melhor na métrica (respeita LOWER_IS_BETTER).
+  const asc = effectiveSortDir(currentMetric) === 'asc';
   return filtered.sort((a, b) => {{
     const va = a[currentMetric] ?? (asc ? Infinity : -Infinity);
     const vb = b[currentMetric] ?? (asc ? Infinity : -Infinity);
@@ -5439,7 +5840,7 @@ function sortedTeams(frameTeams) {{
 function toggleDir() {{
   sortDir = sortDir === 'desc' ? 'asc' : 'desc';
   const btn = document.getElementById('btnDir');
-  btn.textContent = sortDir === 'desc' ? '↓ Maior primeiro' : '↑ Menor primeiro';
+  btn.textContent = sortDir === 'desc' ? '↓ Melhores primeiro' : '↑ Piores primeiro';
   renderBothViews();  // direção é compartilhada: vale na corrida E na grade
 }}
 
@@ -5487,34 +5888,45 @@ document.addEventListener('click', () => closeWeightPills());
   }});
 }})();
 
-// aproveitamento e clean_sheet_rate estão em fração (0–1); posse_media já é %
-const PERCENT_FRAC = new Set(['aproveitamento', 'precisao_chute', 'precisao_passes']);
-const PERCENT_DIRECT = new Set(['posse_media']);
+// Fração 0-1 → multiplica ×100 para exibir como %
+const PERCENT_FRAC = new Set(['aproveitamento', 'posse', 'precisao_chutes', 'precisao_passes', 'save_pct_goleiro']);
+// Já em escala 0-100 direto
+const PERCENT_DIRECT = new Set(['pitch_control', 'final_third_control']);
 // Métricas que podem ser NEGATIVAS — a barra é escalada por [min,max], não por
 // |valor| (senão um valor muito negativo viraria barra cheia). xGP = gols
 // evitados acima do esperado (negativo = defesa sofreu mais que o esperado).
-const SIGNED_METRICS = new Set(['xgp_por_jogo', 'saldo_gols']);
+const SIGNED_METRICS = new Set(['saldo_gols']);
 // Métricas que ALIMENTAM o score_geral (insumos de qualidade), vs. as apenas
 // informativas (disciplina, estilo, totais brutos). Marca estática ▪ no painel.
 const SCORE_INPUT_METRICS = new Set([
   'score_resultado', 'score_ataque', 'score_defesa', 'score_eficiencia',
   'score_controle', 'score_forca_relativa',
   'pontos', 'aproveitamento', 'saldo_gols', 'elo_rating',
-  'gols_por_jogo', 'xg_por_jogo', 'chutes_no_alvo_por_jogo', 'precisao_chute', 'key_passes_por_jogo',
-  'gols_contra_por_jogo', 'xgp_por_jogo', 'chutes_sofridos_por_jogo', 'shots_blocked_por_jogo', 'duels_won_por_jogo',
-  'posse_media', 'passes_por_jogo', 'precisao_passes', 'dribbles_won_por_jogo',
+  'gols_pj', 'xg_pj', 'chutes_no_alvo_pj', 'precisao_chutes', 'threat_pj',
+  'gols_contra_pj', 'chutes_sofridos_pj', 'save_pct_goleiro', 'turnovers_forcados_pj',
+  'posse', 'pitch_control', 'final_third_control', 'passes_pj', 'precisao_passes', 'progressoes_pj',
 ]);
+const CARD_ADVANCED_METRICS = new Set([
+  'score_eficiencia', 'score_disciplina',
+  'clean_sheet',
+  'chutes_pj', 'escanteios_pj', 'impedimentos_pj',
+  'chutes_sof_alvo_pj', 'defesas_goleiro_pj',
+  'passes_pj', 'linebreaks_pj', 'dribles_pj',
+  'distancia_km_pj', 'sprints_pj', 'corridas_av_pj', 'pressoes_def_pj',
+  'faltas_pj', 'amarelos_pj', 'vermelhos_pj',
+]);
+const CARD_HIDE_WHEN_ZERO = new Set(['amarelos_pj', 'vermelhos_pj']);
 // Eixos de estilo: escala 0-100 (como os scores) para as barras, mas SEM medalha
 // de pódio — estilo é descritivo, 50 não é "ruim" nem 90 é "melhor".
-const STYLE_AXES = new Set(['estilo_posse', 'estilo_pressao', 'estilo_verticalidade', 'estilo_largura']);
+const STYLE_AXES = new Set(['estilo_posse', 'estilo_pressao', 'estilo_verticalidade', 'estilo_bola_parada']);
 // Cada eixo é BIPOLAR: 50 = meio-termo, sobe para o polo alto, desce para o
 // baixo. low/high/curto alimentam o card (polos visíveis) e a linha "por que
 // a flag" (usa o nome curto do lado para onde o time pende).
 const STYLE_POLES = {{
-  estilo_posse:         {{ low: 'Direto',     high: 'Posse',       curtoAlto: 'posse',     curtoBaixo: 'jogo direto' }},
-  estilo_pressao:       {{ low: 'Recua',      high: 'Pressiona',   curtoAlto: 'pressão',   curtoBaixo: 'bloco baixo' }},
-  estilo_verticalidade: {{ low: 'Paciente',   high: 'Vertical',    curtoAlto: 'verticalidade', curtoBaixo: 'jogo apoiado' }},
-  estilo_largura:       {{ low: 'Por dentro', high: 'Pelas pontas',curtoAlto: 'pontas',    curtoBaixo: 'jogo interior' }},
+  estilo_posse:         {{ low: 'Direto',    high: 'Posse',       curtoAlto: 'posse',       curtoBaixo: 'jogo direto' }},
+  estilo_pressao:       {{ low: 'Recua',     high: 'Pressiona',   curtoAlto: 'pressão',     curtoBaixo: 'bloco baixo' }},
+  estilo_verticalidade: {{ low: 'Paciente',  high: 'Vertical',    curtoAlto: 'verticalidade', curtoBaixo: 'jogo apoiado' }},
+  estilo_bola_parada:   {{ low: 'Em aberto', high: 'Bola parada', curtoAlto: 'bola parada', curtoBaixo: 'jogo aberto' }},
 }};
 
 // "Por que a flag": pega os 1-2 eixos onde o time MAIS se afasta da média (50),
@@ -7414,6 +7826,7 @@ document.addEventListener('click', e => {{
 
 // ── Cards flutuantes arrastáveis (N times) ──
 const openCards = new Map();  // team → {{ el, contentEl }}
+const cardAdvancedTeams = new Set();
 
 // Posição do time numa métrica, ORDENADA PELA QUANTIDADE (igual à barra):
 // por padrão maior valor = 1°. 'asc' inverte (menor = 1°).
@@ -7472,6 +7885,13 @@ function buildNoDataCardBody(team) {{
   </div>`;
 }}
 
+function setCardAdvanced(team, enabled) {{
+  if (enabled) cardAdvancedTeams.add(team);
+  else cardAdvancedTeams.delete(team);
+  const c = openCards.get(team);
+  if (c) c.contentEl.innerHTML = buildCardBody(team);
+}}
+
 function buildCardBody(team) {{
   const frame = DATA[currentJogo];
   const t = teamEntryAt(team);
@@ -7488,10 +7908,22 @@ function buildCardBody(team) {{
   const rankTie = gr && gr.tied ? '=' : '';
   const related  = new Set(METRIC_RELATIONS[currentMetric] || []);
   const indirect = new Set(METRIC_RELATIONS_INDIRECT[currentMetric] || []);
+  const showAdvanced = cardAdvancedTeams.has(team);
+  const teamEsc = team.replace(/'/g, "\\'");
   let colsHtml = '';
+  let hasIntensityCol = false;
   METRIC_GROUPS.forEach(([groupLabel, colCls, metrics]) => {{
+    const visibleMetrics = metrics.filter(([key]) => {{
+      const val = t[key];
+      if (showAdvanced || key === currentMetric) return true;
+      if (CARD_ADVANCED_METRICS.has(key)) return false;
+      if (CARD_HIDE_WHEN_ZERO.has(key) && !(Number(val) > 0)) return false;
+      return true;
+    }});
+    if (!visibleMetrics.length) return;
+    if (colCls === 'tt-col-intensidade') hasIntensityCol = true;
     colsHtml += `<div class="tt-col ${{colCls}}"><div class="tt-col-title">${{groupLabel}}</div>`;
-    metrics.forEach(([key, label]) => {{
+    visibleMetrics.forEach(([key, label]) => {{
       const val = t[key];
       const isActive   = key === currentMetric;
       const isRelated  = !isActive && related.has(key);
@@ -7499,8 +7931,9 @@ function buildCardBody(team) {{
       const cls = (isActive ? ' active' : isRelated ? ' related' : isIndirect ? ' related-indirect' : '')
                 + (SCORE_INPUT_METRICS.has(key) ? ' score-input' : '');
       const isNeg = val !== null && val !== undefined && val < 0;
-      // badge segue a MESMA direção da barra (sortDir): inverte junto com o botão
-      const mr = metricRank(key, allTeams, team, sortDir);
+      // badge segue a direção EFETIVA da própria métrica da linha (respeita
+      // LOWER_IS_BETTER): medalha de ouro vai para o melhor, não para o pior.
+      const mr = metricRank(key, allTeams, team, effectiveSortDir(key));
       // medalha (ouro/prata/bronze) só para posição ISOLADA; empate fica neutro com "="
       // Estilo não recebe medalha — é descritivo, não há "1º melhor estilo".
       const rkCls = mr && !mr.tied && !STYLE_AXES.has(key) ? rankClass(mr.rank) : '';
@@ -7516,15 +7949,22 @@ function buildCardBody(team) {{
     }});
     colsHtml += '</div>';
   }});
+  const contextNote = hasIntensityCol
+    ? '<span class="tt-context-note">Intensidade: agregado coletivo do time, fora do score geral.</span>'
+    : '';
+  const modeHtml = `<div class="tt-toolbar"><div class="tt-modebar">
+    <button class="tt-mode-btn${{!showAdvanced ? ' active' : ''}}" onclick="event.stopPropagation(); setCardAdvanced('${{teamEsc}}', false)">Resumo</button>
+    <button class="tt-mode-btn${{showAdvanced ? ' active' : ''}}" onclick="event.stopPropagation(); setCardAdvanced('${{teamEsc}}', true)">Avançados</button>
+  </div>${{contextNote}}</div>`;
   const hasRelated  = related.size > 0;
   const hasIndirect = indirect.size > 0;
   const legendHtml  = `<div class="tt-legend">
-    <span class="tt-legend-item"><span style="color:#4a86d8;font-size:0.62rem">▪</span> alimenta o score</span>
-    ${{hasRelated  ? '<span class="tt-legend-item"><span class="tt-legend-dot" style="background:#4ade80"></span>entra no cálculo</span>' : ''}}
-    ${{hasIndirect ? '<span class="tt-legend-item"><span class="tt-legend-dot" style="background:#f0c040"></span>correlação indireta</span>' : ''}}
+    <span class="tt-legend-item"><span style="color:#4a86d8;font-size:0.62rem">▪</span> base do score geral</span>
+    ${{hasRelated  ? '<span class="tt-legend-item"><span class="tt-legend-dot" style="background:#4ade80"></span>relação direta com a métrica atual</span>' : ''}}
+    ${{hasIndirect ? '<span class="tt-legend-item"><span class="tt-legend-dot" style="background:#f0c040"></span>contexto/correlação</span>' : ''}}
   </div>`;
   // o cabeçalho (bandeira/nome/ranking) vai na barra de arrastar, não aqui
-  return `<div class="tt-grid">${{colsHtml}}</div>${{legendHtml}}`;
+  return `${{modeHtml}}<div class="tt-grid${{showAdvanced ? ' advanced' : ' summary'}}">${{colsHtml}}</div>${{legendHtml}}`;
 }}
 
 // Cabeçalho do card (bandeira + nome + posição), exibido na barra de arrastar.
@@ -7580,7 +8020,8 @@ function openModal(team) {{
 
   // posição inicial: cascateia os cards
   const offset = openCards.size * 32;
-  const left = Math.max(20, (window.innerWidth - 720) / 2 + offset);
+  const cardW = Math.min(880, window.innerWidth - 32);
+  const left = Math.max(16, (window.innerWidth - cardW) / 2 + offset);
   const top  = Math.max(60, (window.innerHeight - 520) / 2 + offset);
   card.style.left = left + 'px';
   card.style.top  = top  + 'px';
@@ -7624,6 +8065,7 @@ function closeModalCard(team) {{
   if (!c) return;
   c.el.remove();
   openCards.delete(team);
+  cardAdvancedTeams.delete(team);
   syncDotRows();
   renderJogo(currentJogo);
 }}
@@ -7925,12 +8367,20 @@ function _mixHex(hex, pct) {{
 function _shirtColors(team) {{
   const kit = TEAM_KIT_COLORS[team] || {{}};
   const main = kit.main || TEAM_SHIRT_COLORS[team] || TEAM_SHIRT_COLORS[_norm(team)] || _hashColor(team);
+  const second = kit.second || main;
   const rgb = _hexRgb(main);
   const luminance = (0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b) / 255;
   const text = kit.text || (luminance > 0.62 ? '#0d1117' : '#f8fafc');
   const dark = _mixHex(main, -0.36);
   const border = kit.border || _mixHex(main, luminance > 0.62 ? -0.28 : 0.22);
-  return `--shirt-main:${{main}};--shirt-dark:${{dark}};--shirt-border:${{border}};--shirt-text:${{text}}`;
+  let bg;
+  switch (kit.pattern) {{
+    case 'stripes-v': bg = `repeating-linear-gradient(90deg,${{main}} 0 8px,${{second}} 8px 16px)`; break;
+    case 'check':     bg = `repeating-conic-gradient(${{main}} 0% 25%,${{second}} 0% 50%) 0 0/10px 10px`; break;
+    case 'sash':      bg = `linear-gradient(145deg,${{main}} 0 40%,${{second}} 40% 60%,${{main}} 60%)`; break;
+    default:          bg = `linear-gradient(180deg,${{main}},${{main}} 62%,${{dark}})`;
+  }}
+  return `--shirt-main:${{main}};--shirt-dark:${{dark}};--shirt-bg:${{bg}};--shirt-border:${{border}};--shirt-text:${{text}}`;
 }}
 function _kitShirtHtml(num, team, cls = '') {{
   const n = num == null || num === '—' ? '' : _esc(String(num));
@@ -8136,7 +8586,7 @@ function renderTeamsGrid() {{
   const fStage = document.getElementById('filterStage').value;
   const fPlayed = document.getElementById('filterPlayed').checked;
   const fAdvanced = document.getElementById('filterAdvanced').checked;
-  const dir = sortDir;  // direção COMPARTILHADA com a corrida
+  const dir = effectiveSortDir(currentMetric);  // direção COMPARTILHADA com a corrida (respeita polaridade)
 
   // — DETALHE NO MOMENTO selecionado: a grade reflete o jogo da barra de tempo.
   const detAt = {{}};
@@ -8153,7 +8603,7 @@ function renderTeamsGrid() {{
     if (q && !_norm(t).includes(q)) return false;
     if (!passesGlobalFilters(t)) return false;
     if (fPlayed && (d.n_jogos || 0) === 0) return false;
-    if (fAdvanced && !(snap[t] && snap[t].advanced_coverage > 0)) return false;
+    if (fAdvanced && (d.n_jogos || 0) === 0) return false;
     return true;
   }});
 
@@ -8298,8 +8748,8 @@ function renderPlayersGrid() {{
   if (!host) return;
   const q = _norm(document.getElementById('teamSearch').value.trim());
   const teamFocuses = activeTeamFilters();
-  const dir = sortDir;
   const metric = PLAYER_METRIC_LABELS[currentMetric] ? currentMetric : 'score_geral';
+  const dir = effectiveSortDir(metric);  // respeita polaridade da métrica
   const snap = PSNAP_BY_SLUG[currentJogo] || {{}};
   const pv = slug => {{ const r = snap[slug]; return r ? r[metric] : null; }};
 
@@ -8415,7 +8865,7 @@ function sortByCol(key) {{
   const sel = document.getElementById('metricSelect');
   if (sel && PLAYER_METRIC_LABELS[key]) sel.value = key;
   const btn = document.getElementById('btnDir');
-  if (btn) btn.textContent = sortDir === 'desc' ? '↓ Maior primeiro' : '↑ Menor primeiro';
+  if (btn) btn.textContent = sortDir === 'desc' ? '↓ Melhores primeiro' : '↑ Piores primeiro';
   renderPlayersGrid();
 }}
 
@@ -8548,52 +8998,56 @@ function renderPlayerModalBody(slug, r) {{
     ],
     defensor: [
       ['Proteção', [
-        ['Desarmes', 'tackles_won_por_jogo', 'vence duelos diretos no chão', 2],
-        ['Interceptações', 'interceptions_por_jogo', 'antecipa linhas de passe', 2],
-        ['Cortes', 'clearances_por_jogo', 'remove perigo da área', 2],
-        ['Chutes bloqueados', 'shots_blocked_por_jogo', 'protege a finalização', 2],
+        ['Desarmes', 'tackles_won_por_jogo', 'turnovers forçados na marcação', 2],
+        ['Interceptações', 'interceptions_por_jogo', 'pressões defensivas diretas', 2],
+        ['Recuperações', 'ball_recovery_por_jogo', 'ações defensivas totais aplicadas', 2],
+        ['Duelos ganhos', 'duels_won_por_jogo', 'disputas de bola e dribles ganhos', 2],
       ]],
       ['Cobertura', [
-        ['Recuperações', 'ball_recovery_por_jogo', 'ganha segunda bola e reorganiza', 2],
-        ['Duelos ganhos', 'duels_won_por_jogo', 'força física e disputa aérea', 2],
-        ['Gols evitados', 'expected_goals_prevented_por_jogo', 'impacto defensivo acima do esperado', 2],
-      ]],
-      ['Apoio com bola', [
         ['Assistências', 'assistencias_por_jogo', 'participação direta em gol', 2],
-        ['xA', 'expected_assists_por_jogo', 'qualidade dos passes para chance', 2],
-        ['Passes-chave', 'key_passes_por_jogo', 'passes que viram finalização', 2],
+        ['Seq. de ataque', 'key_passes_por_jogo', 'sequências que terminaram em chute', 2],
+        ['Dribles', 'dribbles_won_por_jogo', 'dribles completados', 2],
+      ]],
+      ['Disciplina', [
+        ['Gols', 'gols_por_jogo', 'gols marcados', 2],
+        ['xG', 'expected_goals_por_jogo', 'qualidade das chances de gol', 2],
+        ['Faltas cometidas', 'faltas_cometidas_por_jogo', 'infrações por jogo', 2, true],
       ]],
     ],
     meio: [
       ['Criação', [
         ['Assistências', 'assistencias_por_jogo', 'passe final convertido em gol', 2],
-        ['xA', 'expected_assists_por_jogo', 'qualidade das chances criadas', 2],
-        ['Passes-chave', 'key_passes_por_jogo', 'criação que vira finalização', 2],
-        ['Chances claras criadas', 'big_chances_created_por_jogo', 'passes para chances claras', 2],
-      ]],
-      ['Controle e disputa', [
+        ['Seq. de ataque', 'key_passes_por_jogo', 'sequências que terminaram em chute', 2],
         ['Dribles ganhos', 'dribbles_won_por_jogo', 'quebra linhas com a bola', 2],
-        ['Recuperações', 'ball_recovery_por_jogo', 'sustenta pressão pós-perda', 2],
-        ['Desarmes', 'tackles_won_por_jogo', 'contribuição sem bola', 2],
+        ['xG', 'expected_goals_por_jogo', 'qualidade das próprias chances de gol', 2],
+      ]],
+      ['Disputa e cobertura', [
+        ['Recuperações', 'ball_recovery_por_jogo', 'ações defensivas aplicadas', 2],
+        ['Desarmes', 'tackles_won_por_jogo', 'turnovers forçados na marcação', 2],
+        ['Duelos ganhos', 'duels_won_por_jogo', 'disputas e dribles ganhos', 2],
       ]],
       ['Chegada ao gol', [
         ['Gols', 'gols_por_jogo', 'ameaça final', 2],
-        ['xG', 'expected_goals_por_jogo', 'qualidade das próprias chances', 2],
         ['Chutes no alvo', 'chutes_no_alvo_por_jogo', 'finalização que exige defesa', 2],
+        ['Participações', 'participacoes_por_jogo', 'gols + assistências por jogo', 2],
       ]],
     ],
     atacante: [
       ['Finalização', [
         ['Gols', 'gols_por_jogo', 'produção que já virou placar', 2],
         ['xG', 'expected_goals_por_jogo', 'qualidade das chances recebidas', 2],
-        ['xGOT', 'expected_goals_on_target_por_jogo', 'qualidade do chute no alvo', 2],
         ['Chutes no alvo', 'chutes_no_alvo_por_jogo', 'ameaça que força defesa', 2],
+        ['Participações', 'participacoes_por_jogo', 'gols + assistências por jogo', 2],
       ]],
       ['Criação e 1x1', [
         ['Assistências', 'assistencias_por_jogo', 'passe final convertido em gol', 2],
-        ['xA', 'expected_assists_por_jogo', 'qualidade dos passes para chance', 2],
-        ['Passes-chave', 'key_passes_por_jogo', 'criação que vira finalização', 2],
+        ['Seq. de ataque', 'key_passes_por_jogo', 'sequências que terminaram em chute', 2],
         ['Dribles ganhos', 'dribbles_won_por_jogo', 'vantagem criada no duelo', 2],
+      ]],
+      ['Pressão', [
+        ['Recuperações', 'ball_recovery_por_jogo', 'ações defensivas fora de posse', 2],
+        ['Desarmes', 'tackles_won_por_jogo', 'turnovers forçados no ataque', 2],
+        ['Faltas sofridas', 'faltas_sofridas_por_jogo', 'atraiu faltas e gerou oportunidades', 2],
       ]],
       ['Decisão', [
         ['Chances claras marcadas', 'big_chances_scored_por_jogo', 'chance clara convertida', 2],
@@ -9845,3 +10299,8 @@ goToJogo(jogos[jogos.length - 1]);
 
 OUTPUT.write_text(html, encoding="utf-8")
 print(f"Gerado: {OUTPUT}")
+# Cópia para reports/tournament/ (consumida pelos testes)
+if OUTPUT != _REPORTS_OUTPUT:
+    _REPORTS_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    _REPORTS_OUTPUT.write_text(html, encoding="utf-8")
+    print(f"Cópia: {_REPORTS_OUTPUT}")

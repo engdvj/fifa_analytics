@@ -3,9 +3,31 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import useSWR from "swr";
 import { analytics, Match, LineupPlayer, TeamStat } from "@/lib/api";
-import { TeamSummary, flag, getKit } from "@/lib/teamUtils";
+import { TeamSummary, getKit } from "@/lib/teamUtils";
+import Flag from "@/components/ui/Flag";
+import TeamRoster from "./TeamRoster";
 import PitchView from "./PitchView";
-import EventTimeline from "./EventTimeline";
+import MatchTimeline from "./MatchTimeline";
+import { DefinitionBubble } from "@/components/DefinitionLink";
+
+// métrica FIFA (chave do data hub) → id de conceito. Só inclui as que têm
+// definição na Central; o resto fica sem bolinha.
+const FIFA_DEF_ID: Record<string, string> = {
+  Possession: "posse",
+  PitchControl: "pitch_control",
+  FinalThirdPitchControl: "final_third_control",
+  XG: "xg",
+  Threat: "threat",
+  Corners: "escanteios",
+  CompletedBallProgressions: "progressoes_bola",
+  Sprints: "sprints",
+  GoalkeeperSaves: "save_pct",
+  AttemptAtGoalOnTarget: "chutes_no_alvo",
+  ForcedTurnovers: "turnovers_forcados",
+};
+function fifaDefId(metric: string): string | null {
+  return FIFA_DEF_ID[metric] ?? null;
+}
 
 const TABS = ["resumo", "jogos", "elenco", "estilo"] as const;
 type Tab = typeof TABS[number];
@@ -18,10 +40,10 @@ const TAB_LABEL: Record<Tab, string> = {
 };
 
 const DISPLAY_METRICS: [string, string][] = [
-  ["Possession", "Posse (%)"],
+  ["Possession", "Posse"],
   ["XG", "xG"],
-  ["ShotsTotal", "Finalizações"],
-  ["ShotsOnTarget", "Chutes no alvo"],
+  ["AttemptAtGoal", "Finalizações"],
+  ["AttemptAtGoalOnTarget", "No alvo"],
   ["Corners", "Escanteios"],
   ["FoulsFor", "Faltas"],
   ["PitchControl", "Controle de campo"],
@@ -30,6 +52,107 @@ const DISPLAY_METRICS: [string, string][] = [
 function getStat(stats: TeamStat[], metric: string): string {
   const s = stats.find(x => x.metric === metric);
   return s?.value != null ? Number(s.value).toFixed(2) : "—";
+}
+
+function statNum(stats: TeamStat[], metric: string): number | null {
+  const s = stats.find(x => x.metric === metric);
+  return s?.value != null ? Number(s.value) : null;
+}
+
+// % a exibir: Possession/PitchControl já vêm 0-1 → ×100.
+const STAT_PCT = new Set(["Possession", "PitchControl", "FinalThirdPitchControl"]);
+function fmtStat(v: number | null, metric: string): string {
+  if (v == null) return "—";
+  if (STAT_PCT.has(metric)) return `${Math.round((v <= 1 ? v * 100 : v))}%`;
+  return Number.isInteger(v) ? String(v) : v.toFixed(2);
+}
+
+// Barra comparativa estilo placar profissional (FotMob): valor casa | rótulo | valor fora,
+// com barra dividida proporcional. homeColor destaca a seleção em foco.
+// Barra de posse no estilo FIFA: 3 segmentos (time · em disputa · oponente).
+// A `Possession` da FIFA não soma 100% entre os dois — o resto é a posse contestada.
+function PossessionBar({ home, away, homeColor }: { home: number | null; away: number | null; homeColor: string }) {
+  const h = home != null ? (home <= 1 ? home * 100 : home) : 0;
+  const a = away != null ? (away <= 1 ? away * 100 : away) : 0;
+  const contested = Math.max(0, 100 - h - a);
+  return (
+    <div style={{ marginBottom: 11 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: h >= a ? "var(--text)" : "var(--text-muted)" }}>{h.toFixed(0)}%</span>
+        <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Posse de bola<DefinitionBubble id="posse" size={12} /></span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: a > h ? "var(--text)" : "var(--text-muted)" }}>{a.toFixed(0)}%</span>
+      </div>
+      <div style={{ display: "flex", height: 6, borderRadius: 3, overflow: "hidden", background: "var(--surface2)" }}>
+        <div style={{ width: `${h}%`, background: homeColor }} />
+        <div style={{ width: `${contested}%`, background: "#f0883e" }} />
+        <div style={{ width: `${a}%`, background: "#6b7280", opacity: 0.7 }} />
+      </div>
+      {contested > 0.5 && (
+        <div style={{ position: "relative", height: 13, marginTop: 3 }}>
+          <span style={{ position: "absolute", left: `${h + contested / 2}%`, transform: "translateX(-50%)", fontSize: 10, color: "#f0883e", whiteSpace: "nowrap" }}>{contested.toFixed(0)}% em disputa</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatCompareBar({ label, home, away, metric, homeColor }: { label: string; home: number | null; away: number | null; metric: string; homeColor: string }) {
+  const h = home ?? 0;
+  const a = away ?? 0;
+  const total = h + a;
+  const homePct = total > 0 ? (h / total) * 100 : 50;
+  const lead = h === a ? "tie" : h > a ? "home" : "away";
+  return (
+    <div style={{ marginBottom: 11 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: lead === "home" ? "var(--text)" : "var(--text-muted)" }}>{fmtStat(home, metric)}</span>
+        <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{label}{fifaDefId(metric) && <DefinitionBubble id={fifaDefId(metric)!} size={12} />}</span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: lead === "away" ? "var(--text)" : "var(--text-muted)" }}>{fmtStat(away, metric)}</span>
+      </div>
+      <div style={{ display: "flex", height: 6, borderRadius: 3, overflow: "hidden", background: "var(--surface2)" }}>
+        <div style={{ width: `${homePct}%`, background: homeColor, transition: "width 0.4s ease" }} />
+        <div style={{ width: `${100 - homePct}%`, background: "#6b7280", opacity: 0.7, transition: "width 0.4s ease" }} />
+      </div>
+    </div>
+  );
+}
+
+// lâmpada de curiosidade: ícone no canto, texto só no hover/foco (estilo legacy)
+function CuriosityLamp({ text }: { text: string }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div
+      tabIndex={0}
+      onMouseEnter={() => setShow(true)}
+      onMouseLeave={() => setShow(false)}
+      onFocus={() => setShow(true)}
+      onBlur={() => setShow(false)}
+      aria-label={text}
+      style={{ position: "relative", flexShrink: 0, alignSelf: "center", cursor: "help", fontSize: 18, lineHeight: 1, outline: "none" }}
+    >
+      💡
+      {show && (
+        <div style={{
+          position: "absolute", top: "50%", right: "calc(100% + 12px)", transform: "translateY(-50%)",
+          width: 260, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8,
+          padding: "10px 12px", fontSize: 12, lineHeight: 1.45, color: "var(--text-muted)", fontStyle: "italic",
+          boxShadow: "0 8px 24px rgba(0,0,0,0.55)", zIndex: 20, whiteSpace: "normal", textAlign: "left",
+        }}>
+          {text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// linha chave/valor para os blocos de Resumo (História em Copas / Nesta Copa)
+function KV({ k, v }: { k: string; v: string | number }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "4px 0", borderBottom: "1px solid var(--border)", fontSize: 12.5 }}>
+      <span style={{ color: "var(--text-muted)" }}>{k}</span>
+      <span style={{ color: "var(--text)", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{v}</span>
+    </div>
+  );
 }
 
 function resultBadge(win: boolean, draw: boolean) {
@@ -59,7 +182,7 @@ function formatDate(d: string | null) {
 // ─── Per-game expanded row ────────────────────────────────────────────────────
 
 function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
-  const [subTab, setSubTab] = useState<"stats" | "lineup" | "timeline">("stats");
+  const [subTab, setSubTab] = useState<"lineup" | "stats" | "timeline">("lineup");
 
   const { data: lineups } = useSWR(
     `lineups-${match.match_id}`,
@@ -73,6 +196,30 @@ function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
     `stats-${match.match_id}`,
     () => analytics.matchStats(match.match_id)
   );
+  const { data: playerStatsData } = useSWR(
+    `pstats-${match.match_id}`,
+    () => analytics.matchPlayerStats(match.match_id)
+  );
+  const playerStatsMap = useMemo(() => {
+    const m = new Map<string, Record<string, number>>();
+    if (playerStatsData) {
+      for (const [id, arr] of Object.entries(playerStatsData.players)) {
+        const rec: Record<string, number> = {};
+        for (const s of arr) if (s.value != null) rec[s.metric] = s.value;
+        m.set(id, rec);
+      }
+    }
+    return m;
+  }, [playerStatsData]);
+
+  // Nota (score_geral) por jogador dos DOIS times (snapshot mais recente).
+  const { data: homeSnaps } = useSWR(match.home_team ? `psnap-${match.home_team}` : null, () => analytics.playerSnapshots({ team: match.home_team! }));
+  const { data: awaySnaps } = useSWR(match.away_team ? `psnap-${match.away_team}` : null, () => analytics.playerSnapshots({ team: match.away_team! }));
+  const scoreById = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const p of [...(homeSnaps ?? []), ...(awaySnaps ?? [])]) if (p.score_geral != null) m.set(p.id_player, p.score_geral);
+    return m;
+  }, [homeSnaps, awaySnaps]);
 
   const teamSide = match.home_team === team.name ? "home" : "away";
   const teamIdTeam = lineups?.find(p => p.team_side === teamSide)?.id_team ?? "";
@@ -93,7 +240,7 @@ function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
       background: "var(--background)",
     }}>
       <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-        {(["stats", "lineup", "timeline"] as const).map(t => (
+        {(["lineup", "stats", "timeline"] as const).map(t => (
           <button key={t}
             onClick={() => setSubTab(t)}
             style={{
@@ -106,7 +253,7 @@ function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
               cursor: "pointer",
             }}
           >
-            {t === "stats" ? "Estatísticas" : t === "lineup" ? "Escalação" : "Timeline"}
+            {t === "lineup" ? "Escalação" : t === "stats" ? "Estatísticas" : "Linha do tempo"}
           </button>
         ))}
       </div>
@@ -115,36 +262,25 @@ function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
         !statsData ? (
           <p style={{ fontSize: 12, color: "var(--text-muted)" }}>Carregando...</p>
         ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-            <thead>
-              <tr>
-                <th style={{ padding: "4px 8px", textAlign: "center", color: "var(--accent)" }}>
-                  {team.name}
-                </th>
-                <th style={{ padding: "4px 8px", textAlign: "center", color: "var(--text-muted)" }}>
-                  Métrica
-                </th>
-                <th style={{ padding: "4px 8px", textAlign: "center", color: "var(--text-muted)" }}>
-                  {oppName}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {DISPLAY_METRICS.map(([metric, label]) => (
-                <tr key={metric} style={{ borderTop: "1px solid var(--border)" }}>
-                  <td style={{ padding: "4px 8px", textAlign: "center", color: "var(--text)", fontWeight: 600 }}>
-                    {getStat(teamStats, metric)}
-                  </td>
-                  <td style={{ padding: "4px 8px", textAlign: "center", color: "var(--text-muted)" }}>
-                    {label}
-                  </td>
-                  <td style={{ padding: "4px 8px", textAlign: "center", color: "var(--text)" }}>
-                    {getStat(oppStats, metric)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div>
+            {/* Cabeçalho com os dois times */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, fontSize: 12, fontWeight: 700 }}>
+              <span style={{ color: "var(--accent)" }}>{team.name}</span>
+              <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>Comparativo</span>
+              <span style={{ color: "var(--text)" }}>{oppName}</span>
+            </div>
+            <PossessionBar home={statNum(teamStats, "Possession")} away={statNum(oppStats, "Possession")} homeColor="var(--accent)" />
+            {DISPLAY_METRICS.filter(([m]) => m !== "Possession").map(([metric, label]) => (
+              <StatCompareBar
+                key={metric}
+                label={label}
+                metric={metric}
+                home={statNum(teamStats, metric)}
+                away={statNum(oppStats, metric)}
+                homeColor="var(--accent)"
+              />
+            ))}
+          </div>
         )
       )}
 
@@ -161,6 +297,8 @@ function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
             awayTeam={match.away_team ?? ""}
             events={events ?? []}
             homeIdTeam={homeIdTeam}
+            playerStats={playerStatsMap}
+            playerScores={scoreById}
           />
         )
       )}
@@ -168,17 +306,18 @@ function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
       {subTab === "timeline" && (
         !events ? (
           <p style={{ fontSize: 12, color: "var(--text-muted)" }}>Carregando...</p>
-        ) : events.length === 0 ? (
-          <p style={{ fontSize: 12, color: "var(--text-muted)" }}>Sem eventos registrados.</p>
         ) : (
-          <EventTimeline
+          <MatchTimeline
             events={events}
+            homePlayers={homePlayers}
+            awayPlayers={awayPlayers}
             homeTeam={match.home_team ?? ""}
             awayTeam={match.away_team ?? ""}
             homeIdTeam={homeIdTeam}
           />
         )
       )}
+
     </div>
   );
 }
@@ -188,9 +327,10 @@ function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
 interface TeamModalProps {
   team: TeamSummary;
   onClose: () => void;
+  snapshot?: number; // snapshot atual — limita os dados de jogador ao momento
 }
 
-export default function TeamModal({ team, onClose }: TeamModalProps) {
+export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
   const [activeTab, setActiveTab] = useState<Tab>("resumo");
   const [expandedGame, setExpandedGame] = useState<string | null>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
@@ -206,24 +346,15 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
   const finalized = team.games.filter(m => m.status === "finalizado");
   const firstGame = finalized[0] ?? null;
 
-  // Elenco: fetch filtered lineups per game
-  const { data: elencoData, isLoading: elencoLoading } = useSWR(
-    activeTab === "elenco" && finalized.length > 0 ? `elenco-${team.name}` : null,
-    async () => {
-      const results = await Promise.all(
-        finalized.map(async m => {
-          const side = m.home_team === team.name ? "home" : "away";
-          const players = await analytics.matchLineups(m.match_id).catch(() => [] as LineupPlayer[]);
-          return players.filter(p => p.team_side === side);
-        })
-      );
-      return results.flat();
-    }
+  // Infos curadas (identidade) — alimentam o Resumo
+  const { data: teamInfo } = useSWR(
+    activeTab === "resumo" ? `team-info-${team.name}` : null,
+    () => analytics.teamsInfo(team.name)
   );
 
-  // Estilo / Resumo metrics: need id_team from first game lineup
+  // Estilo metrics: need id_team from first game lineup
   const { data: firstLineups } = useSWR(
-    (activeTab === "resumo" || activeTab === "estilo") && firstGame
+    activeTab === "estilo" && firstGame
       ? `lineups-first-${team.name}`
       : null,
     () => analytics.matchLineups(firstGame!.match_id)
@@ -234,9 +365,9 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
     return firstLineups.find(p => p.team_side === side)?.id_team ?? null;
   }, [firstLineups, firstGame, team.name]);
 
-  // Aggregate stats for Resumo metrics
+  // Aggregate stats for Estilo metrics
   const { data: avgMetrics } = useSWR(
-    (activeTab === "resumo" || activeTab === "estilo") && teamIdTeam && finalized.length > 0
+    activeTab === "estilo" && teamIdTeam && finalized.length > 0
       ? `avg-metrics-${team.name}`
       : null,
     async () => {
@@ -260,23 +391,23 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
     }
   );
 
-  const roster = useMemo(() => {
-    if (!elencoData) return [];
-    const seen = new Map<string, { player: LineupPlayer; games: number }>();
-    for (const p of elencoData) {
-      if (seen.has(p.id_player)) {
-        seen.get(p.id_player)!.games++;
-      } else {
-        seen.set(p.id_player, { player: p, games: 1 });
-      }
+  // Stats por jogador (elenco rico + artilheiro do Resumo) — do snapshot atual
+  const { data: playerStats, isLoading: playerStatsLoading } = useSWR(
+    activeTab === "elenco" || activeTab === "resumo" ? `player-snap-${team.name}-${snapshot ?? "last"}` : null,
+    () => analytics.playerSnapshots({ team: team.name, snapshot })
+  );
+
+  // Artilheiro da seleção nesta Copa (jogador com mais gols)
+  const artilheiro = useMemo(() => {
+    if (!playerStats?.length) return null;
+    let top: { name: string; gols: number } | null = null;
+    for (const p of playerStats) {
+      const g = typeof p.gols === "number" ? p.gols : 0;
+      if (g > 0 && (!top || g > top.gols)) top = { name: p.player_name ?? "—", gols: g };
     }
-    const posOrder: Record<string, number> = { G: 0, D: 1, M: 2, F: 3 };
-    return Array.from(seen.values()).sort((a, b) => {
-      const pa = posOrder[(a.player.position ?? "Z")[0]] ?? 4;
-      const pb = posOrder[(b.player.position ?? "Z")[0]] ?? 4;
-      return pa - pb || b.games - a.games;
-    });
-  }, [elencoData]);
+    return top;
+  }, [playerStats]);
+
 
   const gd = team.gf - team.ga;
 
@@ -293,7 +424,7 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
           border: "1px solid var(--border)",
           borderRadius: 12,
           width: "100%",
-          maxWidth: 780,
+          maxWidth: 1000,
           maxHeight: "90vh",
           display: "flex",
           flexDirection: "column",
@@ -310,24 +441,8 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
           gap: 16,
           flexShrink: 0,
         }}>
-          {/* Jersey/Camisa visual */}
-          <div style={{
-            width: 52,
-            height: 52,
-            borderRadius: 10,
-            background: kit.main,
-            border: `3px solid ${kit.border}`,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 22,
-            fontWeight: 900,
-            color: kit.text,
-            flexShrink: 0,
-            boxShadow: `0 4px 14px ${kit.main}55`,
-          }}>
-            {flag(team.name)}
-          </div>
+          {/* Só a bandeira, maior (sem a caixa do kit) */}
+          <Flag team={team.name} height={46} style={{ flexShrink: 0, borderRadius: 4, boxShadow: "0 3px 12px rgba(0,0,0,0.5)" }} />
           <div style={{ flex: 1 }}>
             <h2 style={{ color: "var(--text)", fontSize: 20, fontWeight: 700, margin: 0 }}>
               {team.name}
@@ -368,6 +483,8 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
               }}
             >
               {TAB_LABEL[t]}
+              {t === "jogos" && finalized.length > 0 ? ` (${finalized.length})` : ""}
+              {t === "elenco" && playerStats && playerStats.length > 0 ? ` (${playerStats.length})` : ""}
             </button>
           ))}
         </div>
@@ -386,11 +503,11 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
                 marginBottom: 20,
               }}>
                 {[
-                  { label: "Pontos", value: team.points, color: team.points > 0 ? "var(--green)" : "var(--text)" },
-                  { label: "V / E / D", value: `${team.wins}/${team.draws}/${team.losses}`, color: undefined },
-                  { label: "Gols", value: `${team.gf}:${team.ga}`, color: undefined },
-                  { label: "Saldo", value: gd >= 0 ? `+${gd}` : String(gd), color: gd > 0 ? "var(--green)" : gd < 0 ? "var(--red)" : "var(--text-muted)" },
-                ].map(({ label, value, color }) => (
+                  { label: "Pontos", value: team.points, color: team.points > 0 ? "var(--green)" : "var(--text)", def: "pontos" },
+                  { label: "V / E / D", value: `${team.wins}/${team.draws}/${team.losses}`, color: undefined, def: null },
+                  { label: "Gols", value: `${team.gf}:${team.ga}`, color: undefined, def: null },
+                  { label: "Saldo", value: gd >= 0 ? `+${gd}` : String(gd), color: gd > 0 ? "var(--green)" : gd < 0 ? "var(--red)" : "var(--text-muted)", def: "saldo_gols" },
+                ].map(({ label, value, color, def }) => (
                   <div key={label} style={{
                     background: "var(--surface2)",
                     border: `1px solid ${color ?? "var(--border)"}22`,
@@ -400,40 +517,59 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
                     textAlign: "center",
                   }}>
                     <div style={{ fontSize: 22, fontWeight: 800, color: color ?? "var(--text)" }}>{value}</div>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{label}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{label}{def && <DefinitionBubble id={def} size={12} />}</div>
                   </div>
                 ))}
               </div>
 
-              {finalized.length > 0 && (
-                <div>
-                  <p style={{ color: "var(--text-muted)", fontSize: 12, marginBottom: 10 }}>
-                    Médias por jogo ({finalized.length} {finalized.length === 1 ? "jogo" : "jogos"})
-                  </p>
-                  {avgMetrics ? (
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
-                      {DISPLAY_METRICS.map(([metric, label]) => {
-                        const v = avgMetrics[metric];
-                        return (
-                          <div key={metric} style={{
-                            background: "var(--surface2)",
-                            border: "1px solid var(--border)",
-                            borderRadius: 6,
-                            padding: "8px 12px",
-                          }}>
-                            <div style={{ fontSize: 16, fontWeight: 600, color: "var(--text)" }}>
-                              {v != null ? v.toFixed(2) : "—"}
-                            </div>
-                            <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{label}</div>
-                          </div>
-                        );
-                      })}
+              {/* Identidade: apelido · técnico · 💡 curiosidade */}
+              {(teamInfo?.apelido || teamInfo?.tecnico || teamInfo?.curiosidade) && (
+                <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 16 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    {teamInfo?.apelido && <div style={{ fontSize: 15, fontWeight: 800, color: "var(--accent2)" }}>{teamInfo.apelido}</div>}
+                    <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 3 }}>
+                      {[teamInfo?.tecnico ? `Téc. ${teamInfo.tecnico}` : null, team.confederation, team.group ? `Grupo ${team.group}` : null].filter(Boolean).join(" · ")}
                     </div>
-                  ) : (
-                    <p style={{ fontSize: 12, color: "var(--text-muted)" }}>Carregando métricas...</p>
-                  )}
+                  </div>
+                  {teamInfo?.curiosidade && <CuriosityLamp text={teamInfo.curiosidade} />}
                 </div>
               )}
+
+              {/* Duas colunas: História em Copas | Nesta Copa */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px" }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.6px", color: "var(--accent)", marginBottom: 10 }}>História em Copas</div>
+                  {teamInfo?.titulos_copa != null && <KV k={teamInfo.titulos_copa === 1 ? "Título mundial" : "Títulos mundiais"} v={teamInfo.titulos_copa} />}
+                  {teamInfo?.vices_copa != null && <KV k={teamInfo.vices_copa === 1 ? "Vice-campeonato" : "Vice-campeonatos"} v={teamInfo.vices_copa} />}
+                  {teamInfo?.participacoes != null && <KV k="Participações" v={teamInfo.participacoes} />}
+                  {teamInfo?.estreia != null && <KV k="Estreia em Copas" v={teamInfo.estreia} />}
+                  {teamInfo && teamInfo.titulos_copa == null && teamInfo.participacoes == null && (
+                    <p style={{ fontSize: 12, color: "var(--text-muted)", margin: 0 }}>sem dados</p>
+                  )}
+                  {teamInfo?.melhor_campanha && (
+                    <div style={{ marginTop: 10, padding: "8px 10px", background: "var(--surface)", borderRadius: 7, fontSize: 12.5, color: "var(--text)" }}>🏆 {teamInfo.melhor_campanha}</div>
+                  )}
+                </div>
+
+                <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px" }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.6px", color: "var(--accent)", marginBottom: 10 }}>Nesta Copa</div>
+                  {finalized.length > 0 ? (
+                    <>
+                      <KV k="Jogos" v={finalized.length} />
+                      <KV k="Pontos" v={team.points} />
+                      <KV k="Gols (pró–contra)" v={`${team.gf}–${team.ga}`} />
+                      <KV k="Saldo de gols" v={gd >= 0 ? `+${gd}` : String(gd)} />
+                      {artilheiro && (
+                        <div style={{ marginTop: 10, padding: "8px 10px", background: "var(--surface)", borderRadius: 7, fontSize: 12.5, color: "var(--text)" }}>
+                          ⚽ {artilheiro.name} <span style={{ color: "var(--text-muted)" }}>({artilheiro.gols} {artilheiro.gols === 1 ? "gol" : "gols"})</span>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <p style={{ fontSize: 12, color: "var(--text-muted)", margin: 0 }}>Ainda não entrou em campo.</p>
+                  )}
+                </div>
+              </div>
             </div>
           )}
 
@@ -489,7 +625,7 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
 
                         {/* Confronto com bandeiras */}
                         <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1 }}>
-                          <span style={{ fontSize: 16 }}>{flag(team.name)}</span>
+                          <Flag team={team.name} height={14} />
                           <span style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>
                             {m.status === "finalizado" && gf != null ? gf : "—"}
                           </span>
@@ -497,7 +633,7 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
                           <span style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>
                             {m.status === "finalizado" && ga != null ? ga : "—"}
                           </span>
-                          <span style={{ fontSize: 16 }}>{flag(opp ?? null)}</span>
+                          <Flag team={opp ?? null} height={14} />
                           <span style={{ color: "var(--text-muted)", fontSize: 13 }}>
                             {opp ?? "?"}
                           </span>
@@ -521,98 +657,7 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
 
           {/* ── ELENCO ── */}
           {activeTab === "elenco" && (
-            <div>
-              {elencoLoading && (
-                <p style={{ color: "var(--text-muted)", fontSize: 13 }}>Carregando elenco...</p>
-              )}
-              {!elencoLoading && roster.length === 0 && (
-                <p style={{ color: "var(--text-muted)", fontSize: 13 }}>Sem dados de escalação disponíveis.</p>
-              )}
-              {roster.length > 0 && (() => {
-                const mostGames = roster.reduce((best, r) => r.games > best.games ? r : best, roster[0]);
-                const captains = roster.filter(r => r.player.captain);
-                const gks = roster.filter(r => (r.player.position ?? "").toUpperCase().startsWith("G"));
-
-                const leaders = [
-                  { label: "Mais jogos", value: mostGames?.games, name: mostGames?.player.player_name },
-                  { label: "Capitão", value: captains[0]?.player.shirt_number ? `#${captains[0].player.shirt_number}` : "—", name: captains[0]?.player.player_name },
-                  { label: "Goleiro", value: gks[0]?.player.shirt_number ? `#${gks[0].player.shirt_number}` : "—", name: gks[0]?.player.player_name },
-                  { label: "Jogadores", value: roster.length, name: "no torneio" },
-                ];
-
-                return (
-                  <>
-                    {/* Leader cards */}
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 16 }}>
-                      {leaders.map(l => (
-                        <div key={l.label} style={{
-                          background: "var(--surface2)",
-                          border: "1px solid var(--border)",
-                          borderRadius: 8,
-                          padding: "10px 12px",
-                          textAlign: "center",
-                        }}>
-                          <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>{l.label}</div>
-                          <div style={{ fontSize: 18, fontWeight: 700, color: "var(--accent)" }}>{l.value ?? "—"}</div>
-                          <div style={{ fontSize: 11, color: "var(--text)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {l.name ?? "—"}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Tabela do elenco */}
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                      <thead>
-                        <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                          {["#", "Jogador", "Pos", "Jogos"].map(h => (
-                            <th key={h} style={{ padding: "6px 10px", textAlign: "left", color: "var(--text-muted)", fontSize: 11, fontWeight: 600 }}>
-                              {h}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {roster.map(({ player: p, games }) => (
-                          <tr key={p.id_player} style={{ borderBottom: "1px solid var(--border)" }}>
-                            <td style={{ padding: "6px 10px", color: "var(--text-muted)", textAlign: "center" }}>
-                              {/* Jersey visual */}
-                              <span style={{
-                                display: "inline-flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                width: 24,
-                                height: 24,
-                                borderRadius: 4,
-                                background: kit.main,
-                                color: kit.text,
-                                fontSize: 10,
-                                fontWeight: 700,
-                                border: `1px solid ${kit.border}`,
-                              }}>
-                                {p.shirt_number ?? "?"}
-                              </span>
-                            </td>
-                            <td style={{ padding: "6px 10px", color: "var(--text)", fontWeight: p.captain ? 700 : 400 }}>
-                              {p.player_name ?? "?"}{p.captain && " ©"}
-                              {p.is_starter === false && (
-                                <span style={{ fontSize: 10, color: "var(--text-muted)", marginLeft: 4 }}>res.</span>
-                              )}
-                            </td>
-                            <td style={{ padding: "6px 10px", color: "var(--text-muted)" }}>
-                              {p.position ?? "—"}
-                            </td>
-                            <td style={{ padding: "6px 10px", color: "var(--text-muted)", textAlign: "center" }}>
-                              {games}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </>
-                );
-              })()}
-            </div>
+            <TeamRoster players={playerStats ?? []} loading={playerStatsLoading} kit={kit} />
           )}
 
           {/* ── ESTILO ── */}
@@ -627,7 +672,7 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
               ) : (
                 <div>
                   <p style={{ color: "var(--text-muted)", fontSize: 12, marginBottom: 16 }}>
-                    Baseado em médias de {finalized.length} {finalized.length === 1 ? "jogo" : "jogos"}.
+                    Estilo de jogo<DefinitionBubble id="estilo_jogo" size={12} /> · baseado em médias de {finalized.length} {finalized.length === 1 ? "jogo" : "jogos"}.
                   </p>
 
                   {/* Eixos de estilo */}
@@ -642,7 +687,7 @@ export default function TeamModal({ team, onClose }: TeamModalProps) {
                     return (
                       <div key={metric} style={{ marginBottom: 20 }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                          <span style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>{label}</span>
+                          <span style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>{label}{fifaDefId(metric) && <DefinitionBubble id={fifaDefId(metric)!} size={12} />}</span>
                           {v != null && (
                             <span style={{ fontSize: 12, color: "var(--accent)", fontWeight: 700 }}>
                               {v.toFixed(1)}
