@@ -23,14 +23,16 @@ import ProgressDots from "@/components/dashboard/ProgressDots";
 import RankingRaceScores, { METRIC_OPTIONS } from "@/components/dashboard/RankingRaceScores";
 import SelecoesTab from "@/components/dashboard/SelecoesTab";
 import PlayersTab from "@/components/dashboard/PlayersTab";
+import GruposChaveTab from "@/components/dashboard/GruposChaveTab";
 import Flag from "@/components/ui/Flag";
 
-type Tab = "race" | "teams" | "players";
+type Tab = "race" | "teams" | "players" | "groups";
 
 const TABS: { id: Tab; label: string }[] = [
-  { id: "race", label: "Ranking Race" },
+  { id: "groups", label: "Grupos" },
   { id: "teams", label: "Seleções" },
   { id: "players", label: "Jogadores" },
+  { id: "race", label: "Ranking Race" },
 ];
 
 // Rótulos pt-BR das fases (o gold guarda em inglês).
@@ -171,7 +173,7 @@ const WEIGHT_DETAILS: Record<WeightKey, {
 };
 
 export default function DashboardV2Page() {
-  const [tab, setTab] = React.useState<Tab>("race");
+  const [tab, setTab] = React.useState<Tab>("groups");
   const [filters, setFilters] = React.useState<DashboardFilters>(EMPTY_FILTERS);
   const [selectedTeams, setSelectedTeams] = React.useState<string[]>([]);
   const [currentSnapshot, setCurrentSnapshot] = React.useState<number>(0);
@@ -368,6 +370,16 @@ export default function DashboardV2Page() {
         {/* Pills de pesos (topo, como no legacy) — clicar ranqueia por aquele componente */}
         <div className="v2-weight-strip" style={{ flex: 1, display: "flex", justifyContent: "center", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
           <span className="v2-weight-strip-label">Pesos fixos</span>
+          {/* Geral = combinação dos 6 (100%); ranqueia pelo score_geral */}
+          <button
+            className={`v2-weight-pill ${metric === "score_geral" ? "is-active" : ""}`}
+            onClick={() => setMetric("score_geral")}
+            title="Ranquear pelo Score Geral (combinação dos 6 componentes)"
+            style={{ "--weight-color": "#58a6ff" } as React.CSSProperties}
+          >
+            <span className="v2-weight-dot" />
+            Geral <b>100%</b>
+          </button>
           {weightRows(weights?.pesos).map(([k, w]) => (
               <button
                 key={k}
@@ -521,8 +533,21 @@ export default function DashboardV2Page() {
             sortDir={sortDir}
             search={dashSearch}
           />
-        ) : (
+        ) : tab === "players" ? (
           <PlayersTab activeSnapshot={activeSnapshot} passesFilters={passesFilters} selectedTeams={selectedTeams} search={dashSearch} />
+        ) : (
+          <GruposChaveTab
+            matches={matches}
+            snapshots={snapshots}
+            activeSnapshot={activeSnapshot}
+            matchSnapshot={matchSnapshot}
+            filters={filters}
+            passesFilters={passesFilters}
+            selectedTeams={selectedTeams}
+            onToggleTeam={toggleTeam}
+            metric={metric}
+            search={dashSearch}
+          />
         )}
       </main>
       <WeightsGuideModal
