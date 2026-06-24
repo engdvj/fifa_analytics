@@ -205,17 +205,22 @@ interface Props {
   syncArea?: boolean;
   sharedArea?: number;
   onAreaChange?: (area: number) => void;
-  onToggleSync?: (on: boolean, area: number) => void;
+  sharedMode?: ValueMode;
+  onModeChange?: (m: ValueMode) => void;
+  onToggleSync?: (on: boolean, area: number, mode: ValueMode) => void;
   onClose: () => void;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
-export default function TeamScoresCard({ team, rows, metric, color, index = 0, onSelectMetric, syncArea = false, sharedArea, onAreaChange, onToggleSync, onClose }: Props) {
+export default function TeamScoresCard({ team, rows, metric, color, index = 0, onSelectMetric, syncArea = false, sharedArea, onAreaChange, sharedMode, onModeChange, onToggleSync, onClose }: Props) {
   const curKey = REVERSE[metric] ?? metric;
   const defaultArea = Math.max(0, METRIC_GROUPS.findIndex(([, , ms]) => ms.some(([k]) => k === curKey)));
   const [localArea, setLocalArea] = React.useState(defaultArea);
   const [mode, setMode] = React.useState<ValueMode>("pj");
+  // com Sync ligado, o modo (por jogo/total) também vem do estado compartilhado
+  const activeMode: ValueMode = syncArea && sharedMode != null ? sharedMode : mode;
+  const setModeH = (m: ValueMode) => { if (syncArea) onModeChange?.(m); else setMode(m); };
   const [pos, setPos] = React.useState({ x: 80 + index * 34, y: 64 + index * 34 });
   const [size, setSize] = React.useState<{ w: number; h: number | null }>({ w: 600, h: null });
   const drag = React.useRef<{ dx: number; dy: number } | null>(null);
@@ -231,13 +236,13 @@ export default function TeamScoresCard({ team, rows, metric, color, index = 0, o
   // rank na MESMA direção da barra (desc: maior = 1º), com empate "="
   const rankOf = React.useCallback((key: string): { rank: number; tied: boolean } | null => {
     if (!row) return null;
-    const me = snapVal(row, key, mode);
+    const me = snapVal(row, key, activeMode);
     if (me === null) return null;
-    const vals = rows.map((r) => snapVal(r, key, mode)).filter((v): v is number => v !== null);
+    const vals = rows.map((r) => snapVal(r, key, activeMode)).filter((v): v is number => v !== null);
     const ahead = vals.filter((v) => v > me).length;
     const tied = vals.filter((v) => v === me).length > 1;
     return { rank: ahead + 1, tied };
-  }, [rows, row, mode]);
+  }, [rows, row, activeMode]);
 
   if (!row) return null;
   const related = new Set(RELATIONS[curKey] ?? []);
@@ -259,7 +264,7 @@ export default function TeamScoresCard({ team, rows, metric, color, index = 0, o
   // título reflete o modo só nos grupos alternáveis; Scores/Campanha ficam fixos
   const areaToggleable = MODE_GROUPS.has(areaCls);
   const displayTitle = areaToggleable
-    ? `${areaTitle.split(" · ")[0]} · ${mode === "total" ? "Totais" : "Média/jogo"}`
+    ? `${areaTitle.split(" · ")[0]} · ${activeMode === "total" ? "Totais" : "Média/jogo"}`
     : areaTitle;
 
   return (
@@ -280,7 +285,7 @@ export default function TeamScoresCard({ team, rows, metric, color, index = 0, o
             </span>
           </span>
           <button
-            onClick={() => onToggleSync?.(!syncArea, safeArea)}
+            onClick={() => onToggleSync?.(!syncArea, safeArea, activeMode)}
             onPointerDown={(e) => e.stopPropagation()}
             title={syncArea ? "Sync de área ligado — escolher área muda em todos os cards" : "Sync de área desligado"}
             style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 5, background: syncArea ? "#1f6feb24" : "transparent", border: `1px solid ${syncArea ? "#1f6feb88" : "#30363d"}`, color: syncArea ? "#79c0ff" : "#8b949e", borderRadius: 6, padding: "3px 8px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}
@@ -319,10 +324,10 @@ export default function TeamScoresCard({ team, rows, metric, color, index = 0, o
         <div style={{ padding: "8px 12px 10px", flex: 1, minHeight: 0, maxHeight: size.h == null ? "70vh" : undefined, overflowY: "auto" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 4, minHeight: 22 }}>
             <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.8px", color: accent }}>{displayTitle}</span>
-            {areaToggleable && <ModeToggle mode={mode} onChange={setMode} accent={accent} />}
+            {areaToggleable && <ModeToggle mode={activeMode} onChange={setModeH} accent={accent} />}
           </div>
           {metrics.map(([key, label]) => {
-            const v = snapVal(row, key, areaToggleable ? mode : "pj");
+            const v = snapVal(row, key, areaToggleable ? activeMode : "pj");
             const isActive = key === curKey;
             const isRel = !isActive && related.has(key);
             const isInd = !isActive && !isRel && indirect.has(key);
@@ -332,7 +337,9 @@ export default function TeamScoresCard({ team, rows, metric, color, index = 0, o
             const rowBg = isActive ? "#1a2d50" : isRel ? "#1f2d1a" : isInd ? "#2a2510" : "transparent";
             const labelColor = isActive ? "#c8d3e0" : isRel ? "#86c98a" : isInd ? "#c9a84c" : "#9aa4af";
             const valColor = isActive ? "#58a6ff" : isRel ? "#4ade80" : isInd ? "#f0c040" : isNeg ? "#f85149" : "#e6edf3";
-            const snapKey = KEY_MAP[key] ?? key;
+            // respeita o modo: em "Total" seleciona o campo acumulado (ex.: gols,
+            // chutes), senão a média por jogo. Assim o card muda a Ranking Race.
+            const snapKey = snapField(key, areaToggleable ? activeMode : "pj");
             const clickable = !!onSelectMetric && v !== null;
             return (
               <MetricRow

@@ -35,9 +35,14 @@ const METRIC_LABEL: Record<string, string> = Object.fromEntries(
   METRIC_OPTIONS.flatMap((g) => g.items)
 );
 
-// métricas onde "menor é melhor" (não há scores assim, mas gols_contra etc.)
-const LOWER_IS_BETTER = new Set(["gols_contra", "gols_contra_pj"]);
-const PERCENT_FRAC = new Set(["posse", "aproveitamento"]); // 0-1 → %
+// métricas onde "menor é melhor" (gols/chutes sofridos, impedimentos, disciplina)
+const LOWER_IS_BETTER = new Set([
+  "gols_contra", "gols_contra_pj", "chutes_sofridos_pj", "chutes_sofridos_no_alvo_pj",
+  "impedimentos_pj", "faltas_cometidas_pj", "amarelos_pj", "vermelhos_pj",
+]);
+const PERCENT_FRAC = new Set([
+  "posse", "aproveitamento", "precisao_chutes", "precisao_passes", "save_pct_goleiro",
+]); // 0-1 → %
 
 interface Props {
   snapshots: TeamSnapshot[];
@@ -84,6 +89,7 @@ export default function RankingRaceScores({
   const [compareTeams, setCompareTeams] = React.useState<string[]>([]);
   const [syncArea, setSyncArea] = React.useState(false);
   const [sharedArea, setSharedArea] = React.useState(0);
+  const [sharedMode, setSharedMode] = React.useState<"pj" | "total">("pj");
   const toggleCompare = React.useCallback((team: string) => {
     setCompareTeams((prev) => prev.includes(team) ? prev.filter((t) => t !== team) : [...prev, team]);
   }, []);
@@ -105,11 +111,17 @@ export default function RankingRaceScores({
       .filter((s) => s.snapshot_jogo === currentSnapshot && passesFilters(s.team) && (!q || s.team.toLowerCase().includes(q)))
       .map((s) => ({ team: s.team, value: metricValue(s, metric) }))
       .filter((r): r is { team: string; value: number } => r.value != null);
-    // ordem natural da métrica (LOWER_IS_BETTER = menor melhor); a setinha do
-    // shell inverte isso (sortDir="asc").
-    const asc = LOWER_IS_BETTER.has(metric) !== (sortDir === "asc");
+    // Rank de QUALIDADE (1 = melhor): em métricas "menor é melhor" (faltas,
+    // cartões, gols sofridos) o melhor é o MENOR valor. Define cor e medalha —
+    // independente da ordem de exibição.
+    const lib = LOWER_IS_BETTER.has(metric);
+    const byQuality = [...rows].sort((a, b) => (lib ? a.value - b.value : b.value - a.value));
+    const qrank = new Map(byQuality.map((r, i) => [r.team, i + 1]));
+    // Ordem de EXIBIÇÃO: literal pela seta (asc = "menor primeiro" mostra os
+    // menores valores no topo, sempre — sem inverter pela qualidade).
+    const asc = sortDir === "asc";
     rows.sort((a, b) => (asc ? a.value - b.value : b.value - a.value));
-    return rows;
+    return rows.map((r) => ({ ...r, qualityRank: qrank.get(r.team) ?? 1 }));
   }, [snapshots, currentSnapshot, metric, passesFilters, sortDir, search]);
 
   const maxValue = ranked.length ? Math.max(...ranked.map((r) => Math.abs(r.value)), 1) : 1;
@@ -135,8 +147,10 @@ export default function RankingRaceScores({
         </p>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-          {ranked.map((row, idx) => {
-            const rank = idx + 1;
+          {ranked.map((row) => {
+            // posição/medalha/cor = rank de QUALIDADE (melhor=1=verde), não a
+            // posição na lista — assim invertendo a ordem o vermelho vai pro topo.
+            const rank = row.qualityRank;
             const isSelected = selectedTeams.includes(row.team);
             const isPlaying = activeMatchTeams.has(row.team);
             const isDimmed = focusMode && !isSelected;
@@ -208,7 +222,9 @@ export default function RankingRaceScores({
           syncArea={syncArea}
           sharedArea={sharedArea}
           onAreaChange={setSharedArea}
-          onToggleSync={(on, area) => { setSyncArea(on); if (on) setSharedArea(area); }}
+          sharedMode={sharedMode}
+          onModeChange={setSharedMode}
+          onToggleSync={(on, area, m) => { setSyncArea(on); if (on) { setSharedArea(area); setSharedMode(m); } }}
           onClose={() => setCompareTeams((prev) => prev.filter((x) => x !== t))}
         />
       ))}
