@@ -114,11 +114,24 @@ Limpeza: `utils/text.clean_person_name()`. Chave de join: `utils/text.person_nam
 
 ### Scores de seleção
 
-`TEAM_SCORE_WEIGHTS` em `analytics/scores.py`:
-- **Fixos:** `score_resultado` (0.35), `score_forca_relativa` (0.15 escalado por Elo maturity)
-- **Calibrados (RidgeCV):** `score_ataque`, `score_defesa`, `score_eficiencia`, `score_controle` — regressão contra saldo de gols real, features das métricas fdh quando disponíveis
+`TEAM_SCORE_WEIGHTS` em `analytics/scores.py` (pesos fixos): `score_resultado` (0.35),
+`score_defesa` (0.20), `score_ataque` (0.15), `score_forca_relativa` (0.15),
+`score_eficiencia` (0.10), `score_controle` (0.05).
 
-`score_forca_relativa` é escalado por `_elo_maturity_factor()`: no início do torneio todos começam em Elo 1500 — o peso cresce conforme os ratings se diferenciam de verdade.
+**Normalização por referência FIXA (estabilidade entre snapshots).** Cada componente é
+um z-score 0-100, mas a média/desvio vêm de uma referência calculada UMA vez sobre
+todos os jogos finalizados (`build_team_scores(..., ref_stats=dict)`), reusada em cada
+snapshot. Consequência (intencional): **o score de uma seleção só muda quando ELA joga**,
+nunca quando outras seleções jogam. Sem `ref_stats`, o cálculo cai no modo relativo
+antigo (normaliza contra o campo do snapshot) — usado só fora do pipeline de snapshots.
+
+Detalhes que sustentam a estabilidade:
+- `elo_maturity` é congelado na referência (os pesos efetivos `score_resultado` ⇄
+  `score_forca_relativa` não mudam entre snapshots).
+- O aproveitamento ponderado usa o Elo do adversário **pré-jogo** (fixo no confronto)
+  com âncora de 1500 — não o Elo pós-jogo, que evoluía quando o adversário jogava depois.
+
+`score_disciplina` usa pesos que somam 1.0 (não dividir por 0.30 — era bug).
 
 ### Métricas descritivas (fora do score_geral)
 
@@ -152,13 +165,16 @@ fifa-analytics fifa-coletar
 # Com flag para incluir jogos ainda não finalizados
 fifa-analytics fifa-coletar --todos
 
-# Outros passos (ainda legados, aguardam substituição)
+# Relatórios (a partir do gold já coletado)
 fifa-analytics relatorios-basicos  # gera fragmentos + relatórios finais
 fifa-analytics status-torneio      # standings, status, pendências
-fifa-analytics scores              # scores e rankings
-fifa-analytics calibrar-pesos      # calibra pesos via RidgeCV; --forcar ignora intervalo mínimo
-fifa-analytics reprocessar-snapshots --jogo N   # snapshot incremental do N-ésimo jogo finalizado
 fifa-analytics remontar-relatorio {match_id}    # remonta relatório sem recalcular
+
+# Nota: scores de seleção/jogador e snapshots agora são gerados DENTRO de
+# `fifa-coletar` (fifa/pipeline.py → analytics/snapshot.py + player_snapshot.py),
+# não há mais comandos `scores`/`calibrar-pesos`/`reprocessar-snapshots`.
+# Comandos de fontes legadas (worldcup2026, espn, 365scores, wikipedia,
+# indice-canonico, atualizar, amostra) foram removidos — fonte única FIFA.
 
 # Dashboard HTML
 python scripts/bar_chart_race.py
@@ -194,8 +210,10 @@ FastAPI + Postgres (SQLAlchemy + Alembic). Independente do pipeline — lê o go
 - `GET /matches/{match_id}/stats` — métricas avançadas do jogo (lê `fact_team_match_stats.parquet`)
 - `POST /users` / `GET /users` — usuários do bolão
 - `POST /pools` / `GET /pools` — bolões
-- `POST /pools/{pool_id}/predictions` — palpites (upsert)
+- `POST /pools/{pool_id}/predictions` — palpites (upsert; bloqueia jogo finalizado)
+- `POST /pools/{pool_id}/registro` — **registro de bolão já encerrado**: só o dono; aceita jogos finalizados; lança palpites em nome de cada participante (`user_id` por item) e pontua na hora. Frontend: `app/bolao/registrar`.
 - `GET /pools/{pool_id}/ranking` — ranking de pontos
+- `GET /stats/participants` — metadados cruzados de TODOS os bolões por participante (pontos totais, placares exatos, vencedores) — base da meta-análise
 
 **Loader:** `api/app/loaders/load_matches.py` — upsert de `dim_match.parquet` → tabela `matches`; recalcula pontos dos palpites quando um jogo passa a `finalizado`.
 
@@ -244,10 +262,16 @@ Gera `reports/tournament/ranking_race.html` — arquivo único autossuficiente (
 | `client.fetch_power_ranking_season()` + transform | idem | Média |
 | `client.fetch_season_players()` (1249 jogadores × 119 métricas) | idem | Média |
 | `client.fetch_season_team_stats(id_team)` por time (48 chamadas) | idem | Média |
-| Integrar `fact_events`, `fact_lineups`, `fact_player_match_stats` no gold | `fifa/pipeline.py` | Alta |
-| Atualizar `reporting/` para ler dados FIFA (sem fallback legado) | `reporting/` | Alta |
 | CI (`.github/workflows/ci.yml`) com Postgres + pytest | nova | Alta |
-| Limpar CLI: remover comandos de fontes legadas (worldcup2026, espn, wikipedia, 365scores, atualizar, indice-canonico) | `cli.py` | Média |
+
+### Feito nesta refundação (fonte única FIFA)
+
+- Lado de SELEÇÕES recomputado: `fifa/pivot.py`, `analytics/scores.py` (pesos fixos), `analytics/snapshot.py` → `snapshot_timeline.parquet` + `weights.json`. Dashboard de time redesenhado (bugs de % corrigidos, pesos carregando, navegação cronológica).
+- Lado de JOGADORES (dados): `fifa/player_pivot.py` (long→wide) + `analytics/player_snapshot.py` → `player_match_wide.parquet` + `snapshots/player_snapshot_timeline.parquet`, gerados dentro de `fifa/pipeline.py`. Powerranking FIFA vira `score_geral` por jogador. Alimenta a aba Jogadores (grade) e o roster.
+- Limpeza de legado: removidos workflows/sources/comandos/testes de worldcup2026, ESPN, 365scores, Wikipedia, amostra, indice-canonico, atualizar, scores/calibrar/reprocessar; removidos também `transforms/{events,lineups,matches,standings,stats,teams}`, `analytics/{calibration,match_summary,player_leaders}`, `validation/` + `schemas/`, `config/player_aliases.yaml`, `scripts/{check_matches,experimento_pesos}`. `config/sources.yaml` e `pipeline.yaml` agora FIFA-only. `pytest` coleta limpo.
+- Relatórios reformulados p/ FIFA: novo `workflows/fifa_reports.py` (substitui `canonical_reports`) lê o gold FIFA (dim_match, team_match_wide, fact_lineups) e escreve os fragmentos; `build_report`/`fragments` (renderizadores genéricos) reusados. `relatorios-basicos`, `status-torneio` (standings calculadas de dim_match) e `remontar-relatorio` funcionam FIFA-only.
+- Dashboard (elenco/escalação/cards) reformulado p/ FIFA: `scripts/bar_chart_race.py` constrói `_lineups/_events/_pstats/_rosters` a partir do gold FIFA (fact_lineups + coluna team, fact_events com vocabulário pt-BR e nome resolvido por id_player, player_match_wide → schema inglês, roster = jogadores distintos das escalações). `build_player_match_wide` é ancorado nas escalações (LEFT JOIN das stats) → roster e snapshots cobrem os mesmos jogadores. Suíte 100% verde (inclui test_dashboard_js).
+- API do bolão migrada para auth JWT (`/auth/register|login`, `get_current_user`); criar bolão/palpite deriva o usuário do token.
 
 ## Problemas conhecidos
 
