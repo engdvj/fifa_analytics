@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from api.app.db import SessionLocal
 from api.app.models import Match
 from api.app.scoring.engine import score_prediction
+from api.app.scoring.recompute import match_in_scope
 from fifa_analytics.paths import GOLD_DIR
 
 _COLS = [
@@ -65,20 +66,32 @@ def load_matches(db: Session, parquet_path=None) -> dict[str, int]:
 
 
 def _rescore_match(db: Session, match: Match) -> None:
-    """Recalcula os pontos de todos os palpites de um jogo finalizado."""
+    """Recalcula os pontos de todos os palpites de um jogo finalizado.
+
+    Respeita o escopo do bolão: palpite cujo bolão não inclui o jogo fica com
+    points=None (não deveria existir, mas é defensivo)."""
     if match.home_score is None or match.away_score is None:
         return
     result = (match.home_score, match.away_score)
     for pred in match.predictions:
-        spec = pred_pool_spec(db, pred.pool_id)
+        pool = _pred_pool(db, pred.pool_id)
+        if pool is None or not match_in_scope(match, pool.scope):
+            pred.points = None
+            continue
+        spec = pool.rule.spec if pool.rule else {}
         pred.points = score_prediction(spec, (pred.home_score, pred.away_score), result)
 
 
-def pred_pool_spec(db: Session, pool_id: int) -> dict:
-    """Spec da regra do bolão de um palpite."""
+def _pred_pool(db: Session, pool_id: int):
+    """Bolão de um palpite."""
     from api.app.models import Pool
 
-    pool = db.get(Pool, pool_id)
+    return db.get(Pool, pool_id)
+
+
+def pred_pool_spec(db: Session, pool_id: int) -> dict:
+    """Spec da regra do bolão de um palpite (compat)."""
+    pool = _pred_pool(db, pool_id)
     return pool.rule.spec if pool and pool.rule else {}
 
 

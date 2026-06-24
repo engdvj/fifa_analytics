@@ -11,10 +11,12 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     ForeignKey,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -52,9 +54,11 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    email: Mapped[str] = mapped_column(String, unique=True, index=True)
+    username: Mapped[str] = mapped_column(String, unique=True, index=True)  # login
+    email: Mapped[str | None] = mapped_column(String, unique=True, index=True)  # opcional
     name: Mapped[str] = mapped_column(String)
     password_hash: Mapped[str | None] = mapped_column(String)  # auth real vem depois
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -62,7 +66,10 @@ class User(Base):
 
 class ScoringRule(Base):
     """Regra de pontuação como dados (spec JSONB). Builtin seedado; no futuro
-    o usuário cria a sua. O `spec` é interpretado por scoring/engine.py."""
+    o usuário cria a sua. O `spec` é interpretado por scoring/engine.py.
+
+    `owner_id` nulo = regra builtin/global; preenchido = regra criada por um
+    usuário (visível só pra ele na listagem)."""
 
     __tablename__ = "scoring_rules"
 
@@ -70,21 +77,40 @@ class ScoringRule(Base):
     name: Mapped[str] = mapped_column(String, unique=True)
     description: Mapped[str | None] = mapped_column(String)
     spec: Mapped[dict] = mapped_column(JSON)  # JSONB no Postgres, JSON no SQLite
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
 
 
 class Pool(Base):
+    """Bolão. Pode ser folha (palpites diretos) ou grupo (`is_group=True`) que
+    agrega sub-bolões via `parent_id`.
+
+    `scope` (JSON) define quais jogos o bolão aceita/pontua:
+        {"type": "all"}                            — todos os 104 jogos
+        {"type": "stage", "stages": [<stage>...]}  — jogos cujo stage está na lista
+        {"type": "matches", "match_ids": [...]}    — lista explícita de match_id
+    """
+
     __tablename__ = "pools"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String)
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     rule_id: Mapped[int] = mapped_column(ForeignKey("scoring_rules.id"))
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("pools.id"))
+    scope: Mapped[dict | None] = mapped_column(JSON)
+    is_group: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
     rule: Mapped["ScoringRule"] = relationship()
     members: Mapped[list["PoolMember"]] = relationship(back_populates="pool")
+    children: Mapped[list["Pool"]] = relationship(
+        back_populates="parent", cascade="all, delete-orphan"
+    )
+    parent: Mapped["Pool | None"] = relationship(
+        back_populates="children", remote_side="Pool.id"
+    )
 
 
 class PoolMember(Base):
@@ -118,3 +144,25 @@ class Prediction(Base):
     )
 
     match: Mapped["Match"] = relationship(back_populates="predictions")
+
+
+class CollectionJob(Base):
+    """Registro de um job administrativo (coleta de dados ou recálculo).
+
+    Rodam em background; o status/log permite acompanhar pela API sem manter
+    estado em memória. `kind` = "coleta" | "recalc"; `status` percorre
+    pending → running → success | error.
+    """
+
+    __tablename__ = "collection_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String)  # "coleta" | "recalc"
+    status: Mapped[str] = mapped_column(String, default="pending")  # pending|running|success|error
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    log: Mapped[str | None] = mapped_column(Text)
+    triggered_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

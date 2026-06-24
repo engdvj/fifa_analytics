@@ -11,9 +11,10 @@ from functools import lru_cache
 from typing import Any
 
 import pandas as pd
+import yaml
 from fastapi import APIRouter, HTTPException, Query
 
-from fifa_analytics.paths import GOLD_DIR
+from fifa_analytics.paths import CONFIG_DIR, GOLD_DIR
 from fifa_analytics.transforms.team_names import traduzir_selecao
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
@@ -38,6 +39,37 @@ def _safe_val(v) -> Any:
     return v
 
 
+def _records(df: pd.DataFrame, cols: list[str] | None = None) -> list[dict]:
+    """DataFrame → list[dict] com NaN→None. `cols` opcional restringe/ordena."""
+    if df.empty:
+        return []
+    use = [c for c in (cols or df.columns) if c in df.columns]
+    return [{k: _safe_val(row[k]) for k in use} for row in df[use].to_dict("records")]
+
+
+@lru_cache(maxsize=1)
+def _load_teams_info() -> dict:
+    """Infos curadas das seleções (config/teams_info.yaml) — não vem do pipeline.
+    Estrutura: {nome_seleção: {apelido, confederacao, tecnico, titulos_copa,
+    vices_copa, participacoes, estreia, melhor_campanha, curiosidade}}."""
+    path = CONFIG_DIR / "teams_info.yaml"
+    if not path.exists():
+        return {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    teams = data.get("teams", data) if isinstance(data, dict) else {}
+    return teams if isinstance(teams, dict) else {}
+
+
+@router.get("/teams-info")
+def teams_info(team: str | None = Query(None, description="filtra uma seleção")) -> dict:
+    """Infos curadas (apelido, técnico, história em Copas, curiosidade). Alimenta
+    a aba Resumo do modal de seleção — conteúdo de identidade, não de stats."""
+    info = _load_teams_info()
+    if team is not None:
+        return info.get(team, {})
+    return info
+
+
 # ── Jogos ─────────────────────────────────────────────────────────────────────
 
 @router.get("/matches")
@@ -50,15 +82,11 @@ def list_matches_analytics(status: str | None = None) -> list[dict]:
         df = df[df["status"] == status]
     cols = [
         "match_id", "match_number", "home_team", "away_team",
-        "home_team_code", "away_team_code", "stage", "group",
-        "date_utc", "status", "home_score", "away_score",
+        "home_team_code", "away_team_code", "id_team_home", "id_team_away",
+        "stage", "group", "date_utc", "status", "home_score", "away_score",
         "home_penalty", "away_penalty", "stadium", "id_ifes",
     ]
-    available = [c for c in cols if c in df.columns]
-    return [
-        {k: _safe_val(row[k]) for k in available}
-        for row in df[available].to_dict("records")
-    ]
+    return _records(df, cols)
 
 
 @router.get("/matches/{match_id}/stats")
@@ -198,6 +226,53 @@ def available_metrics() -> list[str]:
     if df.empty or "metric" not in df.columns:
         return []
     return sorted(df["metric"].dropna().unique().tolist())
+
+
+# ── Snapshots: scores históricos (jogo a jogo) ───────────────────────────────
+
+@router.get("/snapshots/teams")
+def team_snapshots(snapshot: int | None = Query(None, description="filtra um snapshot_jogo")) -> list[dict]:
+    """Scores de seleção por snapshot (analytics/snapshot_timeline).
+
+    Um registro por seleção por snapshot: score_geral + componentes, ranking,
+    Elo, eixos de estilo e métricas acumuladas/por-jogo. É a base da aba Ranking
+    Race e dos cards de Seleções."""
+    df = _parquet("analytics/snapshot_timeline.parquet")
+    if df.empty:
+        raise HTTPException(404, "snapshots não disponíveis (rode fifa-coletar)")
+    if snapshot is not None:
+        df = df[df["snapshot_jogo"] == snapshot]
+    return _records(df)
+
+
+@router.get("/snapshots/players")
+def player_snapshots(
+    snapshot: int | None = Query(None, description="filtra um snapshot_jogo (default: último)"),
+    team: str | None = None,
+) -> list[dict]:
+    """Scores/stats acumulados de jogador por snapshot (player_snapshot_timeline).
+
+    São ~31k linhas no total; por padrão devolve só o último snapshot. Use
+    `?snapshot=N` para um momento específico e `?team=` para filtrar a seleção."""
+    df = _parquet("analytics/snapshots/player_snapshot_timeline.parquet")
+    if df.empty:
+        raise HTTPException(404, "player snapshots não disponíveis (rode fifa-coletar)")
+    if snapshot is None:
+        snapshot = int(df["snapshot_jogo"].max())
+    df = df[df["snapshot_jogo"] == snapshot]
+    if team:
+        team_pt = traduzir_selecao(team)
+        df = df[df["team"].isin([team, team_pt])]
+    return _records(df)
+
+
+@router.get("/weights")
+def score_weights() -> dict:
+    """Pesos fixos do score_geral (analytics/weights.json)."""
+    path = GOLD_DIR / "analytics" / "weights.json"
+    if not path.exists():
+        raise HTTPException(404, "weights não disponíveis (rode fifa-coletar)")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 @router.get("/teams/{id_team}/stats")

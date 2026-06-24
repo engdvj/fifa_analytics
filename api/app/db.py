@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-load_dotenv()
+load_dotenv(override=True)
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL", "postgresql+psycopg2://fifa:fifa@localhost:5432/fifa"
