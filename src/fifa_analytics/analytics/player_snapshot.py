@@ -16,6 +16,10 @@ from __future__ import annotations
 
 import pandas as pd
 
+from fifa_analytics.analytics.player_scores import (
+    RAW_INPUT_COLS,
+    build_player_scores,
+)
 from fifa_analytics.fifa.player_pivot import build_player_match_wide
 from fifa_analytics.paths import GOLD_DIR
 from fifa_analytics.utils.io import write_dataframe
@@ -114,6 +118,26 @@ def _player_scores(power_ranking: pd.DataFrame) -> pd.DataFrame:
     return pr[["id_player", "score_geral"]].drop_duplicates("id_player")
 
 
+def _accumulate_for_scores(wide_subset: pd.DataFrame) -> pd.DataFrame:
+    """Acumula (soma) as colunas brutas do score próprio por jogador no conjunto
+    de jogos dado, com perfil e nº de jogos efetivamente jogados (minutos>0).
+    Alimenta `player_scores.build_player_scores`."""
+    raw_cols = [c for c in RAW_INPUT_COLS if c in wide_subset.columns]
+    acc = wide_subset.groupby("id_player")[raw_cols].sum(numeric_only=True).reset_index()
+    if "minutos" in wide_subset.columns:
+        played = (pd.to_numeric(wide_subset["minutos"], errors="coerce").fillna(0) > 0).astype(int)
+        jogos = played.groupby(wide_subset["id_player"]).sum()
+    else:
+        jogos = wide_subset.groupby("id_player").size()
+    acc["jogos"] = jogos.reindex(acc["id_player"]).fillna(0).astype(int).values
+    if "perfil" in wide_subset.columns:
+        perfil = wide_subset.dropna(subset=["perfil"]).groupby("id_player")["perfil"].last()
+        acc["perfil"] = acc["id_player"].map(perfil)
+    else:
+        acc["perfil"] = "meio"
+    return acc
+
+
 def build_player_snapshots(
     player_stats_long: pd.DataFrame,
     lineups: pd.DataFrame,
@@ -149,6 +173,13 @@ def build_player_snapshots(
         snap_mids[int(r["snapshot_jogo"])] = list(cumulative)
 
     scores = _player_scores(power_ranking)
+
+    # Referência fixa do score próprio: média/desvio por (perfil, métrica)
+    # calculados UMA vez sobre o estado final (todos os jogos) e reusados em cada
+    # snapshot — assim a nota de um jogador só muda quando ELE joga.
+    prop_ref: dict[tuple[str, str], tuple[float, float]] = {}
+    build_player_scores(_accumulate_for_scores(wide), ref_stats=prop_ref)
+
     # metadados estáveis por jogador (última aparição)
     meta_cols = [c for c in ("player_name", "team", "perfil", "position", "shirt_number") if c in w.columns]
     info = (
@@ -174,6 +205,16 @@ def build_player_snapshots(
         agg = agg.merge(info, on="id_player", how="left")
         agg = agg.merge(scores, on="id_player", how="left")
 
+        # score próprio (nosso, por posição) — convive com a PR FIFA (score_geral)
+        prop = build_player_scores(
+            _accumulate_for_scores(wide[wide["match_id"].isin(mids)]),
+            ref_stats=prop_ref,
+        )
+        prop_cols = ["score_proprio", "confianca_score", "nivel_confianca"] + [
+            c for c in prop.columns if c.startswith("prop_")
+        ]
+        agg = agg.merge(prop[["id_player", *prop_cols]], on="id_player", how="left")
+
         # duelos ganhos = desarmes (proxy) + dribles ganhos
         tw = agg.get("tackles_won", pd.Series(0.0, index=agg.index)).fillna(0)
         dw = agg.get("dribbles_won", pd.Series(0.0, index=agg.index)).fillna(0)
@@ -188,7 +229,6 @@ def build_player_snapshots(
         agg["snapshot_jogo"] = n
         agg["player_slug"] = agg["id_player"].astype(str)
         agg["rating_365"] = agg.get("score_geral")
-        agg["nivel_evidencia"] = None
         frames.append(agg)
 
     if not frames:
@@ -202,6 +242,11 @@ def build_player_snapshots(
         timeline.groupby("snapshot_jogo")["score_geral"]
         .rank(ascending=False, method="min")
     )
+    if "score_proprio" in timeline.columns:
+        timeline["ranking_score_proprio"] = (
+            timeline.groupby("snapshot_jogo")["score_proprio"]
+            .rank(ascending=False, method="min")
+        )
 
     for col in _MISSING_COLS:
         if col not in timeline.columns:
