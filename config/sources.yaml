@@ -1,95 +1,26 @@
+# Fonte ÚNICA: API oficial da FIFA (v3 + Data Hub). Sem fontes de terceiros.
+# As fontes legadas (worldcup2026, wikipedia, espn, 365scores, balldontlie,
+# api_football, football_data, sample) foram removidas na refundação FIFA-only.
 sources:
-  sample:
-    enabled: true
-    official: false
-    requires_api_key: false
-    role: desenvolvimento_local
-    base_url: null
-  worldcup2026:
-    enabled: true
-    official: false
-    requires_api_key: false
-    role: operacional_principal
-    base_url: https://worldcup26.ir
-    endpoints:
-      health: /api/health
-      matches: /get/games
-      groups: /get/groups
-      teams: /get/teams
-      stadiums: /get/stadiums
-    observacao: API publica gratuita; pode oscilar e deve ser validada contra fonte oficial.
-  wikipedia:
-    enabled: true
-    official: false
-    requires_api_key: false
-    role: referencia_publica_inicial
-    base_url: https://en.wikipedia.org/wiki/2026_FIFA_World_Cup
-  espn:
-    enabled: true
-    official: false
-    requires_api_key: false
-    role: enriquecimento_analitico_gratuito
-    base_url: https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world
-    endpoints:
-      scoreboard: /scoreboard
-      summary: /summary
-    observacao: Fonte publica sem chave para estatisticas por equipe, eventos, lineups e jogadores.
   fifa:
     enabled: true
     official: true
     requires_api_key: false
-    role: validacao_oficial
-    base_url: null
-    endpoints:
-      squad_lists_pdf: https://fdp.fifa.org/assetspublic/ce281/pdf/SquadLists-English.pdf
-    observacao: Fonte oficial para elencos, posicao, data de nascimento, clube, altura, caps e gols por selecao.
-  balldontlie:
-    enabled: false
-    official: false
-    requires_api_key: true
-    api_key_env: BALLDONTLIE_API_KEY
-    role: enriquecimento_analitico
-    base_url: null
-  scores365:
-    enabled: true
-    official: false
-    requires_api_key: false
-    role: validacao_estatisticas_por_partida
-    base_url: https://webws.365scores.com/web
-    competition_id: 5930
-    endpoints:
-      games_by_date: /games/
-      game_detail: /game/
-    observacao: API interna do 365scores.com. Fornece stats por jogador (fouls, shots, passes, tackles, xG) agregaveis por equipe. Sem chave, sem autenticacao. Usar com sleep_seconds >= 0.2.
-
-  api_football:
-    enabled: false
-    official: false
-    requires_api_key: true
-    api_key_env: API_FOOTBALL_KEY
-    role: enriquecimento_individual_gratuito_limitado
-    base_url: https://v3.football.api-sports.io
+    role: fonte_unica_oficial
     competition:
-      league: 1
-      season: 2026
+      id_competition: 17
+      id_season: 285023
+    base_urls:
+      data_api_v3: https://api.fifa.com/api/v3
+      data_hub: https://fdh-api.fifa.com/v1
     endpoints:
-      coverage: /leagues?id=1&season=2026
-      fixtures: /fixtures?league=1&season=2026
-      teams: /teams?league=1&season=2026
-      players: /players?league=1&season=2026&page={page}
-      fixture_player_stats: /fixtures/players?fixture={fixture_id}
-      injuries: /injuries?league=1&season=2026
-      top_scorers: /players/topscorers?league=1&season=2026
-      top_assists: /players/topassists?league=1&season=2026
-      top_yellow_cards: /players/topyellowcards?league=1&season=2026
-      top_red_cards: /players/topredcards?league=1&season=2026
-    limits:
-      free_requests_per_day: 100
-    observacao: Plano gratuito com chave e limite diario; usar cache forte, paginacao e coleta incremental.
-  football_data:
-    enabled: false
-    official: false
-    requires_api_key: true
-    api_key_env: FOOTBALL_DATA_API_KEY
-    role: validacao_secundaria
-    base_url: null
+      calendar_matches: /calendar/matches?idCompetition=17&idSeason=285023&language=en&count=200
+      match_live: /live/football/17/285023/{idStage}/{idMatch}?language=en
+      match_timeline: /timelines/17/285023/{idStage}/{idMatch}?language=en
+      match_team_stats: /stats/match/{IdIFES}/teams.json
+      match_player_stats: /stats/match/{IdIFES}/players.json
+      power_ranking_season: /powerranking/season/285023.json
+    observacao: >-
+      APIs públicas sem chave e sem autenticação; basta User-Agent de browser
+      (configurado em fifa/client.py). IdIFES vem em Properties.IdIFES do
+      calendar/matches.

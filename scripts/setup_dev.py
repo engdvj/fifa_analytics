@@ -42,10 +42,10 @@ try:
     print(f"✓ Matches: {result}")
 
     # 4. Usuário de teste
-    existing = db.scalar(select(User).where(User.email == "teste@copa2026.dev"))
+    existing = db.scalar(select(User).where(User.username == "teste"))
     if existing is None:
         user = User(
-            email="teste@copa2026.dev",
+            username="teste",
             name="Davi (teste)",
             password_hash=hash_password("copa2026"),
         )
@@ -62,11 +62,11 @@ try:
             db.add(PoolMember(pool_id=pool.id, user_id=user.id))
 
         db.commit()
-        print(f"✓ Usuário de teste criado: {user.email} / senha: copa2026")
+        print(f"✓ Usuário de teste criado: {user.username} / senha: copa2026")
         print(f"  Pool criado: Bolão Teste (id={pool.id if rule else 'sem regra'})")
     else:
         db.commit()
-        print(f"✓ Usuário de teste já existe: {existing.email}")
+        print(f"✓ Usuário de teste já existe: {existing.username}")
 
     # Resumo
     from sqlalchemy import func, select as sel
