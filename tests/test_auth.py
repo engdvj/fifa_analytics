@@ -44,7 +44,7 @@ def client(db_session):
 def test_register_e_login(client):
     r = client.post(
         "/auth/register",
-        json={"email": "a@test.com", "name": "Ana", "password": "senha123"},
+        json={"username": "ana", "name": "Ana", "password": "senha123"},
     )
     assert r.status_code == 201
     token = r.json()["access_token"]
@@ -53,15 +53,15 @@ def test_register_e_login(client):
     # /me com token válido
     me = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert me.status_code == 200
-    assert me.json()["email"] == "a@test.com"
+    assert me.json()["username"] == "ana"
 
 
 def test_login_retorna_token(client):
     client.post(
         "/auth/register",
-        json={"email": "b@test.com", "name": "Bob", "password": "abc"},
+        json={"username": "bob", "name": "Bob", "password": "abc"},
     )
-    r = client.post("/auth/login", data={"username": "b@test.com", "password": "abc"})
+    r = client.post("/auth/login", data={"username": "bob", "password": "abc"})
     assert r.status_code == 200
     assert "access_token" in r.json()
 
@@ -69,20 +69,20 @@ def test_login_retorna_token(client):
 def test_login_senha_errada(client):
     client.post(
         "/auth/register",
-        json={"email": "c@test.com", "name": "Carla", "password": "certa"},
+        json={"username": "carla", "name": "Carla", "password": "certa"},
     )
-    r = client.post("/auth/login", data={"username": "c@test.com", "password": "errada"})
+    r = client.post("/auth/login", data={"username": "carla", "password": "errada"})
     assert r.status_code == 401
 
 
-def test_email_duplicado(client):
+def test_usuario_duplicado(client):
     client.post(
         "/auth/register",
-        json={"email": "d@test.com", "name": "D", "password": "x"},
+        json={"username": "dup", "name": "D", "password": "x"},
     )
     r = client.post(
         "/auth/register",
-        json={"email": "d@test.com", "name": "D2", "password": "y"},
+        json={"username": "dup", "name": "D2", "password": "y"},
     )
     assert r.status_code == 400
 

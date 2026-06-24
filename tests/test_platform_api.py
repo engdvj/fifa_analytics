@@ -49,6 +49,18 @@ def client(db_session):
     app.dependency_overrides.clear()
 
 
+def _auth_headers(client, username="davi", name="Davi", password="senha123"):
+    """Registra um usuário e devolve o header Authorization Bearer.
+
+    A API migrou para autenticação JWT por usuário: criar bolão / palpite deriva
+    o usuário do token (não mais de owner_id/user_id no corpo).
+    """
+    tok = client.post(
+        "/auth/register", json={"username": username, "name": name, "password": password}
+    ).json()["access_token"]
+    return {"Authorization": f"Bearer {tok}"}
+
+
 def _matches_parquet(path):
     df = pd.DataFrame(
         [
@@ -81,15 +93,16 @@ def test_fluxo_bolao_e_pontuacao(client, tmp_path):
     load_matches(s, _matches_parquet(tmp_path / "dim_match.parquet"))
     s.close()
 
-    rules = {r["name"]: r for r in client.get("/pools/rules").json()}
-    u = client.post("/users", json={"email": "a@a.com", "name": "Davi"}).json()
+    h = _auth_headers(client, username="davi", name="Davi")
+    rules = {r["name"]: r for r in client.get("/pools/rules", headers=h).json()}
     pool = client.post(
-        "/pools", json={"name": "P", "owner_id": u["id"], "rule_id": rules["Clássico"]["id"]}
+        "/pools", json={"name": "P", "rule_id": rules["Clássico"]["id"]}, headers=h
     ).json()
 
     pred = client.post(
         f"/pools/{pool['id']}/predictions",
-        json={"user_id": u["id"], "match_id": "copa_2026_jogo_001", "home_score": 2, "away_score": 0},
+        json={"match_id": "copa_2026_jogo_001", "home_score": 2, "away_score": 0},
+        headers=h,
     )
     assert pred.status_code == 201
 
@@ -102,7 +115,7 @@ def test_fluxo_bolao_e_pontuacao(client, tmp_path):
     s.commit()
     s.close()
 
-    ranking = client.get(f"/pools/{pool['id']}/ranking").json()
+    ranking = client.get(f"/pools/{pool['id']}/ranking").json()["ranking"]
     assert ranking[0]["total_points"] == 5  # placar exato na regra Clássico
 
 
@@ -114,13 +127,14 @@ def test_palpite_em_jogo_finalizado_bloqueado(client, tmp_path):
     s.commit()
     s.close()
 
-    rules = {r["name"]: r for r in client.get("/pools/rules").json()}
-    u = client.post("/users", json={"email": "b@b.com", "name": "Ana"}).json()
+    h = _auth_headers(client, username="ana", name="Ana")
+    rules = {r["name"]: r for r in client.get("/pools/rules", headers=h).json()}
     pool = client.post(
-        "/pools", json={"name": "P2", "owner_id": u["id"], "rule_id": rules["Clássico"]["id"]}
+        "/pools", json={"name": "P2", "rule_id": rules["Clássico"]["id"]}, headers=h
     ).json()
     r = client.post(
         f"/pools/{pool['id']}/predictions",
-        json={"user_id": u["id"], "match_id": "copa_2026_jogo_001", "home_score": 1, "away_score": 1},
+        json={"match_id": "copa_2026_jogo_001", "home_score": 1, "away_score": 1},
+        headers=h,
     )
     assert r.status_code == 400

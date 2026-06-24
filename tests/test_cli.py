@@ -9,22 +9,23 @@ def test_parser_requires_subcommand():
         parser.parse_args([])
 
 
-def test_parser_amostra_default_match_id():
+def test_parser_fifa_coletar_default():
     parser = build_parser()
-    args = parser.parse_args(["amostra"])
-    assert args.match_id == "mexico_africa_do_sul_2026_06_11"
+    args = parser.parse_args(["fifa-coletar"])
+    assert args.command == "fifa-coletar"
+    assert args.todos is False
 
 
-def test_parser_amostra_custom_match_id():
+def test_parser_fifa_coletar_todos():
     parser = build_parser()
-    args = parser.parse_args(["amostra", "--match-id", "copa_2026_jogo_001"])
-    assert args.match_id == "copa_2026_jogo_001"
+    args = parser.parse_args(["fifa-coletar", "--todos"])
+    assert args.todos is True
 
 
 def test_parser_relatorios_basicos_defaults():
     parser = build_parser()
     args = parser.parse_args(["relatorios-basicos"])
-    assert args.fonte == "canonical"
+    assert args.fonte == "fifa"
     assert args.status == "finalizado"
 
 
@@ -34,18 +35,16 @@ def test_parser_uses_pipeline_yaml_defaults(monkeypatch):
     monkeypatch.setattr(
         cli,
         "load_config",
-        lambda _name: {"defaults": {"source": "wikipedia", "match_status_filter": "todos"}},
+        lambda _name: {"defaults": {"source": "fifa", "match_status_filter": "todos"}},
     )
 
     parser = cli.build_parser()
     reports = parser.parse_args(["relatorios-basicos"])
     status = parser.parse_args(["status-torneio"])
-    update = parser.parse_args(["atualizar"])
 
-    assert reports.fonte == "wikipedia"
+    assert reports.fonte == "fifa"
     assert reports.status == "todos"
-    assert status.source == "wikipedia"
-    assert update.status == "todos"
+    assert status.source == "fifa"
 
 
 def test_parser_relatorios_basicos_custom_status():
@@ -57,31 +56,23 @@ def test_parser_relatorios_basicos_custom_status():
 def test_parser_status_torneio_default_source():
     parser = build_parser()
     args = parser.parse_args(["status-torneio"])
-    assert args.source == "canonical"
+    assert args.source == "fifa"
 
 
-def test_parser_atualizar_flags():
+def test_parser_status_torneio_alias():
     parser = build_parser()
-    args = parser.parse_args(["atualizar", "--sem-worldcup2026", "--sem-espn", "--sem-365scores"])
-    assert args.sem_worldcup2026 is True
-    assert args.sem_espn is True
-    assert args.sem_365scores is True
+    args = parser.parse_args(["tournament-status"])
+    assert args.command == "tournament-status"
 
 
-def test_parser_atualizar_default_status():
+def test_parser_remontar_relatorio_requires_match_id():
     parser = build_parser()
-    args = parser.parse_args(["atualizar"])
-    assert args.status == "finalizado"
+    args = parser.parse_args(["remontar-relatorio", "copa_2026_jogo_010"])
+    assert args.match_id == "copa_2026_jogo_010"
 
 
-def test_parser_wikipedia_alias():
+def test_parser_rejects_legacy_commands():
     parser = build_parser()
-    args = parser.parse_args(["wiki"])
-    assert args.command == "wiki"
-    assert args.match_id is None
-
-
-def test_parser_worldcup2026_alias():
-    parser = build_parser()
-    args = parser.parse_args(["operacional"])
-    assert args.command == "operacional"
+    for legacy in ("wikipedia", "worldcup2026", "espn", "365scores", "atualizar", "indice-canonico", "amostra"):
+        with pytest.raises(SystemExit):
+            parser.parse_args([legacy])

@@ -11,10 +11,13 @@ def test_dashboard_embedded_javascript_node_check_and_stub_dom(tmp_path):
     if node is None:
         pytest.skip("node nao esta disponivel")
 
-    html_path = "reports/tournament/ranking_race.html"
-    try:
-        html = open(html_path, encoding="utf-8").read()
-    except FileNotFoundError:
+    for html_path in ("frontend/public/ranking_race.html", "reports/tournament/ranking_race.html"):
+        try:
+            html = open(html_path, encoding="utf-8").read()
+            break
+        except FileNotFoundError:
+            continue
+    else:
         pytest.skip("dashboard ainda nao foi gerado")
 
     match = re.search(r"<script>(.*?)</script>", html, re.S)
@@ -113,8 +116,9 @@ comparedTeams.forEach(team => {
 
 currentJogo = lastJogo();
 const comparedLatest = trajectorySeriesByTeam(["África do Sul", "Alemanha"], "score_geral", "desc");
-assert.strictEqual(comparedLatest["África do Sul"].length, 1);
-assert.strictEqual(comparedLatest["Alemanha"].length, 1);
+// ambas já disputaram 2 jogos → série alinhada tem um ponto por ordem de jogo (1 e 2)
+assert.strictEqual(comparedLatest["África do Sul"].length, 2);
+assert.strictEqual(comparedLatest["Alemanha"].length, 2);
 assert.strictEqual(comparedLatest["África do Sul"][0].jogo, 9);
 
 currentJogo = 27;
@@ -147,47 +151,63 @@ assert(nodes.teamsGrid.innerHTML.includes("Noruega"));
 assert(nodes.teamsGrid.innerHTML.includes("Alemanha"));
 assert(!nodes.teamsGrid.innerHTML.includes("Argentina"));
 
-const australiaGame = TEAMS_DETAIL["Austrália"].jogos.find(g => g.match_id === "copa_2026_jogo_006");
-const aiden = australiaGame.pitch.find(p => p.name === "Aiden O'Neill");
-const aidenCard = _playerCardHtml(aiden);
-assert(aidenCard.includes("Criação"));
-assert(aidenCard.includes("xA"));
-assert(aidenCard.includes("Passes para chute"));
-assert(aidenCard.includes("Controle"));
-assert(aidenCard.includes("Desarmes"));
-assert(aidenCard.includes("Finalização"));
-assert(aidenCard.includes("Disciplina"));
+// Card do jogador no CAMPO (_playerCardHtml): seleciona por papel da posição
+// dinamicamente (sem nomes fixos, que variam conforme os jogos processados).
+let anyMid = null, anyGk = null;
+for (const team of Object.keys(TEAMS_DETAIL)) {
+  for (const g of (TEAMS_DETAIL[team].jogos || [])) {
+    for (const p of (g.pitch || [])) {
+      const role = _playerRoleFromPos(p.pos_code || p.pos);
+      if (!anyMid && role === "meio" && p.stats) anyMid = p;
+      if (!anyGk && role === "goleiro" && p.stats) anyGk = p;
+    }
+  }
+}
+assert(anyMid, "esperava um meio com stats no campo");
+const midCard = _playerCardHtml(anyMid);
+assert(midCard.includes("Criação"));
+assert(midCard.includes("xA"));
+assert(midCard.includes("Passes p/ chute"));
+assert(midCard.includes("Controle"));
+assert(midCard.includes("Desarmes"));
+assert(midCard.includes("Finalização"));
+assert(midCard.includes("Disciplina"));
 
-const germanyGame = TEAMS_DETAIL["Alemanha"].jogos.find(g => (g.pitch || []).some(p => p.name === "Manuel Neuer"));
-assert(germanyGame);
-const neuer = germanyGame.pitch.find(p => p.name === "Manuel Neuer");
-const neuerCard = _playerCardHtml(neuer);
-assert(neuerCard.includes("Ações do goleiro"));
-assert(neuerCard.includes("xGP"));
-assert(neuerCard.includes("Pênaltis defendidos"));
-assert(neuerCard.includes("Bolas altas seguradas"));
-assert(neuerCard.includes("Bolas socadas"));
-assert(neuerCard.includes("Disciplina"));
-assert(!neuerCard.includes("Ataque"));
-assert(!neuerCard.includes("Criação"));
+assert(anyGk, "esperava um goleiro com stats no campo");
+const gkCard = _playerCardHtml(anyGk);
+assert(gkCard.includes("Ações do goleiro"));
+assert(gkCard.includes("xGP"));
+assert(gkCard.includes("Pênaltis def."));
+assert(gkCard.includes("Bolas altas"));
+assert(gkCard.includes("Socos"));
+assert(gkCard.includes("Disciplina"));
+assert(!gkCard.includes("Finalização"));
+assert(!gkCard.includes("Criação"));
 
-const vozinhaRoster = TEAMS_DETAIL["Cabo Verde"].players.find(p => p.name === "Vozinha");
-assert(vozinhaRoster);
-const vozinhaRosterCard = _rosterPlayerCardHtml(vozinhaRoster);
-assert(vozinhaRosterCard.includes("Ações do goleiro"));
-assert(vozinhaRosterCard.includes("xGP"));
-assert(vozinhaRosterCard.includes("Bolas altas seguradas"));
-assert(vozinhaRosterCard.includes("Bolas socadas"));
-assert(vozinhaRosterCard.includes("Disciplina"));
-assert(!vozinhaRosterCard.includes("Ataque"));
-assert(!vozinhaRosterCard.includes("Avançadas"));
+// Card do jogador no ELENCO (_rosterPlayerCardHtml): goleiro e defensor por grupo.
+function _findRoster(group) {
+  for (const team of Object.keys(TEAMS_DETAIL)) {
+    const pl = (TEAMS_DETAIL[team].players || []).find(p => p.pos_group === group);
+    if (pl) { modalTeam = team; return pl; }
+  }
+  return null;
+}
+const gkRoster = _findRoster("Goleiros");
+assert(gkRoster, "esperava um goleiro no elenco");
+const gkRosterCard = _rosterPlayerCardHtml(gkRoster);
+assert(gkRosterCard.includes("Ações do goleiro"));
+assert(gkRosterCard.includes("xGP"));
+assert(gkRosterCard.includes("Bolas altas"));
+assert(gkRosterCard.includes("Socos"));
+assert(gkRosterCard.includes("Disciplina"));
+assert(!gkRosterCard.includes("Finalização"));
 
-const richieRoster = TEAMS_DETAIL["Canadá"].players.find(p => p.name === "Richie Laryea");
-assert(richieRoster);
-const richieRosterCard = _rosterPlayerCardHtml(richieRoster);
-assert(richieRosterCard.includes("Defesa"));
-assert(richieRosterCard.includes("Cobertura"));
-assert(richieRosterCard.includes("Disciplina"));
+const defRoster = _findRoster("Defensores");
+assert(defRoster, "esperava um defensor no elenco");
+const defRosterCard = _rosterPlayerCardHtml(defRoster);
+assert(defRosterCard.includes("Defesa"));
+assert(defRosterCard.includes("Cobertura"));
+assert(defRosterCard.includes("Disciplina"));
 """
     js_path = tmp_path / "dashboard.js"
     js_path.write_text(stub + "\n" + match.group(1) + "\n" + assertions, encoding="utf-8")
@@ -197,10 +217,13 @@ assert(richieRosterCard.includes("Disciplina"));
 
 
 def test_dashboard_team_player_counts_follow_canonical_roster():
-    html_path = "reports/tournament/ranking_race.html"
-    try:
-        html = open(html_path, encoding="utf-8").read()
-    except FileNotFoundError:
+    for html_path in ("frontend/public/ranking_race.html", "reports/tournament/ranking_race.html"):
+        try:
+            html = open(html_path, encoding="utf-8").read()
+            break
+        except FileNotFoundError:
+            continue
+    else:
         pytest.skip("dashboard ainda nao foi gerado")
 
     teams_match = re.search(r"const TEAMS_DETAIL = (.*?);\n", html)
