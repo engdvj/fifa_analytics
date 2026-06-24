@@ -45,7 +45,6 @@ METRICS_MAP: dict[str, str] = {
     "Possession":                               "posse",          # decimal 0-1
     "PitchControl":                             "pitch_control",  # %
     "FinalThirdPitchControl":                   "final_third_control",
-    "NumberOfPossessionSequences":              "sequencias_posse",
     # Passe / Progressão
     "Passes":                                   "passes",
     "PassesCompleted":                          "passes_certos",
@@ -109,7 +108,6 @@ METRICS_MAP: dict[str, str] = {
     # Outros
     "BallRecoveryTime":                         "tempo_recuperacao_bola",
     "TakeOnsCompleted":                         "dribles_certos",
-    "NumberOfShotEndingSequences":              "sequencias_finalizacao",
     "CleanSheets":                              "jogos_sem_sofrer_gol",
     "GoalsFromDirectFreeKicks":                 "gols_de_falta",
     "GoalsInsideThePenaltyArea":                "gols_dentro_area",
