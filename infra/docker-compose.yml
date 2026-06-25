@@ -1,14 +1,15 @@
-# Stack local da plataforma (e base do deploy na VM Oracle).
-# Sobe Postgres + API. O frontend (web/) entra como serviço numa fase futura.
+# Stack da plataforma (local e deploy na VM Oracle): Postgres + API + Frontend.
+# Build na própria máquina (sem registry). Em produção, rode com:
+#   docker compose --env-file infra/.env -f infra/docker-compose.yml up -d --build
+# As variáveis (senhas, JWT, URLs) vêm de infra/.env (ver infra/DEPLOY.md).
 services:
   db:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-fifa}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fifa}
       POSTGRES_DB: ${POSTGRES_DB:-fifa}
-    ports:
-      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -21,8 +22,14 @@ services:
     build:
       context: ..
       dockerfile: api/Dockerfile
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-fifa}:${POSTGRES_PASSWORD:-fifa}@db:5432/${POSTGRES_DB:-fifa}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?defina JWT_SECRET_KEY em infra/.env}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_NAME: ${ADMIN_NAME:-Admin}
     ports:
       - "8000:8000"
     volumes:
@@ -31,6 +38,19 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
+  web:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        # embutido no bundle do browser — aponte para a API pública da VM.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
 
 volumes:
   pgdata:

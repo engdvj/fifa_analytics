@@ -1,0 +1,15 @@
+# Contexto de build da API (context = raiz do repo). Reduz o que vai pro daemon.
+.git
+.venv
+**/__pycache__
+**/*.pyc
+node_modules
+frontend/node_modules
+frontend/.next
+data
+reports
+outputs
+logs
+*.log
+dev.db
+.tmp_pytest_codex_card

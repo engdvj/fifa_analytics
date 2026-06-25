@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -39,9 +40,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="FIFA Bolão Analytics", version="0.1.0", lifespan=lifespan)
 
+# Origens permitidas via env (CORS_ORIGINS, separadas por vírgula). Em produção,
+# aponte para a origem do frontend (ex.: http://<ip-da-vm>:3000). Default = dev.
+_cors_origins = [
+    o.strip()
+    for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
