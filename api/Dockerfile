@@ -10,6 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY api ./api
+# config/ é lido em runtime: teams_info.yaml (aba Resumo) e teams_mapping.yaml
+# (traduzir_selecao, usado no filtro ?team= dos snapshots e na coleta agendada).
+# Sem ele a API quebra (FileNotFoundError → 500) no elenco e devolve {} no
+# teams-info ("sem dados" / "ainda não jogou").
+COPY config ./config
 COPY alembic.ini ./
 COPY alembic ./alembic
 

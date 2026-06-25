@@ -1,4 +1,6 @@
 import json
+import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -42,9 +44,32 @@ def read_yaml(path: str | Path) -> Any:
 
 
 def write_dataframe(path: str | Path, dataframe: pd.DataFrame) -> Path:
+    """Grava o DataFrame em parquet de forma ATÔMICA.
+
+    Escreve num arquivo temporário no mesmo diretório e troca por `os.replace`
+    (atômico no POSIX e no Windows quando na mesma partição). Sem isso, a coleta
+    agendada reescreve o parquet enquanto a API o lê — e um leitor pega o arquivo
+    truncado (parquet inválido → 500/404 → "elenco sem dados"). Com a troca
+    atômica o leitor sempre vê a versão antiga completa OU a nova completa.
+    """
     path = Path(path)
     ensure_dir(path.parent)
-    dataframe.to_parquet(path, index=False)
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    try:
+        dataframe.to_parquet(tmp, index=False)
+        # No Windows, os.replace falha se um leitor estiver com o destino aberto
+        # naquele instante. Tenta de novo algumas vezes antes de desistir.
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.1)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
     return path
 
 
