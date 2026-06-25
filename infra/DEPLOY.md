@@ -40,9 +40,9 @@ ADMIN_NAME=Admin
 NEXT_PUBLIC_API_URL=http://<IP-DA-VM>:8000
 CORS_ORIGINS=http://<IP-DA-VM>:3000
 # Coleta automática (dirigida pelo calendário oficial). Checa o calendário a
-# cada AUTO_COLLECT_MINUTES e, ao ver um jogo virar "finalizado", espera
-# AUTO_COLLECT_GRACE_MINUTES (stats avançadas publicam depois) e então coleta.
-# 0 = desligado. Default do compose: 15 / 10.
+# cada AUTO_COLLECT_MINUTES e, ao ver um jogo virar "finalizado", sonda as stats
+# avançadas e coleta assim que publicarem. AUTO_COLLECT_GRACE_MINUTES é só o TETO
+# de espera (se a FIFA demorar). 0 = desligado. Default do compose: 15 / 10.
 AUTO_COLLECT_MINUTES=15
 AUTO_COLLECT_GRACE_MINUTES=10
 EOF

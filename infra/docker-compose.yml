@@ -34,7 +34,8 @@ services:
       # Coleta automática dirigida pelo calendário: checa o calendário oficial a
       # cada N minutos e só coleta quando um jogo vira "finalizado" (0 = desligado).
       AUTO_COLLECT_MINUTES: ${AUTO_COLLECT_MINUTES:-15}
-      # Folga após detectar fim de jogo, p/ as stats avançadas (fdh) publicarem.
+      # Teto de espera pelas stats avançadas (fdh): coleta assim que publicarem;
+      # só espera até este limite se a FIFA demorar.
       AUTO_COLLECT_GRACE_MINUTES: ${AUTO_COLLECT_GRACE_MINUTES:-10}
     volumes:
       # gold parquet é lido pela API (stats) e pelo loader.

@@ -97,7 +97,7 @@ function AutoCollectCard() {
   const waiting = !!st.waiting_until && st.pending.length > 0;
   const accent = on ? "#22c55e" : "#8b949e";
   const label = on
-    ? `Ligada · checa a cada ${st.interval_minutes ?? "?"} min (folga ${st.grace_minutes ?? "?"} min)`
+    ? `Ligada · checa a cada ${st.interval_minutes ?? "?"} min (espera até ${st.grace_minutes ?? "?"} min p/ stats)`
     : "Desligada (AUTO_COLLECT_MINUTES=0)";
 
   const facts: [string, string][] = [
@@ -130,7 +130,7 @@ function AutoCollectCard() {
 
       {waiting && (
         <div style={{ marginTop: 12, padding: "9px 12px", borderRadius: 8, background: "rgba(234,179,8,0.1)", border: "1px solid rgba(234,179,8,0.35)", fontSize: "0.82rem", color: "#eab308", fontWeight: 600 }}>
-          Detectou {st.pending.length} jogo(s) finalizado(s) — aguardando a folga antes de coletar.
+          Detectou {st.pending.length} jogo(s) finalizado(s) — sondando as stats; coleta assim que publicarem.
         </div>
       )}
       {!on && (

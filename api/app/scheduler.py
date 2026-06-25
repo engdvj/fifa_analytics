@@ -2,17 +2,18 @@
 
 Em vez de rodar o pipeline cegamente a cada N minutos, o agendador faz um
 polling LEVE do calendário (uma única chamada HTTP) e só dispara a coleta
-pesada quando algum jogo VIRA "finalizado" na FIFA. Ao detectar, espera uma
-folga (`AUTO_COLLECT_GRACE_MINUTES`) — as estatísticas avançadas (fdh) publicam
-alguns minutos depois do status mudar — e então roda o MESMO fluxo do
-`POST /admin/collect` (pipeline FIFA → `load_matches` → recálculo de pontos).
+pesada quando algum jogo VIRA "finalizado" na FIFA. Ao detectar, SONDA se as
+estatísticas avançadas (fdh) do jogo já publicaram e coleta assim que estiverem
+prontas — sem espera fixa. A `AUTO_COLLECT_GRACE_MINUTES` é só o TETO: se a FIFA
+demorar a publicar as stats, coleta assim mesmo ao bater o teto. Aí roda o MESMO
+fluxo do `POST /admin/collect` (pipeline FIFA → `load_matches` → recálculo).
 
 A FIFA não "avisa" o fim do jogo, então isto continua sendo polling; o ganho é
 não martelar a coleta inteira à toa e reagir logo após cada jogo terminar.
 
 Env:
   AUTO_COLLECT_MINUTES        intervalo de checagem do calendário (0 = desligado)
-  AUTO_COLLECT_GRACE_MINUTES  espera após detectar fim de jogo (default 10)
+  AUTO_COLLECT_GRACE_MINUTES  TETO de espera pelas stats avançadas (default 10)
 """
 from __future__ import annotations
 
@@ -28,6 +29,8 @@ DEFAULT_GRACE_MINUTES = 10.0
 # Atraso até a PRIMEIRA checagem do calendário após subir (as seguintes respeitam
 # AUTO_COLLECT_MINUTES). Curto p/ o status popular e detectar jogos já encerrados.
 INITIAL_DELAY_SECONDS = 20.0
+# Intervalo de re-sondagem das stats avançadas enquanto se espera elas publicarem.
+READINESS_POLL_SECONDS = 60.0
 
 # Estado publicado para a página admin (GET /admin/auto-collect). Atualizado pela
 # thread; lido pelo request. dict simples (escritas atômicas em CPython) — não
@@ -67,15 +70,41 @@ def _env_minutes(name: str, default: float) -> float:
         return default
 
 
-def _finished_from_calendar() -> set[str]:
-    """Calendário oficial (chamada live) → match_id já finalizados."""
+def _finished_from_calendar() -> dict[str, str]:
+    """Calendário oficial (chamada live) → {match_id: id_ifes} dos finalizados.
+
+    O id_ifes é a chave do Data Hub (stats avançadas) e serve para sondar se os
+    dados do jogo já publicaram antes de coletar.
+    """
     from fifa_analytics.fifa import client, transforms
 
     results = client.fetch_calendar_matches()
     matches = transforms.normalize_matches(results)
     if matches.empty or "status" not in matches.columns:
-        return set()
-    return set(matches.loc[matches["status"] == "finalizado", "match_id"])
+        return {}
+    fin = matches.loc[matches["status"] == "finalizado"]
+    ifes_col = "id_ifes" if "id_ifes" in fin.columns else None
+    return {
+        str(r.match_id): (str(getattr(r, "id_ifes", "")) if ifes_col else "")
+        for r in fin.itertuples()
+    }
+
+
+def _stats_ready(id_ifes: str) -> bool:
+    """As stats avançadas (fdh) do jogo já publicaram? Sem id_ifes, não dá para
+    sondar — retorna True para não travar a coleta."""
+    if not id_ifes:
+        return True
+    from fifa_analytics.fifa import client, transforms
+
+    try:
+        payload = client.fetch_match_team_stats(id_ifes)
+        df = transforms.normalize_match_team_stats("probe", id_ifes, payload)
+    except client.FifaSourceError:
+        return False
+    except Exception:  # noqa: BLE001 — payload inesperado conta como "ainda não"
+        return False
+    return not df.empty
 
 
 def _finished_from_gold() -> set[str]:
@@ -131,7 +160,7 @@ def _loop(interval_seconds: float, grace_seconds: float) -> None:
         time.sleep(INITIAL_DELAY_SECONDS if first else interval_seconds)
         first = False
         try:
-            current = _finished_from_calendar()
+            current = _finished_from_calendar()  # {match_id: id_ifes}
             _status["last_check_at"] = _utcnow_iso()
             _status["last_finished_count"] = len(current)
         except Exception:  # noqa: BLE001 — erro de rede não derruba a thread
@@ -139,20 +168,30 @@ def _loop(interval_seconds: float, grace_seconds: float) -> None:
             _status["last_error"] = f"calendário: {_utcnow_iso()}"
             continue
 
-        novos = current - seen
+        current_ids = set(current)
+        novos = current_ids - seen
         if not novos:
             continue
 
-        log.info(
-            "auto-collect: %d novo(s) finalizado(s) %s — aguardando %.0f min antes de coletar",
-            len(novos), sorted(novos), grace_seconds / 60,
-        )
+        # Espera ADAPTATIVA: não trava 10 min à toa. Coleta assim que as stats
+        # avançadas (fdh) do(s) jogo(s) novo(s) estiverem disponíveis; a folga
+        # (grace) vira apenas o TETO de espera caso a FIFA demore a publicar.
+        log.info("auto-collect: %d novo(s) finalizado(s) %s — sondando stats", len(novos), sorted(novos))
         _status["pending"] = sorted(novos)
-        _status["waiting_until"] = _utcnow_iso()  # detectado em; folga começa agora
-        time.sleep(grace_seconds)
+        _status["waiting_until"] = _utcnow_iso()
+        deadline = time.monotonic() + grace_seconds
+        while True:
+            if all(_stats_ready(current.get(mid, "")) for mid in novos):
+                log.info("auto-collect: stats prontas — coletando")
+                break
+            if time.monotonic() >= deadline:
+                log.info("auto-collect: stats não publicaram em %.0f min — coletando assim mesmo", grace_seconds / 60)
+                break
+            time.sleep(READINESS_POLL_SECONDS)
+
         try:
             _collect_now()
-            seen = current  # só marca como visto após coletar com sucesso
+            seen = current_ids  # só marca como visto após coletar com sucesso
             _status["last_collect_at"] = _utcnow_iso()
             _status["last_collect_ok"] = True
             _status["last_error"] = None
