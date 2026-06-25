@@ -20,10 +20,37 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime, timezone
 
 log = logging.getLogger("auto_collect")
 
 DEFAULT_GRACE_MINUTES = 10.0
+
+# Estado publicado para a página admin (GET /admin/auto-collect). Atualizado pela
+# thread; lido pelo request. dict simples (escritas atômicas em CPython) — não
+# precisa de lock para este uso.
+_status: dict = {
+    "enabled": False,
+    "interval_minutes": None,
+    "grace_minutes": None,
+    "started_at": None,
+    "last_check_at": None,
+    "last_finished_count": None,
+    "last_collect_at": None,
+    "last_collect_ok": None,
+    "waiting_until": None,
+    "pending": [],
+    "last_error": None,
+}
+
+
+def get_status() -> dict:
+    """Cópia do estado atual da coleta automática (para o endpoint admin)."""
+    return dict(_status)
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _env_minutes(name: str, default: float) -> float:
@@ -92,12 +119,17 @@ def _loop(interval_seconds: float, grace_seconds: float) -> None:
         seen = set()
     log.info("auto-collect: semente com %d jogo(s) finalizado(s)", len(seen))
 
+    _status["last_finished_count"] = len(seen)
+
     while True:
         time.sleep(interval_seconds)
         try:
             current = _finished_from_calendar()
+            _status["last_check_at"] = _utcnow_iso()
+            _status["last_finished_count"] = len(current)
         except Exception:  # noqa: BLE001 — erro de rede não derruba a thread
             log.exception("auto-collect: falha ao ler o calendário")
+            _status["last_error"] = f"calendário: {_utcnow_iso()}"
             continue
 
         novos = current - seen
@@ -108,21 +140,39 @@ def _loop(interval_seconds: float, grace_seconds: float) -> None:
             "auto-collect: %d novo(s) finalizado(s) %s — aguardando %.0f min antes de coletar",
             len(novos), sorted(novos), grace_seconds / 60,
         )
+        _status["pending"] = sorted(novos)
+        _status["waiting_until"] = _utcnow_iso()  # detectado em; folga começa agora
         time.sleep(grace_seconds)
         try:
             _collect_now()
             seen = current  # só marca como visto após coletar com sucesso
+            _status["last_collect_at"] = _utcnow_iso()
+            _status["last_collect_ok"] = True
+            _status["last_error"] = None
             log.info("auto-collect: coleta concluída (%d finalizados no total)", len(seen))
         except Exception:  # noqa: BLE001 — mantém `seen` p/ tentar de novo no próximo ciclo
+            _status["last_collect_at"] = _utcnow_iso()
+            _status["last_collect_ok"] = False
+            _status["last_error"] = f"coleta: {_utcnow_iso()}"
             log.exception("auto-collect: falha na coleta; tenta de novo no próximo ciclo")
+        finally:
+            _status["pending"] = []
+            _status["waiting_until"] = None
 
 
 def start_auto_collect() -> threading.Thread | None:
     """Liga o agendador se AUTO_COLLECT_MINUTES > 0. Retorna a thread (ou None)."""
     minutes = _env_minutes("AUTO_COLLECT_MINUTES", 0.0)
     if minutes <= 0:
+        _status["enabled"] = False
         return None
     grace = max(0.0, _env_minutes("AUTO_COLLECT_GRACE_MINUTES", DEFAULT_GRACE_MINUTES))
+    _status.update(
+        enabled=True,
+        interval_minutes=minutes,
+        grace_minutes=grace,
+        started_at=_utcnow_iso(),
+    )
     thread = threading.Thread(
         target=_loop, args=(minutes * 60, grace * 60), name="auto-collect", daemon=True
     )

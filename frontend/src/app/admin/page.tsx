@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import useSWR from "swr";
-import { admin, type AdminJob } from "@/lib/api";
+import { admin, type AdminJob, type AutoCollectStatus } from "@/lib/api";
 import Pager from "@/components/ui/Pager";
 import UsersAdmin from "./UsersAdmin";
 import PoolsAdmin from "./PoolsAdmin";
@@ -85,6 +85,62 @@ function ActionCard({ icon, title, desc, onClick, busy, disabled, primary }: {
   );
 }
 
+// ── Status da coleta automática (scheduler dirigido pelo calendário) ──────────
+
+function AutoCollectCard() {
+  const { data: st } = useSWR<AutoCollectStatus>("admin/auto-collect", () => admin.autoCollect(), {
+    refreshInterval: 30000,
+  });
+  if (!st) return null;
+
+  const on = st.enabled;
+  const waiting = !!st.waiting_until && st.pending.length > 0;
+  const accent = on ? "#22c55e" : "#8b949e";
+  const label = on
+    ? `Ligada · checa a cada ${st.interval_minutes ?? "?"} min (folga ${st.grace_minutes ?? "?"} min)`
+    : "Desligada (AUTO_COLLECT_MINUTES=0)";
+
+  const facts: [string, string][] = [
+    ["Última checagem do calendário", fmt(st.last_check_at)],
+    ["Jogos finalizados vistos", st.last_finished_count != null ? String(st.last_finished_count) : "—"],
+    ["Última coleta automática", st.last_collect_at ? `${fmt(st.last_collect_at)}${st.last_collect_ok === false ? " · falhou" : ""}` : "—"],
+  ];
+
+  return (
+    <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 18px", marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: on ? 12 : 0, flexWrap: "wrap" }}>
+        <span style={{ fontWeight: 800, fontSize: "0.95rem" }}>Coleta automática</span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "2px 10px", borderRadius: 20, fontSize: "0.74rem", fontWeight: 700, color: accent, background: `${accent}22`, border: `1px solid ${accent}44` }}>
+          {on && <span style={{ width: 7, height: 7, borderRadius: "50%", background: accent, animation: "pulse 1.6s ease-in-out infinite" }} />}
+          {label}
+        </span>
+      </div>
+
+      {on && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10 }}>
+          {facts.map(([k, v]) => (
+            <div key={k}>
+              <div style={{ fontSize: "0.68rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.04em" }}>{k}</div>
+              <div style={{ fontSize: "0.88rem", fontWeight: 600, marginTop: 2 }}>{v}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {waiting && (
+        <div style={{ marginTop: 12, padding: "9px 12px", borderRadius: 8, background: "rgba(234,179,8,0.1)", border: "1px solid rgba(234,179,8,0.35)", fontSize: "0.82rem", color: "#eab308", fontWeight: 600 }}>
+          Detectou {st.pending.length} jogo(s) finalizado(s) — aguardando a folga antes de coletar.
+        </div>
+      )}
+      {!on && (
+        <p style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginTop: 8, marginBottom: 0 }}>
+          Sem gatilho automático. Defina <code>AUTO_COLLECT_MINUTES</code> no <code>infra/.env</code> da VM (ex.: 15) e suba a API de novo. Enquanto isso, use “Coletar dados”.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function CollectTab() {
   const [busy, setBusy] = useState<"collect" | "recalc" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -113,6 +169,8 @@ function CollectTab() {
         <ActionCard icon="↻" title="Recalcular" disabled={!!busy || running} busy={busy === "recalc"} onClick={() => trigger("recalc")}
           desc="Reprocessa os scores das seleções/jogadores e os pontos dos bolões com os dados já coletados." />
       </div>
+
+      <AutoCollectCard />
 
       {running && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 16px", borderRadius: 10, background: "rgba(88,166,255,0.1)", border: "1px solid rgba(88,166,255,0.35)", marginBottom: 16, fontSize: "0.85rem", color: "#58a6ff", fontWeight: 600 }}>

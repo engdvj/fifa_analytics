@@ -143,6 +143,14 @@ def trigger_recalc(
     return job
 
 
+@router.get("/auto-collect")
+def auto_collect_status(admin: User = Depends(require_admin)) -> dict:
+    """Estado da coleta automática dirigida pelo calendário (scheduler)."""
+    from api.app.scheduler import get_status
+
+    return get_status()
+
+
 @router.get("/jobs", response_model=list[JobOut])
 def list_jobs(
     admin: User = Depends(require_admin),

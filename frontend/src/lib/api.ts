@@ -158,9 +158,34 @@ export interface TeamInfo {
   curiosidade?: string;
 }
 
+// Achado de análise (fact_insights). A camada de inferência da plataforma —
+// restrita a admin. `evidencia` é o objeto com os números que sustentam o achado.
+export interface Insight {
+  snapshot: number;
+  match_id: string;
+  match_number: number | null;
+  escopo: string;
+  team: string;
+  adversario: string;
+  tipo_analise: string;
+  achado_key: string;
+  titulo: string;
+  detalhe: string;
+  direcao: "positivo" | "negativo" | "neutro";
+  severidade: "alta" | "media" | "baixa" | "info";
+  evidencia: Record<string, unknown>;
+}
+
 export const analytics = {
   matches: (status?: string) =>
     req<Match[]>(`/analytics/matches${status ? `?status=${status}` : ""}`),
+
+  insights: (params?: { tipo?: string; snapshot?: number; match_id?: string }) => {
+    const qs = new URLSearchParams(
+      Object.fromEntries(Object.entries(params ?? {}).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]))
+    ).toString();
+    return req<Insight[]>(`/analytics/insights${qs ? `?${qs}` : ""}`);
+  },
 
   teamSnapshots: (snapshot?: number) =>
     req<TeamSnapshot[]>(`/analytics/snapshots/teams${snapshot != null ? `?snapshot=${snapshot}` : ""}`),
@@ -459,11 +484,26 @@ export interface AdminJob {
   created_at: string;
 }
 
+export interface AutoCollectStatus {
+  enabled: boolean;
+  interval_minutes: number | null;
+  grace_minutes: number | null;
+  started_at: string | null;
+  last_check_at: string | null;
+  last_finished_count: number | null;
+  last_collect_at: string | null;
+  last_collect_ok: boolean | null;
+  waiting_until: string | null;
+  pending: string[];
+  last_error: string | null;
+}
+
 export const admin = {
   jobs: () => req<AdminJob[]>("/admin/jobs"),
   job: (id: number) => req<AdminJob>(`/admin/jobs/${id}`),
   collect: () => req<AdminJob>("/admin/collect", { method: "POST", body: "{}" }),
   recalc: () => req<AdminJob>("/admin/recalc", { method: "POST", body: "{}" }),
+  autoCollect: () => req<AutoCollectStatus>("/admin/auto-collect"),
 };
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
