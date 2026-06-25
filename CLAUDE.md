@@ -219,19 +219,38 @@ FastAPI + Postgres (SQLAlchemy + Alembic). Independente do pipeline — lê o go
 
 **Motor de pontuação:** `api/app/scoring/engine.py` — data-driven (interpreta `ScoringRule.spec`). Regras builtin seedadas: `Clássico` (exato 5/vencedor 3), `Detalhado` (exato 6/saldo 3/vencedor 2), `Soma de acertos`.
 
-**Docker:**
-```bash
-# Subir Postgres + API
-docker compose -f infra/docker-compose.yml up -d
+**Docker / produção:** `infra/docker-compose.yml` sobe a stack completa (Caddy + Postgres + API + Frontend) e é o que roda no deploy da VM — ver **CI/CD e Deploy** abaixo. Migrations rodam sozinhas no start da API (`alembic upgrade head` no CMD do `api/Dockerfile`).
 
-# Migrations
-alembic upgrade head
+**Variáveis de ambiente (`.env` local a partir de `.env.example`):**
+```
+DATABASE_URL=postgresql+psycopg2://fifa:fifa@localhost:5432/fifa   # ou sqlite:///./dev.db em dev
 ```
 
-**Variáveis de ambiente (`.env` a partir de `.env.example`):**
-```
-DATABASE_URL=postgresql+psycopg2://fifa:fifa@localhost:5432/fifa
-```
+## CI/CD e Deploy (produção)
+
+**Em produção numa VM Oracle** (Docker + git): `infra/docker-compose.yml` sobe **Caddy (HTTPS/Let's Encrypt) + Postgres + API + Frontend**.
+- Frontend: **https://fifa-analytics.davicjr.dev** · API: **https://api-fifa-analytics.davicjr.dev**
+- VM: usuário `davicjr`, repo em `/home/davicjr/apps/fifa_analytics`, IP `137.131.229.134`. DNS na Cloudflare (subdomínios em **"DNS only"/cinza** — proxied quebra o ACME do Caddy).
+
+**Pipeline (`.github/workflows/ci.yml`):**
+- Push/PR → **CI**: `backend` (pytest, SQLite via fixtures, sem Postgres) + `frontend` (`tsc --noEmit`; lint informativo, não bloqueia).
+- Push na **`main`** → job **`deploy`** (só após CI verde): SSH na VM → `git reset --hard origin/main` → `docker compose --env-file infra/.env -f infra/docker-compose.yml up -d --build`. Build na própria VM (sem registry).
+
+**Fluxo: trabalhe na branch de feature; faça merge na `main` para publicar** — todo push na `main` redeploya a VM sozinho.
+
+**Secrets do GitHub (Actions):** `VM_HOST`, `VM_USER`, `VM_SSH_KEY` (chave privada), `VM_APP_DIR`.
+
+**Vive só na VM (NÃO versionado):**
+- `infra/.env` — `POSTGRES_*`, `JWT_SECRET_KEY`, `ADMIN_USERNAME/PASSWORD`, `NEXT_PUBLIC_API_URL=https://api-fifa-analytics.davicjr.dev`, `CORS_ORIGINS=https://fifa-analytics.davicjr.dev`, `AUTO_COLLECT_MINUTES` (>0 liga a coleta automática; 0 desliga).
+- `data/gold/` — parquets (a API lê via volume `../data:/app/data`). Popule com `fifa-coletar` na VM ou copiando do dev.
+
+**Coleta automática:** `api/app/scheduler.py` (thread daemon, ligada no lifespan) roda o fluxo do `POST /admin/collect` (pipeline FIFA → `load_matches` → recálculo de pontos) a cada `AUTO_COLLECT_MINUTES` min. Polling — a FIFA não notifica fim de jogo.
+
+**Detalhes que importam:**
+- `NEXT_PUBLIC_API_URL` é **embutido no build** do frontend → trocar domínio exige rebuild (o deploy já faz `--build`).
+- CORS da API vem de `CORS_ORIGINS` (env) em `api/app/main.py`.
+- Só o Caddy expõe portas (80/443); API/Web ficam internos; Postgres não é exposto.
+- Palpite salvo é definitivo para o participante (`predictions.upsert` retorna 403 em update de não-admin); admin edita por `/pools/{id}/registro`.
 
 ## Dashboard HTML (`scripts/bar_chart_race.py`)
 
@@ -262,7 +281,6 @@ Gera `reports/tournament/ranking_race.html` — arquivo único autossuficiente (
 | `client.fetch_power_ranking_season()` + transform | idem | Média |
 | `client.fetch_season_players()` (1249 jogadores × 119 métricas) | idem | Média |
 | `client.fetch_season_team_stats(id_team)` por time (48 chamadas) | idem | Média |
-| CI (`.github/workflows/ci.yml`) com Postgres + pytest | nova | Alta |
 
 ### Feito nesta refundação (fonte única FIFA)
 
