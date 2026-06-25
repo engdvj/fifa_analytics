@@ -236,7 +236,7 @@ DATABASE_URL=postgresql+psycopg2://fifa:fifa@localhost:5432/fifa   # ou sqlite:/
 - Push/PR → **CI**: `backend` (pytest, SQLite via fixtures, sem Postgres) + `frontend` (`tsc --noEmit`; lint informativo, não bloqueia).
 - Push na **`main`** → job **`deploy`** (só após CI verde): SSH na VM → `git reset --hard origin/main` → `docker compose --env-file infra/.env -f infra/docker-compose.yml up -d --build`. Build na própria VM (sem registry).
 
-**Fluxo: trabalhe na branch de feature; faça merge na `main` para publicar** — todo push na `main` redeploya a VM sozinho.
+**Fluxo: commita direto na `main`** — não há branch de feature obrigatória. Todo push na `main` redeploya a VM sozinho (depois do CI ficar verde; um commit que quebra os testes não chega a fazer deploy).
 
 **Secrets do GitHub (Actions):** `VM_HOST`, `VM_USER`, `VM_SSH_KEY` (chave privada), `VM_APP_DIR`.
 
