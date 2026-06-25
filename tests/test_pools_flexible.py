@@ -127,6 +127,28 @@ def test_inline_spec_cria_regra(client):
     assert detail["rule"]["spec"] == {"exact_score": 10}
 
 
+def test_palpite_salvo_so_admin_altera(client, db_session):
+    _seed_matches(client)
+    h = _headers(client, "ze", "Zé")
+    rules = {r["name"]: r for r in client.get("/pools/rules", headers=h).json()}
+    pool = client.post(
+        "/pools",
+        json={"name": "Lock", "rule_id": rules["Clássico"]["id"], "scope": {"type": "all"}},
+        headers=h,
+    ).json()
+    body = {"match_id": "copa_2026_jogo_001", "home_score": 1, "away_score": 0}
+    assert client.post(f"/pools/{pool['id']}/predictions", json=body, headers=h).status_code == 201
+    # participante comum não pode alterar depois de salvo
+    body2 = {"match_id": "copa_2026_jogo_001", "home_score": 3, "away_score": 3}
+    assert client.post(f"/pools/{pool['id']}/predictions", json=body2, headers=h).status_code == 403
+    # admin consegue alterar
+    s = db_session()
+    s.scalar(select(User).where(User.username == "ze")).is_admin = True
+    s.commit()
+    s.close()
+    assert client.post(f"/pools/{pool['id']}/predictions", json=body2, headers=h).status_code == 201
+
+
 def test_inline_spec_invalido_400(client):
     h = _headers(client)
     r = client.post(

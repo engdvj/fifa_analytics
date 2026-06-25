@@ -92,6 +92,9 @@ function MatchCard({ m, onSave, saving, index }: { m: PoolMatch; onSave: (id: st
   const outcome: Outcome = !finished || !hasResult ? "pending"
     : !hasPred ? "nopred" : exact ? "exact" : (pts ?? 0) > 0 ? "partial" : "miss";
   const accent = OUTCOME_COLOR[outcome];
+  // Palpite salvo é definitivo: só o admin pode alterar depois.
+  const { user } = useAuth();
+  const locked = playable && hasPred && !user?.is_admin;
 
   async function handleSave() {
     const h = parseInt(home), a = parseInt(away);
@@ -125,9 +128,9 @@ function MatchCard({ m, onSave, saving, index }: { m: PoolMatch; onSave: (id: st
         <div style={{ flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", minWidth: 78 }}>
           {playable ? (
             <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-              <input type="number" min={0} max={99} value={home} onChange={e => { setHome(e.target.value); setDirty(true); }} style={inp} />
+              <input type="number" min={0} max={99} value={home} disabled={locked} title={locked ? "Palpite já salvo — só o admin altera" : undefined} onChange={e => { setHome(e.target.value); setDirty(true); }} style={{ ...inp, opacity: locked ? 0.65 : 1, cursor: locked ? "not-allowed" : "text" }} />
               <span style={{ color: "var(--text-muted)", fontWeight: 700 }}>×</span>
-              <input type="number" min={0} max={99} value={away} onChange={e => { setAway(e.target.value); setDirty(true); }} style={inp} />
+              <input type="number" min={0} max={99} value={away} disabled={locked} title={locked ? "Palpite já salvo — só o admin altera" : undefined} onChange={e => { setAway(e.target.value); setDirty(true); }} style={{ ...inp, opacity: locked ? 0.65 : 1, cursor: locked ? "not-allowed" : "text" }} />
             </div>
           ) : (
             <span style={{ fontSize: "1.15rem", fontWeight: 800, color: "var(--text)", whiteSpace: "nowrap" }}>{hasResult ? `${m.home_score} – ${m.away_score}` : "—"}</span>
@@ -140,8 +143,8 @@ function MatchCard({ m, onSave, saving, index }: { m: PoolMatch; onSave: (id: st
       </div>
       <div style={{ width: 118, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
         {playable ? (
-          <button disabled={saving || (!dirty && hasPred)} onClick={handleSave} style={{ ...btn, padding: "6px 14px", fontSize: "0.78rem", background: dirty || !hasPred ? "var(--accent)" : "var(--surface2)", color: dirty || !hasPred ? "#0d1117" : "var(--text-muted)", cursor: saving || (!dirty && hasPred) ? "default" : "pointer", opacity: saving ? 0.6 : 1, transition: "background .15s" }}>
-            {saving ? "…" : hasPred && !dirty ? "Salvo ✓" : hasPred ? "Atualizar" : "Salvar"}
+          <button disabled={saving || locked || (!dirty && hasPred)} onClick={handleSave} style={{ ...btn, padding: "6px 14px", fontSize: "0.78rem", background: !locked && (dirty || !hasPred) ? "var(--accent)" : "var(--surface2)", color: !locked && (dirty || !hasPred) ? "#0d1117" : "var(--text-muted)", cursor: saving || locked || (!dirty && hasPred) ? "default" : "pointer", opacity: saving ? 0.6 : 1, transition: "background .15s" }}>
+            {saving ? "…" : locked ? "Salvo 🔒" : hasPred && !dirty ? "Salvo ✓" : hasPred ? "Atualizar" : "Salvar"}
           </button>
         ) : finished ? (
           hasPred ? (

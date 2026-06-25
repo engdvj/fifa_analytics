@@ -77,6 +77,10 @@ def upsert_prediction(
         )
         db.add(pred)
     else:
+        # Palpite já salvo é definitivo para o participante — só o admin pode
+        # alterar (ele edita por `/pools/{id}/registro`, não por aqui).
+        if not user.is_admin:
+            raise HTTPException(403, "palpite já salvo; só o admin pode alterar")
         pred.home_score = payload.home_score
         pred.away_score = payload.away_score
         pred.points = None  # invalida pontuação anterior
