@@ -1,0 +1,11 @@
+# Reverse proxy com HTTPS automático (Let's Encrypt). Roteia por subdomínio.
+# Os domínios precisam estar em "DNS only" (cinza) na Cloudflare para o desafio
+# do certificado funcionar.
+
+fifa-analytics.davicjr.dev {
+	reverse_proxy web:3000
+}
+
+api-fifa-analytics.davicjr.dev {
+	reverse_proxy api:8000
+}

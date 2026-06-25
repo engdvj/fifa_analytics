@@ -1,7 +1,8 @@
-# Stack da plataforma (local e deploy na VM Oracle): Postgres + API + Frontend.
+# Stack da plataforma: Caddy (HTTPS) + Postgres + API + Frontend.
 # Build na própria máquina (sem registry). Em produção, rode com:
 #   docker compose --env-file infra/.env -f infra/docker-compose.yml up -d --build
 # As variáveis (senhas, JWT, URLs) vêm de infra/.env (ver infra/DEPLOY.md).
+# Só o Caddy expõe portas (80/443); API e Web ficam internos na rede do compose.
 services:
   db:
     image: postgres:16
@@ -30,8 +31,6 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       ADMIN_NAME: ${ADMIN_NAME:-Admin}
-    ports:
-      - "8000:8000"
     volumes:
       # gold parquet é lido pela API (stats) e pelo loader.
       - ../data:/app/data
@@ -44,13 +43,27 @@ services:
       context: ../frontend
       dockerfile: Dockerfile
       args:
-        # embutido no bundle do browser — aponte para a API pública da VM.
+        # embutido no bundle do browser — aponte para a API pública (https).
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     restart: unless-stopped
-    ports:
-      - "3000:3000"
     depends_on:
+      - api
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
       - api
 
 volumes:
   pgdata:
+  caddy_data:
+  caddy_config:
