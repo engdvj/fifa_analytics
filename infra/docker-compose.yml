@@ -31,6 +31,8 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       ADMIN_NAME: ${ADMIN_NAME:-Admin}
+      # Coleta automática a cada N minutos (0 = desligado). Polling da FIFA.
+      AUTO_COLLECT_MINUTES: ${AUTO_COLLECT_MINUTES:-0}
     volumes:
       # gold parquet é lido pela API (stats) e pelo loader.
       - ../data:/app/data

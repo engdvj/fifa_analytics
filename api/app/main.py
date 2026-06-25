@@ -20,6 +20,7 @@ from api.app.routers import (
     stats,
     users,
 )
+from api.app.scheduler import start_auto_collect
 from api.app.seed import seed_admin, seed_rules
 
 
@@ -35,6 +36,8 @@ async def lifespan(app: FastAPI):
             db.close()
     except Exception:  # noqa: BLE001
         pass
+    # Coleta automática (polling) — só liga se AUTO_COLLECT_MINUTES > 0.
+    start_auto_collect()
     yield
 
 
