@@ -31,8 +31,11 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       ADMIN_NAME: ${ADMIN_NAME:-Admin}
-      # Coleta automática a cada N minutos (0 = desligado). Polling da FIFA.
-      AUTO_COLLECT_MINUTES: ${AUTO_COLLECT_MINUTES:-0}
+      # Coleta automática dirigida pelo calendário: checa o calendário oficial a
+      # cada N minutos e só coleta quando um jogo vira "finalizado" (0 = desligado).
+      AUTO_COLLECT_MINUTES: ${AUTO_COLLECT_MINUTES:-15}
+      # Folga após detectar fim de jogo, p/ as stats avançadas (fdh) publicarem.
+      AUTO_COLLECT_GRACE_MINUTES: ${AUTO_COLLECT_GRACE_MINUTES:-10}
     volumes:
       # gold parquet é lido pela API (stats) e pelo loader.
       - ../data:/app/data

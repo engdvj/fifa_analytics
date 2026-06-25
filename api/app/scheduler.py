@@ -1,12 +1,18 @@
-"""Coleta automática agendada.
+"""Coleta automática dirigida pelo calendário oficial da FIFA.
 
-Roda o MESMO fluxo do `POST /admin/collect` (pipeline FIFA → `load_matches` →
-recálculo de pontos) num intervalo fixo, numa thread daemon. Assim, alguns
-minutos depois de um jogo finalizar na FIFA, o gold, a tabela `matches` e os
-pontos dos palpites são atualizados sem ação manual.
+Em vez de rodar o pipeline cegamente a cada N minutos, o agendador faz um
+polling LEVE do calendário (uma única chamada HTTP) e só dispara a coleta
+pesada quando algum jogo VIRA "finalizado" na FIFA. Ao detectar, espera uma
+folga (`AUTO_COLLECT_GRACE_MINUTES`) — as estatísticas avançadas (fdh) publicam
+alguns minutos depois do status mudar — e então roda o MESMO fluxo do
+`POST /admin/collect` (pipeline FIFA → `load_matches` → recálculo de pontos).
 
-Como a FIFA não "avisa" o fim do jogo, isto é polling. Ligado por
-`AUTO_COLLECT_MINUTES` (>0). 0/ausente = desligado (padrão em dev/testes).
+A FIFA não "avisa" o fim do jogo, então isto continua sendo polling; o ganho é
+não martelar a coleta inteira à toa e reagir logo após cada jogo terminar.
+
+Env:
+  AUTO_COLLECT_MINUTES        intervalo de checagem do calendário (0 = desligado)
+  AUTO_COLLECT_GRACE_MINUTES  espera após detectar fim de jogo (default 10)
 """
 from __future__ import annotations
 
@@ -15,45 +21,114 @@ import os
 import threading
 import time
 
-from api.app.db import SessionLocal
-from api.app.models import CollectionJob
-from api.app.routers.admin import _run_job
-
 log = logging.getLogger("auto_collect")
 
+DEFAULT_GRACE_MINUTES = 10.0
 
-def _loop(interval_seconds: float) -> None:
+
+def _env_minutes(name: str, default: float) -> float:
+    """Lê uma env em minutos; vazia/ausente/inválida → default."""
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _finished_from_calendar() -> set[str]:
+    """Calendário oficial (chamada live) → match_id já finalizados."""
+    from fifa_analytics.fifa import client, transforms
+
+    results = client.fetch_calendar_matches()
+    matches = transforms.normalize_matches(results)
+    if matches.empty or "status" not in matches.columns:
+        return set()
+    return set(matches.loc[matches["status"] == "finalizado", "match_id"])
+
+
+def _finished_from_gold() -> set[str]:
+    """Finalizados já refletidos no gold — semente que evita recoletar tudo no
+    boot, mas deixa pegar o que terminou enquanto a API esteve fora."""
+    import pandas as pd
+
+    from fifa_analytics.paths import GOLD_DIR
+
+    path = GOLD_DIR / "dim_match.parquet"
+    if not path.exists():
+        return set()
+    try:
+        df = pd.read_parquet(path, columns=["match_id", "status"])
+    except Exception:  # noqa: BLE001 — gold ausente/corrompido não derruba o loop
+        return set()
+    return set(df.loc[df["status"] == "finalizado", "match_id"])
+
+
+def _collect_now() -> None:
+    """Cria um CollectionJob e roda o mesmo job do POST /admin/collect."""
+    from api.app.db import SessionLocal
+    from api.app.models import CollectionJob
+    from api.app.routers.admin import _run_job
+
+    db = SessionLocal()
+    try:
+        job = CollectionJob(kind="coleta", status="pending", triggered_by=None)
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        job_id = job.id
+    finally:
+        db.close()
+    _run_job(job_id, do_collect=True)  # cria a própria sessão; é síncrono
+
+
+def _loop(interval_seconds: float, grace_seconds: float) -> None:
+    # Semente: o que o gold já conhece como finalizado. Restart não recoleta tudo;
+    # jogo que terminou durante uma queda é detectado no primeiro ciclo.
+    try:
+        seen = _finished_from_gold()
+    except Exception:  # noqa: BLE001
+        seen = set()
+    log.info("auto-collect: semente com %d jogo(s) finalizado(s)", len(seen))
+
     while True:
         time.sleep(interval_seconds)
         try:
-            db = SessionLocal()
-            try:
-                job = CollectionJob(kind="coleta", status="pending", triggered_by=None)
-                db.add(job)
-                db.commit()
-                db.refresh(job)
-                job_id = job.id
-            finally:
-                db.close()
-            log.info("auto-collect: iniciando job %s", job_id)
-            _run_job(job_id, do_collect=True)  # cria a própria sessão; é síncrono
-            log.info("auto-collect: job %s concluído", job_id)
-        except Exception:  # noqa: BLE001 — nunca derruba a thread/servidor
-            log.exception("auto-collect: falha no ciclo")
+            current = _finished_from_calendar()
+        except Exception:  # noqa: BLE001 — erro de rede não derruba a thread
+            log.exception("auto-collect: falha ao ler o calendário")
+            continue
+
+        novos = current - seen
+        if not novos:
+            continue
+
+        log.info(
+            "auto-collect: %d novo(s) finalizado(s) %s — aguardando %.0f min antes de coletar",
+            len(novos), sorted(novos), grace_seconds / 60,
+        )
+        time.sleep(grace_seconds)
+        try:
+            _collect_now()
+            seen = current  # só marca como visto após coletar com sucesso
+            log.info("auto-collect: coleta concluída (%d finalizados no total)", len(seen))
+        except Exception:  # noqa: BLE001 — mantém `seen` p/ tentar de novo no próximo ciclo
+            log.exception("auto-collect: falha na coleta; tenta de novo no próximo ciclo")
 
 
 def start_auto_collect() -> threading.Thread | None:
     """Liga o agendador se AUTO_COLLECT_MINUTES > 0. Retorna a thread (ou None)."""
-    raw = os.getenv("AUTO_COLLECT_MINUTES", "0") or "0"
-    try:
-        minutes = float(raw)
-    except ValueError:
-        minutes = 0.0
+    minutes = _env_minutes("AUTO_COLLECT_MINUTES", 0.0)
     if minutes <= 0:
         return None
+    grace = max(0.0, _env_minutes("AUTO_COLLECT_GRACE_MINUTES", DEFAULT_GRACE_MINUTES))
     thread = threading.Thread(
-        target=_loop, args=(minutes * 60,), name="auto-collect", daemon=True
+        target=_loop, args=(minutes * 60, grace * 60), name="auto-collect", daemon=True
     )
     thread.start()
-    log.info("auto-collect ligado: a cada %.0f min", minutes)
+    log.info(
+        "auto-collect ligado: checa o calendário a cada %.0f min, folga de %.0f min",
+        minutes, grace,
+    )
     return thread
