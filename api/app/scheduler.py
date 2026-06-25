@@ -25,6 +25,9 @@ from datetime import datetime, timezone
 log = logging.getLogger("auto_collect")
 
 DEFAULT_GRACE_MINUTES = 10.0
+# Atraso até a PRIMEIRA checagem do calendário após subir (as seguintes respeitam
+# AUTO_COLLECT_MINUTES). Curto p/ o status popular e detectar jogos já encerrados.
+INITIAL_DELAY_SECONDS = 20.0
 
 # Estado publicado para a página admin (GET /admin/auto-collect). Atualizado pela
 # thread; lido pelo request. dict simples (escritas atômicas em CPython) — não
@@ -121,8 +124,12 @@ def _loop(interval_seconds: float, grace_seconds: float) -> None:
 
     _status["last_finished_count"] = len(seen)
 
+    # Primeira checagem logo após subir (não espera o intervalo inteiro): popula o
+    # status na hora e pega rápido um jogo que já tenha terminado antes do deploy.
+    first = True
     while True:
-        time.sleep(interval_seconds)
+        time.sleep(INITIAL_DELAY_SECONDS if first else interval_seconds)
+        first = False
         try:
             current = _finished_from_calendar()
             _status["last_check_at"] = _utcnow_iso()

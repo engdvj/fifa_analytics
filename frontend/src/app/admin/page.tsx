@@ -101,6 +101,7 @@ function AutoCollectCard() {
     : "Desligada (AUTO_COLLECT_MINUTES=0)";
 
   const facts: [string, string][] = [
+    ["Ligado desde", fmt(st.started_at)],
     ["Última checagem do calendário", fmt(st.last_check_at)],
     ["Jogos finalizados vistos", st.last_finished_count != null ? String(st.last_finished_count) : "—"],
     ["Última coleta automática", st.last_collect_at ? `${fmt(st.last_collect_at)}${st.last_collect_ok === false ? " · falhou" : ""}` : "—"],
