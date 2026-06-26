@@ -65,11 +65,11 @@ export function useInsights(params?: { snapshot?: number; tipo?: string; enabled
   return { insights: data ?? [], isLoading, error };
 }
 
-// Panorama agregado da fase (Descritiva). `enabled=false` não dispara.
-export function useDescriptive(enabled = true) {
+// Panorama agregado cumulativo até `snapshot` (Descritiva). `enabled=false` não dispara.
+export function useDescriptive(snapshot: number, enabled = true) {
   const { data, isLoading, error } = useSWR(
-    enabled ? ["descriptive"] : null,
-    () => analytics.descriptive()
+    enabled ? ["descriptive", snapshot] : null,
+    () => analytics.descriptive(snapshot)
   );
   return { digest: data, isLoading, error };
 }

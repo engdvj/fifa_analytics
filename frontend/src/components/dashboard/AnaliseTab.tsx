@@ -55,7 +55,7 @@ export default function AnaliseTab({ matches, activeSnapshot, isAdmin }: Props) 
   const enabled = isAdmin && isDiag;
   const { insights, isLoading, error } = useInsights({ tipo, snapshot: activeSnapshot, enabled });
   const { narrative } = useInsightNarrative({ tipo, snapshot: activeSnapshot, enabled });
-  const { digest, isLoading: digestLoading } = useDescriptive(isAdmin && isDesc);
+  const { digest, isLoading: digestLoading } = useDescriptive(activeSnapshot, isAdmin && isDesc);
 
   const game = React.useMemo(() => {
     const items = insights.filter((i) => i.snapshot === activeSnapshot);
@@ -130,7 +130,7 @@ function DigestView({ digest }: { digest?: DescriptiveDigest }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <p style={{ fontSize: 12.5, color: "var(--text-muted)", margin: 0, lineHeight: 1.55, textAlign: "center" }}>
-        <b style={{ color: "var(--text)" }}>Panorama — {digest.fase}</b> — o retrato agregado de toda a fase ({t.jogos} jogos disputados).
+        <b style={{ color: "var(--text)" }}>Panorama — {digest.fase}</b> — o retrato da competição até aqui ({t.jogos} jogos); cresce conforme você avança no tempo.
       </p>
 
       {/* Manchete: cards de totais */}

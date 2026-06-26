@@ -228,7 +228,8 @@ export const analytics = {
     return req<InsightNarrative>(`/analytics/insights/narrative${qs ? `?${qs}` : ""}`);
   },
 
-  descriptive: () => req<DescriptiveDigest>(`/analytics/descriptive`),
+  descriptive: (snapshot?: number) =>
+    req<DescriptiveDigest>(`/analytics/descriptive${snapshot != null ? `?snapshot=${snapshot}` : ""}`),
 
   teamSnapshots: (snapshot?: number) =>
     req<TeamSnapshot[]>(`/analytics/snapshots/teams${snapshot != null ? `?snapshot=${snapshot}` : ""}`),

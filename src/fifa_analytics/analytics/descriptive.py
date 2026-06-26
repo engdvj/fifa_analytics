@@ -85,8 +85,14 @@ def build_digest(
     wide: pd.DataFrame,
     timeline: pd.DataFrame,
     insights: pd.DataFrame,
+    snapshot: int | None = None,
 ) -> dict[str, Any]:
-    """Panorama agregado de TODA a fase finalizada."""
+    """Panorama agregado, **cumulativo** até `snapshot` (default: tudo finalizado).
+
+    Escopa os jogos aos primeiros `snapshot` finalizados (ordem cronológica), de
+    modo que o panorama cresce conforme o slider avança e as rodadas aparecem à
+    medida que acontecem.
+    """
     if dim_match.empty:
         return {}
     finished = dim_match[dim_match["status"] == "finalizado"].copy()
@@ -94,6 +100,10 @@ def build_digest(
         return {}
     sort_col = "date_utc" if "date_utc" in finished.columns else "match_number"
     games = finished.sort_values(sort_col).reset_index(drop=True)
+    if snapshot is not None:
+        games = games.head(snapshot).reset_index(drop=True)
+    if games.empty:
+        return {}
     mids = set(games["match_id"])
     n = len(games)
 
@@ -128,7 +138,8 @@ def build_digest(
     lideres: list[dict[str, Any]] = []
     if not timeline.empty and "snapshot_jogo" in timeline.columns:
         last = int(timeline["snapshot_jogo"].max())
-        snap = timeline[timeline["snapshot_jogo"] == last].copy()
+        target = last if snapshot is None else min(snapshot, last)
+        snap = timeline[timeline["snapshot_jogo"] == target].copy()
         snap = snap[snap["jogos"] >= 1] if "jogos" in snap.columns else snap
 
         def push(col, ascending, label, fmt, mask=None):
