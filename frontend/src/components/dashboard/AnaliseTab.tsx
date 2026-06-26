@@ -6,6 +6,7 @@ import { useInsights, useInsightNarrative, useMatchComparison, useDescriptive } 
 import Flag from "@/components/ui/Flag";
 import Spinner from "@/components/ui/Spinner";
 import { getKit } from "@/lib/teamUtils";
+import ExploratoriaView from "@/components/dashboard/ExploratoriaView";
 
 // As seis camadas de análise da plataforma. Só a Diagnóstica está implementada;
 // as demais são o roteiro (cada uma vira uma sub-aba quando pronta).
@@ -13,7 +14,7 @@ import { getKit } from "@/lib/teamUtils";
 // líderes, zebras) — não repete os números de um jogo, que a Diagnóstica já mostra.
 const TIPOS: { id: string; label: string; pronto: boolean; hint: string }[] = [
   { id: "descritiva", label: "Descritiva", pronto: true, hint: "Panorama do torneio" },
-  { id: "exploratoria", label: "Exploratória", pronto: false, hint: "Que padrões existem" },
+  { id: "exploratoria", label: "Exploratória", pronto: true, hint: "Que padrões existem" },
   { id: "diagnostica", label: "Diagnóstica", pronto: true, hint: "Por que aconteceu" },
   { id: "preditiva", label: "Preditiva", pronto: false, hint: "O que vem" },
   { id: "prescritiva", label: "Prescritiva", pronto: false, hint: "O que fazer" },
@@ -52,6 +53,7 @@ export default function AnaliseTab({ matches, activeSnapshot, isAdmin }: Props) 
   const [tipo, setTipo] = React.useState("diagnostica");
   const isDiag = tipo === "diagnostica";
   const isDesc = tipo === "descritiva";
+  const isExpl = tipo === "exploratoria";
   const enabled = isAdmin && isDiag;
   const { insights, isLoading, error } = useInsights({ tipo, snapshot: activeSnapshot, enabled });
   const { narrative } = useInsightNarrative({ tipo, snapshot: activeSnapshot, enabled });
@@ -84,7 +86,9 @@ export default function AnaliseTab({ matches, activeSnapshot, isAdmin }: Props) 
         ))}
       </nav>
 
-      {isDesc ? (
+      {isExpl ? (
+        <ExploratoriaView snapshot={activeSnapshot} enabled={isAdmin && isExpl} />
+      ) : isDesc ? (
         digestLoading
           ? <div style={{ display: "flex", justifyContent: "center", padding: "40px 0" }}><Spinner /></div>
           : <DigestView digest={digest} />

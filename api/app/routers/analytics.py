@@ -382,6 +382,28 @@ def descriptive_digest(
     )
 
 
+@router.get("/exploratory")
+def exploratory_patterns(
+    snapshot: int | None = Query(None, description="padrões até este snapshot (cumulativo)"),
+    _admin: User = Depends(require_admin),
+) -> dict:
+    """Padrões e relações entre jogos (camada Exploratória), cumulativo até `snapshot`.
+
+    O que decide os jogos (correlações com o resultado), mapa de estilos, paisagem
+    de eficiência (xG × gols) e correlações entre métricas. Admin."""
+    from fifa_analytics.analytics.exploratory import build_exploratory
+
+    dim = _parquet("dim_match.parquet")
+    if dim.empty:
+        return {}
+    return build_exploratory(
+        dim,
+        _parquet("analytics/team_match_wide.parquet"),
+        _parquet("analytics/snapshot_timeline.parquet"),
+        snapshot,
+    )
+
+
 @router.get("/insights/narrative")
 def insight_narrative(
     tipo: str = Query("diagnostica", description="tipo de análise"),

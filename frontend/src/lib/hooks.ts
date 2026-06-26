@@ -74,6 +74,15 @@ export function useDescriptive(snapshot: number, enabled = true) {
   return { digest: data, isLoading, error };
 }
 
+// Padrões exploratórios cumulativos até `snapshot`. `enabled=false` não dispara.
+export function useExploratory(snapshot: number, enabled = true) {
+  const { data, isLoading } = useSWR(
+    enabled ? ["exploratory", snapshot] : null,
+    () => analytics.exploratory(snapshot)
+  );
+  return { explore: data, isLoading };
+}
+
 // Métricas head-to-head de um jogo. `enabled=false` não dispara.
 export function useMatchComparison(matchId: string | null, enabled = true) {
   const { data, isLoading } = useSWR(

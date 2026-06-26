@@ -199,6 +199,15 @@ export interface DescriptiveDigest {
   zebras: { titulo: string; nota: string; match_id?: string }[];
 }
 
+// Padrões e relações entre jogos (camada Exploratória).
+export interface ExploratoryData {
+  amostra: number;
+  decisao?: { metric: string; label: string; corr: number }[];
+  estilos?: { team: string; arquetipo: string | null; posse: number; verticalidade: number; pressao: number }[];
+  eficiencia?: { team: string; xg: number; gols: number }[];
+  correlacoes?: { a: string; b: string; label_a: string; label_b: string; corr: number }[];
+}
+
 // Métricas das duas seleções no jogo, lado a lado (head-to-head).
 export interface MatchComparison {
   match_id: string;
@@ -230,6 +239,9 @@ export const analytics = {
 
   descriptive: (snapshot?: number) =>
     req<DescriptiveDigest>(`/analytics/descriptive${snapshot != null ? `?snapshot=${snapshot}` : ""}`),
+
+  exploratory: (snapshot?: number) =>
+    req<ExploratoryData>(`/analytics/exploratory${snapshot != null ? `?snapshot=${snapshot}` : ""}`),
 
   teamSnapshots: (snapshot?: number) =>
     req<TeamSnapshot[]>(`/analytics/snapshots/teams${snapshot != null ? `?snapshot=${snapshot}` : ""}`),
