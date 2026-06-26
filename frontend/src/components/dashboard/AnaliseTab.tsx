@@ -1,17 +1,18 @@
 "use client";
 
 import React from "react";
-import { Insight, Match, MatchComparison } from "@/lib/api";
-import { useInsights, useInsightNarrative, useMatchComparison } from "@/lib/hooks";
+import { Insight, Match, MatchComparison, DescriptiveDigest } from "@/lib/api";
+import { useInsights, useInsightNarrative, useMatchComparison, useDescriptive } from "@/lib/hooks";
 import Flag from "@/components/ui/Flag";
 import Spinner from "@/components/ui/Spinner";
+import { getKit } from "@/lib/teamUtils";
 
 // As seis camadas de análise da plataforma. Só a Diagnóstica está implementada;
 // as demais são o roteiro (cada uma vira uma sub-aba quando pronta).
 // Descritiva é escopada no AGREGADO (panorama do torneio/rodada: totais, recordes,
 // líderes, zebras) — não repete os números de um jogo, que a Diagnóstica já mostra.
 const TIPOS: { id: string; label: string; pronto: boolean; hint: string }[] = [
-  { id: "descritiva", label: "Descritiva", pronto: false, hint: "Panorama do torneio" },
+  { id: "descritiva", label: "Descritiva", pronto: true, hint: "Panorama do torneio" },
   { id: "exploratoria", label: "Exploratória", pronto: false, hint: "Que padrões existem" },
   { id: "diagnostica", label: "Diagnóstica", pronto: true, hint: "Por que aconteceu" },
   { id: "preditiva", label: "Preditiva", pronto: false, hint: "O que vem" },
@@ -49,9 +50,12 @@ interface Props {
 
 export default function AnaliseTab({ matches, activeSnapshot, isAdmin }: Props) {
   const [tipo, setTipo] = React.useState("diagnostica");
-  const enabled = isAdmin && tipo === "diagnostica";
+  const isDiag = tipo === "diagnostica";
+  const isDesc = tipo === "descritiva";
+  const enabled = isAdmin && isDiag;
   const { insights, isLoading, error } = useInsights({ tipo, snapshot: activeSnapshot, enabled });
   const { narrative } = useInsightNarrative({ tipo, snapshot: activeSnapshot, enabled });
+  const { digest, isLoading: digestLoading } = useDescriptive(isAdmin && isDesc);
 
   const game = React.useMemo(() => {
     const items = insights.filter((i) => i.snapshot === activeSnapshot);
@@ -80,23 +84,156 @@ export default function AnaliseTab({ matches, activeSnapshot, isAdmin }: Props) 
         ))}
       </nav>
 
-      {error && <Aviso texto={`Erro ao carregar análise: ${String(error)}`} cor="var(--red)" />}
-      {isLoading && <div style={{ display: "flex", justifyContent: "center", padding: "40px 0" }}><Spinner /></div>}
-      {!isLoading && !error && !game && (
-        <Aviso texto={`Sem análise para o snapshot ${activeSnapshot} — use o controle de tempo para escolher um jogo finalizado.`} />
-      )}
-
-      {game && (
-        <GameReport
-          match={game.match}
-          matchId={game.matchId}
-          items={game.items}
-          narrative={narrative?.exists && narrative.snapshot === activeSnapshot ? narrative.paragraphs : []}
-          tipoLabel={tipoAtual?.label ?? ""}
-          enabled={enabled}
-        />
+      {isDesc ? (
+        digestLoading
+          ? <div style={{ display: "flex", justifyContent: "center", padding: "40px 0" }}><Spinner /></div>
+          : <DigestView digest={digest} />
+      ) : isDiag ? (
+        <>
+          {error && <Aviso texto={`Erro ao carregar análise: ${String(error)}`} cor="var(--red)" />}
+          {isLoading && <div style={{ display: "flex", justifyContent: "center", padding: "40px 0" }}><Spinner /></div>}
+          {!isLoading && !error && !game && (
+            <Aviso texto={`Sem análise para o snapshot ${activeSnapshot} — use o controle de tempo para escolher um jogo finalizado.`} />
+          )}
+          {game && (
+            <GameReport
+              match={game.match}
+              matchId={game.matchId}
+              items={game.items}
+              narrative={narrative?.exists && narrative.snapshot === activeSnapshot ? narrative.paragraphs : []}
+              tipoLabel={tipoAtual?.label ?? ""}
+              enabled={enabled}
+            />
+          )}
+        </>
+      ) : (
+        <Aviso texto="Em breve." />
       )}
     </div>
+  );
+}
+
+function DigestView({ digest }: { digest?: DescriptiveDigest }) {
+  if (!digest || !digest.totais) {
+    return <Aviso texto="Sem panorama disponível ainda — rode uma coleta." />;
+  }
+  const t = digest.totais;
+  const num = (v: number) => v.toFixed(2).replace(".", ",");
+  const cards: [string, string | number][] = [
+    ["Jogos", t.jogos],
+    ["Gols", t.gols],
+    ["Gols/jogo", num(t.gols_por_jogo)],
+    ["xG/jogo", t.xg_por_jogo != null ? num(t.xg_por_jogo) : "—"],
+    ["Decisivos", `${t.pct_decisivos}%`],
+    ["Goleadas (3+)", t.goleadas],
+  ];
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <p style={{ fontSize: 12.5, color: "var(--text-muted)", margin: 0, lineHeight: 1.55, textAlign: "center" }}>
+        <b style={{ color: "var(--text)" }}>Panorama — {digest.fase}</b> — o retrato agregado de toda a fase ({t.jogos} jogos disputados).
+      </p>
+
+      {/* Manchete: cards de totais */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 }}>
+        {cards.map(([label, val]) => (
+          <div key={label} style={{ background: "var(--surface)", border: "1px solid var(--surface2)", borderRadius: 10, padding: "12px 14px", textAlign: "center" }}>
+            <div style={{ fontSize: 22, fontWeight: 800, color: "var(--accent)" }}>{val}</div>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Tendência por rodada */}
+      {digest.tendencia.length > 0 && <TendenciaTable rows={digest.tendencia} />}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 14 }}>
+        <ListPanel titulo="Líderes da fase">
+          {digest.lideres.map((l, i) => (
+            <li key={i} style={rowStyle}>
+              <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{l.categoria}</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 600, textAlign: "right" }}>
+                <Flag team={l.team} height={13} />{l.team}
+                <span style={{ color: "var(--accent)", fontWeight: 700, fontSize: 11.5 }}>{l.valor}</span>
+              </span>
+            </li>
+          ))}
+        </ListPanel>
+
+        <ListPanel titulo="Atuações & recordes">
+          {digest.recordes.map((r, i) => (
+            <li key={i} style={{ ...rowStyle, display: "block" }}>
+              <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{r.label}</span>
+              <div style={{ fontWeight: 600, fontSize: 13, marginTop: 2 }}>{r.valor}</div>
+            </li>
+          ))}
+        </ListPanel>
+      </div>
+
+      {digest.zebras.length > 0 && (
+        <ListPanel titulo="Surpresas — resultados contra o esperado">
+          {digest.zebras.map((z, i) => (
+            <li key={i} style={{ ...rowStyle, display: "block", borderLeft: "3px solid var(--red)", paddingLeft: 13 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{z.titulo}</span>
+              <span style={{ fontSize: 12.5, color: "var(--text-muted)" }}> — {z.nota}</span>
+            </li>
+          ))}
+        </ListPanel>
+      )}
+    </div>
+  );
+}
+
+function TendenciaTable({ rows }: { rows: DescriptiveDigest["tendencia"] }) {
+  const cols: [string, (r: DescriptiveDigest["tendencia"][0]) => string | number][] = [
+    ["Jogos", (r) => r.jogos],
+    ["Gols/jogo", (r) => r.gols_por_jogo.toFixed(2).replace(".", ",")],
+    ["xG médio", (r) => (r.xg_medio != null ? r.xg_medio.toFixed(2).replace(".", ",") : "—")],
+    ["Empates", (r) => r.empates],
+    ["Goleadas", (r) => r.goleadas],
+  ];
+  return (
+    <section style={{ background: "var(--background)", border: "1px solid var(--surface2)", borderRadius: 12, overflow: "hidden" }}>
+      <div style={{ padding: "10px 16px", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "var(--text-muted)", fontWeight: 700, background: "var(--surface)", borderBottom: "1px solid var(--surface2)" }}>
+        Tendência por rodada
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead>
+            <tr>
+              <th style={{ ...thStyle, textAlign: "left" }}>Rodada</th>
+              {cols.map(([h]) => <th key={h} style={thStyle}>{h}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.rodada}>
+                <td style={{ ...tdStyle, textAlign: "left", fontWeight: 600 }}>{r.rodada}</td>
+                {cols.map(([h, f]) => <td key={h} style={tdStyle}>{f(r)}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+const thStyle: React.CSSProperties = { padding: "8px 12px", textAlign: "center", fontSize: 11, color: "var(--text-muted)", fontWeight: 600, borderBottom: "1px solid var(--surface)" };
+const tdStyle: React.CSSProperties = { padding: "9px 12px", textAlign: "center", color: "var(--text)", borderBottom: "1px solid var(--surface)" };
+
+const rowStyle: React.CSSProperties = {
+  display: "flex", justifyContent: "space-between", alignItems: "center",
+  padding: "9px 16px", borderTop: "1px solid var(--surface)", fontSize: 13,
+};
+
+function ListPanel({ titulo, children }: { titulo: string; children: React.ReactNode }) {
+  return (
+    <section style={{ background: "var(--background)", border: "1px solid var(--surface2)", borderRadius: 12, overflow: "hidden" }}>
+      <div style={{ padding: "10px 16px", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "var(--text-muted)", fontWeight: 700, background: "var(--surface)", borderBottom: "1px solid var(--surface2)" }}>
+        {titulo}
+      </div>
+      <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>{children}</ul>
+    </section>
   );
 }
 
@@ -225,36 +362,54 @@ function FindingGroup({ titulo, cor, simbolo, items }: { titulo: string; cor: st
 function ComparisonPanel({ comparison, home, away }: { comparison: MatchComparison; home: string; away: string }) {
   const rows = METRICS.filter((m) => comparison.home[m.key] != null || comparison.away[m.key] != null);
   if (rows.length === 0) return null;
+  const homeColor = getKit(home).main;
+  const awayColor = getKit(away).main;
   return (
     <section style={{ background: "var(--background)", border: "1px solid var(--surface2)", borderRadius: 12, overflow: "hidden" }}>
       <div style={{ padding: "12px 16px 4px" }}><SectionLabel texto="Números do jogo" cor="var(--text-muted)" /></div>
-      <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 16px 8px", fontSize: 12, fontWeight: 700, color: "var(--text-muted)", borderBottom: "1px solid var(--surface)" }}>
-        <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Flag team={home} height={12} />{home}</span>
-        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>{away}<Flag team={away} height={12} /></span>
+      {/* Cabeçalho com as cores dos times (faixa de identidade) */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 16px 10px", fontSize: 13, fontWeight: 700, borderBottom: "1px solid var(--surface)" }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 7 }}>
+          <span style={{ width: 10, height: 10, borderRadius: 3, background: homeColor, border: "1px solid rgba(255,255,255,0.25)" }} />
+          <Flag team={home} height={13} />{home}
+        </span>
+        <span style={{ display: "flex", alignItems: "center", gap: 7 }}>
+          {away}<Flag team={away} height={13} />
+          <span style={{ width: 10, height: 10, borderRadius: 3, background: awayColor, border: "1px solid rgba(255,255,255,0.25)" }} />
+        </span>
       </div>
-      <div style={{ padding: "6px 0" }}>
+      <div style={{ padding: "8px 0" }}>
         {rows.map((m) => (
-          <MetricRow key={m.key} label={m.label} home={comparison.home[m.key] ?? null} away={comparison.away[m.key] ?? null} fmt={m.fmt} />
+          <MetricRow key={m.key} label={m.label} home={comparison.home[m.key] ?? null} away={comparison.away[m.key] ?? null}
+            fmt={m.fmt} homeColor={homeColor} awayColor={awayColor} />
         ))}
       </div>
     </section>
   );
 }
 
-function MetricRow({ label, home, away, fmt }: { label: string; home: number | null; away: number | null; fmt?: (v: number) => string }) {
+function MetricRow({ label, home, away, fmt, homeColor, awayColor }: {
+  label: string; home: number | null; away: number | null; fmt?: (v: number) => string; homeColor: string; awayColor: string;
+}) {
   const f = (v: number | null) => (v == null ? "–" : fmt ? fmt(v) : String(Math.round(v)));
   const h = home ?? 0, a = away ?? 0, total = h + a;
   const hPct = total > 0 ? (h / total) * 100 : 50;
+  const homeLead = h > a, awayLead = a > h;
   return (
-    <div style={{ padding: "6px 16px" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5, marginBottom: 3 }}>
-        <span style={{ fontWeight: 700, color: h > a ? "var(--text)" : "var(--text-muted)", minWidth: 56 }}>{f(home)}</span>
-        <span style={{ color: "var(--text-muted)", fontSize: 11.5 }}>{label}</span>
-        <span style={{ fontWeight: 700, color: a > h ? "var(--text)" : "var(--text-muted)", minWidth: 56, textAlign: "right" }}>{f(away)}</span>
+    <div style={{ padding: "7px 16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, marginBottom: 4 }}>
+        <span style={{ fontWeight: homeLead ? 800 : 600, color: homeLead ? homeColor : "var(--text-muted)", minWidth: 60 }}>{f(home)}</span>
+        <span style={{ color: "var(--text-muted)", fontSize: 11.5, textAlign: "center" }}>{label}</span>
+        <span style={{ fontWeight: awayLead ? 800 : 600, color: awayLead ? awayColor : "var(--text-muted)", minWidth: 60, textAlign: "right" }}>{f(away)}</span>
       </div>
-      <div style={{ display: "flex", height: 4, borderRadius: 2, overflow: "hidden", background: "var(--surface2)" }}>
-        <div style={{ width: `${hPct}%`, background: "var(--accent)" }} />
-        <div style={{ width: `${100 - hPct}%`, background: "var(--accent2)" }} />
+      {/* Barra divergente do centro: cada lado na cor do seu time */}
+      <div style={{ display: "flex", alignItems: "center", height: 8, gap: 2 }}>
+        <div style={{ flex: 1, display: "flex", justifyContent: "flex-end", height: "100%", background: "var(--surface2)", borderRadius: "4px 0 0 4px", overflow: "hidden" }}>
+          <div style={{ width: `${hPct}%`, height: "100%", background: homeColor, opacity: homeLead ? 1 : 0.65, borderRadius: "4px 0 0 4px" }} />
+        </div>
+        <div style={{ flex: 1, display: "flex", justifyContent: "flex-start", height: "100%", background: "var(--surface2)", borderRadius: "0 4px 4px 0", overflow: "hidden" }}>
+          <div style={{ width: `${100 - hPct}%`, height: "100%", background: awayColor, opacity: awayLead ? 1 : 0.65, borderRadius: "0 4px 4px 0" }} />
+        </div>
       </div>
     </div>
   );

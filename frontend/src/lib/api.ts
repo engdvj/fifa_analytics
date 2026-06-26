@@ -185,6 +185,20 @@ export interface InsightNarrative {
   paragraphs: string[];
 }
 
+// Panorama agregado da fase (camada Descritiva) — total + tendência por rodada.
+export interface DescriptiveDigest {
+  fase: string;
+  totais: {
+    jogos: number; gols: number; gols_por_jogo: number; xg_por_jogo: number | null;
+    empates: number; decisivos: number; pct_decisivos: number;
+    vitorias_mandante: number; pct_mandante: number; goleadas: number;
+  };
+  tendencia: { rodada: string; jogos: number; gols_por_jogo: number; xg_medio: number | null; empates: number; goleadas: number }[];
+  lideres: { categoria: string; team: string; valor: string }[];
+  recordes: { label: string; valor: string; match_id?: string }[];
+  zebras: { titulo: string; nota: string; match_id?: string }[];
+}
+
 // Métricas das duas seleções no jogo, lado a lado (head-to-head).
 export interface MatchComparison {
   match_id: string;
@@ -213,6 +227,8 @@ export const analytics = {
     ).toString();
     return req<InsightNarrative>(`/analytics/insights/narrative${qs ? `?${qs}` : ""}`);
   },
+
+  descriptive: () => req<DescriptiveDigest>(`/analytics/descriptive`),
 
   teamSnapshots: (snapshot?: number) =>
     req<TeamSnapshot[]>(`/analytics/snapshots/teams${snapshot != null ? `?snapshot=${snapshot}` : ""}`),

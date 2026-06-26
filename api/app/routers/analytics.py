@@ -359,6 +359,25 @@ def match_comparison(match_id: str) -> dict:
     }
 
 
+@router.get("/descriptive")
+def descriptive_digest(_admin: User = Depends(require_admin)) -> dict:
+    """Panorama agregado da fase (camada Descritiva).
+
+    Total de toda a fase finalizada: totais, tendência por rodada, líderes,
+    recordes e surpresas. Restrito a admin."""
+    from fifa_analytics.analytics.descriptive import build_digest
+
+    dim = _parquet("dim_match.parquet")
+    if dim.empty:
+        return {}
+    return build_digest(
+        dim,
+        _parquet("analytics/team_match_wide.parquet"),
+        _parquet("analytics/snapshot_timeline.parquet"),
+        _parquet("analytics/insights/fact_insights.parquet"),
+    )
+
+
 @router.get("/insights/narrative")
 def insight_narrative(
     tipo: str = Query("diagnostica", description="tipo de análise"),

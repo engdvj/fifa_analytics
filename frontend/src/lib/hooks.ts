@@ -65,6 +65,15 @@ export function useInsights(params?: { snapshot?: number; tipo?: string; enabled
   return { insights: data ?? [], isLoading, error };
 }
 
+// Panorama agregado da fase (Descritiva). `enabled=false` não dispara.
+export function useDescriptive(enabled = true) {
+  const { data, isLoading, error } = useSWR(
+    enabled ? ["descriptive"] : null,
+    () => analytics.descriptive()
+  );
+  return { digest: data, isLoading, error };
+}
+
 // Métricas head-to-head de um jogo. `enabled=false` não dispara.
 export function useMatchComparison(matchId: string | null, enabled = true) {
   const { data, isLoading } = useSWR(
