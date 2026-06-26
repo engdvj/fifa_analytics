@@ -17,8 +17,9 @@ def _frames():
     wide = pd.DataFrame([
         {"match_id": "m1", "team": "A", "xg": 2.5, "amarelos": 1, "vermelhos": 0, "defesas_goleiro": 2, "save_pct_goleiro": 1.0},
         {"match_id": "m1", "team": "B", "xg": 0.3, "amarelos": 3, "vermelhos": 1, "defesas_goleiro": 7, "save_pct_goleiro": 0.7},
-        {"match_id": "m2", "team": "C", "xg": 1.0, "amarelos": 0, "vermelhos": 0, "defesas_goleiro": 3, "save_pct_goleiro": 0.75},
-        {"match_id": "m2", "team": "D", "xg": 1.1, "amarelos": 1, "vermelhos": 0, "defesas_goleiro": 4, "save_pct_goleiro": 0.8},
+        # C dominou o xG mas só empatou 1-1 → surpresa.
+        {"match_id": "m2", "team": "C", "xg": 2.5, "amarelos": 0, "vermelhos": 0, "defesas_goleiro": 3, "save_pct_goleiro": 0.75},
+        {"match_id": "m2", "team": "D", "xg": 0.4, "amarelos": 1, "vermelhos": 0, "defesas_goleiro": 4, "save_pct_goleiro": 0.8},
     ])
     timeline = pd.DataFrame([
         {"snapshot_jogo": 2, "team": "A", "jogos": 2, "gols": 5.0, "xg": 2.0, "xg_pj": 2.5, "xg_sofrido_pj": 0.3,
@@ -62,8 +63,8 @@ def test_lideres_eficiencia_e_zebras():
     assert cats["Melhor defesa"]["team"] == "A"
     # eficiência gols-xG: B fez 1 de 3.0 xG (-2.0) → menos aproveitou
     assert cats["Menos aproveitou (gols − xG)"]["team"] == "B"
-    # zebra autossuficiente: traz o placar (C 1–1 D)
-    assert d["zebras"] and "C" in d["zebras"][0]["titulo"]
+    # surpresa autossuficiente: C dominou o xG mas não venceu
+    assert d["zebras"] and "C" in d["zebras"][0]["titulo"] and "dominou" in d["zebras"][0]["nota"]
 
 
 def test_goleiro_em_recordes():

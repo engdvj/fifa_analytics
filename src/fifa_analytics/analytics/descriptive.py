@@ -18,7 +18,6 @@ Uso:
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import numpy as np
@@ -195,31 +194,34 @@ def build_digest(
                 val += f" ({pct*100:.0f}%)"
             recordes.append({"label": "Goleiro da fase", "valor": val, "match_id": gk.get("match_id")})
 
-    # ── Surpresas (zebras) — autossuficientes ────────────────────────────────
+    # ── Surpresas — resultados que mais contrariaram o xG ────────────────────
+    # Jogos em que quem criou bem mais perigo NÃO venceu. Ranqueado pela
+    # magnitude (perder pesa mais que empatar). É a definição honesta de
+    # "resultado contra o esperado" — sem ruído de ranking.
     zebras: list[dict[str, Any]] = []
-    if not insights.empty and {"match_id", "achado_key"}.issubset(insights.columns):
-        z = insights[insights["achado_key"].isin(["resultado_vs_xg", "vitoria_prestigio"])]
-        z = z.sort_values("snapshot", ascending=False) if "snapshot" in z.columns else z
-        label_by_match = {m: _match_label(games[games["match_id"] == m].iloc[0])
-                          for m in z["match_id"].unique() if (games["match_id"] == m).any()}
-        seen: set[str] = set()
-        for r in z.itertuples():
-            if r.match_id in seen or r.match_id not in label_by_match:
+    if not w.empty and "xg" in w.columns:
+        xg_lookup = {(t.match_id, str(t.team)): _num(t.xg) for t in w.itertuples()}
+        cand: list[tuple[float, dict[str, Any]]] = []
+        for g in games.itertuples():
+            xh = xg_lookup.get((g.match_id, str(g.home_team)), float("nan"))
+            xa = xg_lookup.get((g.match_id, str(g.away_team)), float("nan"))
+            if np.isnan(xh) or np.isnan(xa) or abs(xh - xa) < 0.6:
                 continue
-            seen.add(r.match_id)
-            ev = {}
-            try:
-                ev = json.loads(r.evidencia) if isinstance(getattr(r, "evidencia", None), str) else {}
-            except (json.JSONDecodeError, TypeError):
-                ev = {}
-            if r.achado_key == "vitoria_prestigio":
-                rk = ev.get("ranking_adversario")
-                nota = f"venceu o {rk}º colocado do ranking" if rk else "vitória de prestígio"
-            else:
-                nota = "criou mais perigo e não venceu"
-            zebras.append({"titulo": label_by_match[r.match_id], "nota": nota, "match_id": r.match_id})
-            if len(zebras) >= 6:
-                break
+            hs_, as_ = _num(g.home_score), _num(g.away_score)
+            fav, fav_xg, und_xg = ((g.home_team, xh, xa) if xh >= xa else (g.away_team, xa, xh))
+            fav_won = (fav == g.home_team and hs_ > as_) or (fav == g.away_team and as_ > hs_)
+            if fav_won:
+                continue
+            drew = hs_ == as_
+            defiance = abs(xh - xa) + (0.0 if drew else 1.5)
+            resultado = "só empatou" if drew else "perdeu"
+            cand.append((defiance, {
+                "titulo": f"{g.home_team} {int(hs_)}–{int(as_)} {g.away_team}",
+                "nota": f"{fav} dominou o perigo (xG {fav_xg:.2f} a {und_xg:.2f}) mas {resultado}",
+                "match_id": g.match_id,
+            }))
+        cand.sort(key=lambda c: c[0], reverse=True)
+        zebras = [z for _, z in cand[:6]]
 
     return {
         "fase": fase,
