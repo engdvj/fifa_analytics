@@ -1,23 +1,20 @@
-"""Análise Exploratória — que padrões existem.
+"""Análise Exploratória — que padrões existem (EDA com sentido).
 
-Sai do descrever (totais/líderes) e do explicar-um-jogo (diagnóstica) para achar
-RELAÇÕES e PADRÕES que atravessam todos os jogos da fase. Cumulativo até
-`snapshot` (cresce conforme o torneio avança). Quatro leituras:
+Sai do descrever e do explicar-um-jogo para responder PERGUNTAS sobre a Copa,
+cada uma com leitura clara. Cumulativo até `snapshot`. Seções:
 
-  1. decisao      — o que decide os jogos: correlação de cada métrica (diferencial
-                    time − adversário) com o saldo de gols. O que importa pra vencer.
-  2. estilos      — mapa de estilos: cada seleção nos eixos posse × verticalidade
-                    (+ pressão), colorida pelo arquétipo (estilo_jogo).
-  3. eficiencia   — paisagem xG × gols por jogo: acima da diagonal rende acima do
-                    esperado (clínico/sorte), abaixo desperdiça.
-  4. correlacoes  — quais métricas andam juntas (redundância) ou se opõem.
+  decide        — o que decide os jogos: correlação do diferencial de cada
+                  métrica (time − adversário) com o saldo. O que pesa × o que engana.
+  eficiencia    — quem rende além/aquém do que cria (gols − xG por jogo).
+  quadrante     — cada seleção em cria (xG) × converte (gols−xG): elite,
+                  frustrados, oportunistas, em apuros.
+  estilo_resultado — qual estilo está rendendo (pontos/jogo por arquétipo).
+  estilos_mapa  — mapa posse × verticalidade, colorido por arquétipo.
+  fases         — de onde vem o perigo (líder por fase: bola parada, contra-ataque…).
+  defesa        — o que segura atrás (melhores defesas por xG sofrido + estilo).
 
-Tudo a partir do gold: team_match_wide (métricas por jogo), dim_match (resultado),
-snapshot_timeline (eixos de estilo e médias acumuladas).
-
-Uso:
-    from fifa_analytics.analytics.exploratory import build_exploratory
-    data = build_exploratory(dim_match, wide, timeline, snapshot=60)
+Tudo do gold: team_match_wide (métricas por jogo), dim_match (resultado),
+snapshot_timeline (médias/estilo/pontos acumulados).
 """
 from __future__ import annotations
 
@@ -26,7 +23,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-# Métricas candidatas (presentes no team_match_wide) e rótulos pt-BR.
 METRIC_LABELS: dict[str, str] = {
     "xg": "xG (perigo criado)",
     "threat": "Ameaça",
@@ -44,7 +40,14 @@ METRIC_LABELS: dict[str, str] = {
     "distancia_total_km": "Distância (km)",
     "sprints": "Sprints",
 }
-_MIN_GAMES = 6  # amostra mínima para uma correlação valer
+_PHASES = [
+    ("fase_bola_parada", "Bola parada"),
+    ("fase_contra_ataque", "Contra-ataque"),
+    ("fase_terceiro_final", "Ataque posicional"),
+    ("fase_bola_longa", "Jogo direto (bola longa)"),
+    ("fase_pressao_alta", "Pressão alta"),
+]
+_MIN_GAMES = 6
 
 
 def _num(v: Any) -> float:
@@ -56,7 +59,6 @@ def _num(v: Any) -> float:
 
 
 def _team_games(dim_match: pd.DataFrame, wide: pd.DataFrame, snapshot: int | None) -> pd.DataFrame:
-    """Uma linha por time por jogo, com métricas próprias, do adversário e o diff."""
     finished = dim_match[dim_match["status"] == "finalizado"].copy()
     sort_col = "date_utc" if "date_utc" in finished.columns else "match_number"
     finished = finished.sort_values(sort_col)
@@ -64,32 +66,20 @@ def _team_games(dim_match: pd.DataFrame, wide: pd.DataFrame, snapshot: int | Non
         finished = finished.head(snapshot)
     if finished.empty or wide.empty:
         return pd.DataFrame()
-
     metrics = [m for m in METRIC_LABELS if m in wide.columns]
-    w = wide.set_index(["match_id", "team"])
+    lookup = {(t.match_id, str(t.team)): t for t in wide.itertuples()}
 
-    def row(mid: str, team: str) -> dict[str, float]:
-        try:
-            r = w.loc[(mid, str(team))]
-        except KeyError:
-            return {}
-        return {m: _num(r[m]) for m in metrics}
+    def row(mid, team):
+        r = lookup.get((mid, str(team)))
+        return {m: _num(getattr(r, m, float("nan"))) for m in metrics} if r else {}
 
-    out: list[dict[str, Any]] = []
+    out = []
     for m in finished.itertuples():
         hs, as_ = _num(m.home_score), _num(m.away_score)
-        me_h, me_a = row(m.match_id, m.home_team), row(m.match_id, m.away_team)
-        for team, me, op, gf, ga in [
-            (m.home_team, me_h, me_a, hs, as_),
-            (m.away_team, me_a, me_h, as_, hs),
-        ]:
-            rec: dict[str, Any] = {
-                "team": team,
-                "goal_diff": gf - ga,
-                "points": 3 if gf > ga else (1 if gf == ga else 0),
-            }
+        meh, mea = row(m.match_id, m.home_team), row(m.match_id, m.away_team)
+        for me, op, gf, ga in [(meh, mea, hs, as_), (mea, meh, as_, hs)]:
+            rec = {"goal_diff": gf - ga}
             for k in metrics:
-                rec[k] = me.get(k, float("nan"))
                 rec[f"{k}_diff"] = me.get(k, float("nan")) - op.get(k, float("nan"))
             out.append(rec)
     return pd.DataFrame(out)
@@ -101,79 +91,119 @@ def build_exploratory(
     timeline: pd.DataFrame,
     snapshot: int | None = None,
 ) -> dict[str, Any]:
-    """As quatro leituras exploratórias, cumulativas até `snapshot`."""
     if dim_match.empty or wide.empty:
         return {}
     tg = _team_games(dim_match, wide, snapshot)
     if tg.empty or len(tg) < _MIN_GAMES:
         return {"amostra": len(tg)}
 
-    metrics = [m for m in METRIC_LABELS if m in tg.columns]
-
-    # ── 1. O que decide os jogos (diff da métrica × saldo de gols) ───────────
-    decisao: list[dict[str, Any]] = []
-    for m in metrics:
-        s = pd.to_numeric(tg[f"{m}_diff"], errors="coerce")
-        gd = pd.to_numeric(tg["goal_diff"], errors="coerce")
+    # ── decide: correlação do diferencial × saldo de gols ────────────────────
+    decide = []
+    gd = pd.to_numeric(tg["goal_diff"], errors="coerce")
+    for m, label in METRIC_LABELS.items():
+        col = f"{m}_diff"
+        if col not in tg.columns:
+            continue
+        s = pd.to_numeric(tg[col], errors="coerce")
         valid = s.notna() & gd.notna()
         if valid.sum() < _MIN_GAMES:
             continue
         c = s[valid].corr(gd[valid])
         if pd.notna(c):
-            decisao.append({"metric": m, "label": METRIC_LABELS[m], "corr": round(float(c), 2)})
-    decisao.sort(key=lambda d: d["corr"], reverse=True)
+            decide.append({"metric": m, "label": label, "corr": round(float(c), 2)})
+    decide.sort(key=lambda d: d["corr"], reverse=True)
 
-    # ── 2. Mapa de estilos (do snapshot_timeline) ────────────────────────────
-    estilos: list[dict[str, Any]] = []
+    # ── leituras por seleção (snapshot acumulado) ────────────────────────────
+    eficiencia: list[dict[str, Any]] = []
+    quadrante: dict[str, Any] = {"pontos": [], "cria_ref": None}
+    estilo_resultado: list[dict[str, Any]] = []
+    estilos_mapa: list[dict[str, Any]] = []
+    fases: list[dict[str, Any]] = []
+    defesa: list[dict[str, Any]] = []
+
     if not timeline.empty and "snapshot_jogo" in timeline.columns:
         last = int(timeline["snapshot_jogo"].max())
         target = last if snapshot is None else min(snapshot, last)
-        snap = timeline[timeline["snapshot_jogo"] == target]
-        axes = {"estilo_posse": "posse", "estilo_verticalidade": "verticalidade", "estilo_pressao": "pressao"}
-        if all(c in snap.columns for c in axes) and "estilo_jogo" in snap.columns:
+        snap = timeline[timeline["snapshot_jogo"] == target].copy()
+        if "jogos" in snap.columns:
+            snap = snap[snap["jogos"] >= 1]
+
+        # eficiência (gols − xG por jogo) + quadrante (cria × converte)
+        if {"xg_pj", "gols_pj"}.issubset(snap.columns):
+            snap["criaPj"] = pd.to_numeric(snap["xg_pj"], errors="coerce")
+            snap["convPj"] = pd.to_numeric(snap["gols_pj"], errors="coerce") - snap["criaPj"]
+            ef = snap[snap["criaPj"].notna() & snap["convPj"].notna()]
+            for r in ef.sort_values("convPj", ascending=False).itertuples():
+                eficiencia.append({"team": r.team, "xg": round(r.criaPj, 2),
+                                   "gols": round(_num(r.gols_pj), 2), "overperf": round(r.convPj, 2)})
+            cria_ref = float(ef["criaPj"].median()) if not ef.empty else 0.0
+            # Zona neutra: quem está perto do centro nos DOIS eixos não é cravado
+            # num perfil (números próximos das linhas = classificação incerta).
+            mx = 0.5 * float(ef["criaPj"].std(ddof=0) or 0.0)
+            my = 0.5 * float(ef["convPj"].std(ddof=0) or 0.0)
+            quadrante["cria_ref"] = round(cria_ref, 2)
+            quadrante["mx"] = round(mx, 2)
+            quadrante["my"] = round(my, 2)
+            for r in ef.itertuples():
+                if abs(r.criaPj - cria_ref) <= mx and abs(r.convPj) <= my:
+                    perfil = "Neutro"
+                else:
+                    cria_hi = r.criaPj >= cria_ref
+                    conv_pos = r.convPj >= 0
+                    perfil = ("Elite" if (cria_hi and conv_pos) else
+                              "Frustrados" if (cria_hi and not conv_pos) else
+                              "Oportunistas" if (not cria_hi and conv_pos) else "Em apuros")
+                quadrante["pontos"].append({"team": r.team, "cria": round(r.criaPj, 2),
+                                            "converte": round(r.convPj, 2), "perfil": perfil})
+
+        # estilo × resultado
+        if {"estilo_jogo", "points", "jogos"}.issubset(snap.columns):
+            for arq, d in snap.groupby("estilo_jogo"):
+                jg = float(pd.to_numeric(d["jogos"], errors="coerce").sum())
+                pts = float(pd.to_numeric(d["points"], errors="coerce").sum())
+                if jg <= 0 or not arq:
+                    continue
+                estilo_resultado.append({
+                    "arquetipo": arq, "n": int(len(d)),
+                    "pts_jogo": round(pts / jg, 2),
+                    "aproveitamento": round(pts / (jg * 3) * 100),
+                })
+            estilo_resultado.sort(key=lambda e: e["pts_jogo"], reverse=True)
+
+        # mapa de estilos
+        if all(c in snap.columns for c in ("estilo_posse", "estilo_verticalidade", "estilo_jogo")):
             for r in snap.itertuples():
-                ponto = {"team": r.team, "arquetipo": getattr(r, "estilo_jogo", None)}
-                for col, key in axes.items():
-                    ponto[key] = round(_num(getattr(r, col)), 1)
-                if not np.isnan(ponto["posse"]):
-                    estilos.append(ponto)
+                p, v = _num(r.estilo_posse), _num(r.estilo_verticalidade)
+                if not np.isnan(p) and not np.isnan(v):
+                    estilos_mapa.append({"team": r.team, "posse": round(p, 1),
+                                         "verticalidade": round(v, 1), "arquetipo": getattr(r, "estilo_jogo", None)})
 
-    # ── 3. Paisagem de eficiência (xG × gols por jogo) ───────────────────────
-    eficiencia: list[dict[str, Any]] = []
-    if not timeline.empty and {"xg_pj", "gols_pj"}.issubset(timeline.columns):
-        last = int(timeline["snapshot_jogo"].max())
-        target = last if snapshot is None else min(snapshot, last)
-        snap = timeline[timeline["snapshot_jogo"] == target]
-        for r in snap.itertuples():
-            xg, gols = _num(getattr(r, "xg_pj")), _num(getattr(r, "gols_pj"))
-            if not np.isnan(xg) and not np.isnan(gols):
-                eficiencia.append({"team": r.team, "xg": round(xg, 2), "gols": round(gols, 2)})
+        # de onde vem o perigo (líder por fase)
+        for col, label in _PHASES:
+            if col in snap.columns:
+                s = snap[snap[col].notna()]
+                if not s.empty:
+                    top = s.sort_values(col, ascending=False).iloc[0]
+                    fases.append({"fase": label, "team": top["team"]})
 
-    # ── 4. Correlações entre métricas (redundância / oposição) ───────────────
-    correlacoes: list[dict[str, Any]] = []
-    mat = tg[metrics].apply(pd.to_numeric, errors="coerce")
-    cm = mat.corr()
-    seen: set[frozenset[str]] = set()
-    pares: list[tuple[float, str, str]] = []
-    for a in metrics:
-        for b in metrics:
-            if a == b or frozenset({a, b}) in seen:
-                continue
-            seen.add(frozenset({a, b}))
-            c = cm.loc[a, b]
-            if pd.notna(c):
-                pares.append((float(c), a, b))
-    pares.sort(key=lambda p: abs(p[0]), reverse=True)
-    for c, a, b in pares[:10]:
-        correlacoes.append({
-            "a": a, "b": b, "label_a": METRIC_LABELS[a], "label_b": METRIC_LABELS[b],
-            "corr": round(c, 2),
-        })
+        # defesa: o que segura (melhores por xG sofrido)
+        if "xg_sofrido_pj" in snap.columns:
+            d = snap[snap["xg_sofrido_pj"].notna()].sort_values("xg_sofrido_pj").head(5)
+            for r in d.itertuples():
+                defesa.append({
+                    "team": r.team,
+                    "xg_sofrido": round(_num(r.xg_sofrido_pj), 2),
+                    "clean_sheets": int(_num(getattr(r, "clean_sheet", 0))),
+                    "estilo": getattr(r, "estilo_jogo", None),
+                })
 
     return {
         "amostra": len(tg),
-        "decisao": decisao,
-        "estilos": estilos,
+        "decide": decide,
         "eficiencia": eficiencia,
-        "correlacoes": correlacoes,
+        "quadrante": quadrante,
+        "estilo_resultado": estilo_resultado,
+        "estilos_mapa": estilos_mapa,
+        "fases": fases,
+        "defesa": defesa,
     }
