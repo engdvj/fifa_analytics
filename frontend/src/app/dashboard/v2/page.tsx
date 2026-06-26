@@ -373,7 +373,8 @@ export default function DashboardV2Page() {
             </button>
           ))}
         </nav>
-        {/* Pills de pesos (topo, como no legacy) — clicar ranqueia por aquele componente */}
+        {/* Pills de pesos — não se aplicam ao Analytics, então ficam escondidos lá. */}
+        {tab !== "analise" ? (
         <div className="v2-weight-strip" style={{ flex: 1, display: "flex", justifyContent: "center", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
           <span className="v2-weight-strip-label">Pesos fixos</span>
           {/* Geral = combinação dos 6 (100%); ranqueia pelo score_geral */}
@@ -418,13 +419,15 @@ export default function DashboardV2Page() {
             <CircleQuestionMark size={16} strokeWidth={2.2} />
           </button>
         </div>
+        ) : <div style={{ flex: 1 }} />}
         {/* Play + slider compacto, no topo (como o legacy) */}
         {snapshotMatches.length > 0 && (
           <GameSlider matches={snapshotMatches} currentGame={activeSnapshot} onGameChange={setCurrentSnapshot} compact />
         )}
       </header>
 
-      {/* Barra de filtros (compartilhada entre as abas) */}
+      {/* Barra de filtros — escondida no Analytics (que tem seu próprio seletor de seleções). */}
+      {tab !== "analise" && (
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 20px", background: "#0d1117", borderBottom: "1px solid #161b22", flexWrap: "wrap" }}>
         <FilterSelect label="Grupo" value={filters.group} onChange={(v) => setFilters((f) => ({ ...f, group: v }))} options={groups.map((g) => [g, g])} suggested={groupSuggested} />
         <FilterSelect label="Confederação" value={filters.confed} onChange={(v) => setFilters((f) => ({ ...f, confed: v }))} options={confeds.map((c) => [c, c])} suggested={confedSuggested} />
@@ -477,6 +480,7 @@ export default function DashboardV2Page() {
           {!isLoading && !error && <span style={{ color: "#3fb950" }}>● {teamsAtSnapshot.length} seleções no snapshot {activeSnapshot}</span>}
         </span>
       </div>
+      )}
 
       {/* Navegação no tempo: dots de fases, largura total */}
       {chronologicalMatches.length > 0 && (
@@ -542,7 +546,7 @@ export default function DashboardV2Page() {
         ) : tab === "players" ? (
           <PlayersTab activeSnapshot={activeSnapshot} passesFilters={passesFilters} selectedTeams={selectedTeams} search={dashSearch} />
         ) : tab === "analise" ? (
-          <AnaliseTab matches={matches} activeSnapshot={activeSnapshot} isAdmin={isAdmin} />
+          <AnaliseTab matches={matches} activeSnapshot={activeSnapshot} isAdmin={isAdmin} onSnapshotChange={setCurrentSnapshot} />
         ) : (
           <GruposChaveTab
             matches={matches}

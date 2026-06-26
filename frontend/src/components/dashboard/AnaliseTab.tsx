@@ -1,8 +1,8 @@
 "use client";
 
 import React from "react";
-import { Insight, Match, MatchComparison, DescriptiveDigest } from "@/lib/api";
-import { useInsights, useInsightNarrative, useMatchComparison, useDescriptive } from "@/lib/hooks";
+import { Insight, Match, MatchComparison, DescriptiveDigest, TeamSnapshot } from "@/lib/api";
+import { useInsights, useInsightNarrative, useMatchComparison, useDescriptive, useTeamSnapshots } from "@/lib/hooks";
 import Flag from "@/components/ui/Flag";
 import Spinner from "@/components/ui/Spinner";
 import { getKit } from "@/lib/teamUtils";
@@ -13,7 +13,7 @@ import ExploratoriaView from "@/components/dashboard/ExploratoriaView";
 // Descritiva é escopada no AGREGADO (panorama do torneio/rodada: totais, recordes,
 // líderes, zebras) — não repete os números de um jogo, que a Diagnóstica já mostra.
 const TIPOS: { id: string; label: string; pronto: boolean; hint: string }[] = [
-  { id: "descritiva", label: "Descritiva", pronto: true, hint: "Panorama do torneio" },
+  { id: "descritiva", label: "Panorama da competição", pronto: true, hint: "Panorama do torneio" },
   { id: "exploratoria", label: "Exploratória", pronto: true, hint: "Que padrões existem" },
   { id: "diagnostica", label: "Diagnóstica", pronto: true, hint: "Por que aconteceu" },
   { id: "preditiva", label: "Preditiva", pronto: false, hint: "O que vem" },
@@ -47,17 +47,54 @@ interface Props {
   matches: Match[];
   activeSnapshot: number;
   isAdmin: boolean;
+  onSnapshotChange?: (snap: number) => void;
 }
 
-export default function AnaliseTab({ matches, activeSnapshot, isAdmin }: Props) {
+export default function AnaliseTab({ matches, activeSnapshot, isAdmin, onSnapshotChange }: Props) {
   const [tipo, setTipo] = React.useState("diagnostica");
+  const [selectedTeams, setSelectedTeams] = React.useState<string[]>([]);
   const isDiag = tipo === "diagnostica";
   const isDesc = tipo === "descritiva";
   const isExpl = tipo === "exploratoria";
+
+  const toggleTeam = React.useCallback((t: string) => {
+    setSelectedTeams((s) => (s.includes(t) ? s.filter((x) => x !== t) : [...s, t]));
+  }, []);
+
+  const allTeams = React.useMemo(() => {
+    const set = new Set<string>();
+    for (const m of matches) { if (m.home_team) set.add(m.home_team); if (m.away_team) set.add(m.away_team); }
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "pt-BR"));
+  }, [matches]);
+
+  // snapshot (índice cronológico) de cada jogo finalizado
+  const matchSnapshot = React.useMemo(() => {
+    const fin = matches.filter((m) => m.status === "finalizado")
+      .sort((a, b) => String(a.date_utc).localeCompare(String(b.date_utc)));
+    const map = new Map<string, number>();
+    fin.forEach((m, i) => map.set(m.match_id, i + 1));
+    return map;
+  }, [matches]);
+
+  // Diagnóstica: jogos das seleções marcadas, sempre do primeiro ao último.
+  const diagGames = React.useMemo(() => {
+    if (selectedTeams.length === 0) return [];
+    return matches.filter((m) => m.status === "finalizado"
+      && (selectedTeams.includes(m.home_team ?? "") || selectedTeams.includes(m.away_team ?? "")))
+      .sort((a, b) => String(a.date_utc).localeCompare(String(b.date_utc)));
+  }, [matches, selectedTeams]);
+
+  // Diagnóstica é regida pelo slider GLOBAL (activeSnapshot) — assim o jogo
+  // escolhido fica em sincronia com a barrinha/dots do dashboard.
   const enabled = isAdmin && isDiag;
   const { insights, isLoading, error } = useInsights({ tipo, snapshot: activeSnapshot, enabled });
   const { narrative } = useInsightNarrative({ tipo, snapshot: activeSnapshot, enabled });
   const { digest, isLoading: digestLoading } = useDescriptive(activeSnapshot, isAdmin && isDesc);
+  const { snapshots: teamSnaps } = useTeamSnapshots(activeSnapshot);
+  const selectedRows = React.useMemo(
+    () => teamSnaps.filter((s: TeamSnapshot) => selectedTeams.includes(s.team)),
+    [teamSnaps, selectedTeams],
+  );
 
   const game = React.useMemo(() => {
     const items = insights.filter((i) => i.snapshot === activeSnapshot);
@@ -66,12 +103,25 @@ export default function AnaliseTab({ matches, activeSnapshot, isAdmin }: Props) 
     return { matchId, match: matches.find((m) => m.match_id === matchId), items };
   }, [insights, activeSnapshot, matches]);
 
-  if (!isAdmin) return <Aviso texto="Acesso restrito a administradores." />;
+  // Ao focar uma seleção na Diagnóstica, se o jogo atual do slider não for
+  // dela, pula a barrinha para o jogo mais recente da seleção.
+  React.useEffect(() => {
+    if (!isDiag || diagGames.length === 0 || !onSnapshotChange) return;
+    const atual = matches.find((m) => matchSnapshot.get(m.match_id) === activeSnapshot);
+    const ehDela = atual && diagGames.some((g) => g.match_id === atual.match_id);
+    if (!ehDela) {
+      const ultimo = diagGames[diagGames.length - 1];
+      const snap = matchSnapshot.get(ultimo.match_id);
+      if (snap) onSnapshotChange(snap);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDiag, selectedTeams]);
 
+  if (!isAdmin) return <Aviso texto="Acesso restrito a administradores." />;
   const tipoAtual = TIPOS.find((t) => t.id === tipo);
 
   return (
-    <div style={{ maxWidth: 960, margin: "0 auto" }}>
+    <div style={{ maxWidth: 1500, margin: "0 auto" }}>
       <nav style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "center", marginBottom: 16 }}>
         {TIPOS.map((t) => (
           <button
@@ -86,18 +136,29 @@ export default function AnaliseTab({ matches, activeSnapshot, isAdmin }: Props) 
         ))}
       </nav>
 
+      <TeamFocusBar teams={allTeams} selected={selectedTeams} onToggle={toggleTeam} onClear={() => setSelectedTeams([])} />
+
+      {isExpl && (
+        <p style={{ fontSize: 12.5, color: "var(--text-muted)", textAlign: "center", margin: "0 0 14px", lineHeight: 1.5 }}>
+          <b style={{ color: "var(--text)" }}>Padrões da competição</b> — o que se repete ao longo dos jogos; cresce conforme você avança.
+        </p>
+      )}
+
       {isExpl ? (
-        <ExploratoriaView snapshot={activeSnapshot} enabled={isAdmin && isExpl} />
+        <ExploratoriaView snapshot={activeSnapshot} enabled={isAdmin && isExpl} selectedTeams={selectedTeams} onToggleTeam={toggleTeam} />
       ) : isDesc ? (
         digestLoading
           ? <div style={{ display: "flex", justifyContent: "center", padding: "40px 0" }}><Spinner /></div>
-          : <DigestView digest={digest} />
+          : <DigestView digest={digest} selectedTeams={selectedTeams} selectedRows={selectedRows} />
       ) : isDiag ? (
-        <>
+        <div style={{ maxWidth: 1000, margin: "0 auto" }}>
+          {diagGames.length > 0 && (
+            <GamePicker games={diagGames} activeMatchId={game?.matchId} matchSnapshot={matchSnapshot} onPick={(snap) => onSnapshotChange?.(snap)} />
+          )}
           {error && <Aviso texto={`Erro ao carregar análise: ${String(error)}`} cor="var(--red)" />}
           {isLoading && <div style={{ display: "flex", justifyContent: "center", padding: "40px 0" }}><Spinner /></div>}
           {!isLoading && !error && !game && (
-            <Aviso texto={`Sem análise para o snapshot ${activeSnapshot} — use o controle de tempo para escolher um jogo finalizado.`} />
+            <Aviso texto={selectedTeams.length ? "Selecione um jogo acima." : `Sem análise para o snapshot ${activeSnapshot} — use o controle de tempo ou selecione uma seleção.`} />
           )}
           {game && (
             <GameReport
@@ -109,7 +170,7 @@ export default function AnaliseTab({ matches, activeSnapshot, isAdmin }: Props) 
               enabled={enabled}
             />
           )}
-        </>
+        </div>
       ) : (
         <Aviso texto="Em breve." />
       )}
@@ -117,7 +178,15 @@ export default function AnaliseTab({ matches, activeSnapshot, isAdmin }: Props) 
   );
 }
 
-function DigestView({ digest }: { digest?: DescriptiveDigest }) {
+function DigestView({ digest, selectedTeams = [], selectedRows = [] }: { digest?: DescriptiveDigest; selectedTeams?: string[]; selectedRows?: TeamSnapshot[] }) {
+  // Com seleção(ões) marcada(s), o panorama vira o das seleções (troca no lugar).
+  if (selectedRows.length > 0) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {selectedRows.map((r) => <TeamProfileCard key={r.team} r={r} />)}
+      </div>
+    );
+  }
   if (!digest || !digest.totais) {
     return <Aviso texto="Sem panorama disponível ainda — rode uma coleta." />;
   }
@@ -133,10 +202,6 @@ function DigestView({ digest }: { digest?: DescriptiveDigest }) {
   ];
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <p style={{ fontSize: 12.5, color: "var(--text-muted)", margin: 0, lineHeight: 1.55, textAlign: "center" }}>
-        <b style={{ color: "var(--text)" }}>Panorama — {digest.fase}</b> — o retrato da competição até aqui ({t.jogos} jogos); cresce conforme você avança no tempo.
-      </p>
-
       {/* Manchete: cards de totais */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 }}>
         {cards.map(([label, val]) => (
@@ -152,15 +217,18 @@ function DigestView({ digest }: { digest?: DescriptiveDigest }) {
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 14 }}>
         <ListPanel titulo="Líderes da fase">
-          {digest.lideres.map((l, i) => (
-            <li key={i} style={rowStyle}>
-              <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{l.categoria}</span>
-              <span style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 600, textAlign: "right" }}>
-                <Flag team={l.team} height={13} />{l.team}
-                <span style={{ color: "var(--accent)", fontWeight: 700, fontSize: 11.5 }}>{l.valor}</span>
-              </span>
-            </li>
-          ))}
+          {digest.lideres.map((l, i) => {
+            const on = selectedTeams.includes(l.team);
+            return (
+              <li key={i} style={{ ...rowStyle, background: on ? "#10213a" : undefined }}>
+                <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{l.categoria}</span>
+                <span style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 600, textAlign: "right", color: on ? "var(--accent)" : "var(--text)" }}>
+                  <Flag team={l.team} height={13} />{l.team}
+                  <span style={{ color: "var(--accent)", fontWeight: 700, fontSize: 11.5 }}>{l.valor}</span>
+                </span>
+              </li>
+            );
+          })}
         </ListPanel>
 
         <ListPanel titulo="Atuações & recordes">
@@ -184,6 +252,93 @@ function DigestView({ digest }: { digest?: DescriptiveDigest }) {
         </ListPanel>
       )}
     </div>
+  );
+}
+
+// Componentes do score_geral (cor por componente, como no dashboard).
+const SCORE_COMPS: { key: string; label: string; color: string }[] = [
+  { key: "score_resultado", label: "Resultado", color: "#58a6ff" },
+  { key: "score_ataque", label: "Ataque", color: "#f0883e" },
+  { key: "score_defesa", label: "Defesa", color: "#3fb950" },
+  { key: "score_eficiencia", label: "Eficiência", color: "#d29922" },
+  { key: "score_controle", label: "Controle", color: "#a371f7" },
+  { key: "score_forca_relativa", label: "Força rel.", color: "#f85149" },
+];
+
+// Cards de perfil das seleções marcadas no rail (dados do snapshot atual).
+function TeamProfileCard({ r }: { r: TeamSnapshot }) {
+  const nv = (v: unknown, d = 2) => (typeof v === "number" ? v.toFixed(d).replace(".", ",") : "—");
+  // Tiles de manchete — mesma cara dos totais do torneio, mas do time.
+  const tiles: [string | number, string][] = [
+    [r.jogos ?? "—", "Jogos"],
+    [r.gols ?? "—", "Gols"],
+    [r.gols_contra ?? "—", "Gols sofridos"],
+    [r.saldo_gols ?? "—", "Saldo"],
+    [typeof r.aproveitamento === "number" ? `${Math.round(r.aproveitamento * 100)}%` : "—", "Aproveitamento"],
+    [nv(r.score_geral, 1), "Score geral"],
+  ];
+  const stats: [string, string][] = [
+    [String(r.points ?? "—"), "Pontos"],
+    [nv(r["xg_pj"]), "xG / jogo"],
+    [nv(r["xg_sofrido_pj"]), "xG sofrido / jogo"],
+    [r.elo_rating != null ? String(Math.round(r.elo_rating)) : "—", "Elo"],
+  ];
+  return (
+    <section style={{ background: "var(--background)", border: "1px solid var(--surface2)", borderRadius: 12, overflow: "hidden" }}>
+      <header style={{ display: "flex", alignItems: "center", gap: 10, padding: "13px 16px", background: "var(--surface)", borderBottom: "1px solid var(--surface2)" }}>
+        <Flag team={r.team} height={22} />
+        <span style={{ fontWeight: 700, fontSize: 16, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.team}</span>
+        {r.ranking_score_geral != null && (
+          <span style={{ fontSize: 12, fontWeight: 700, color: "var(--accent)", background: "var(--background)", border: "1px solid var(--surface2)", borderRadius: 6, padding: "3px 9px" }}>{r.ranking_score_geral}º no geral</span>
+        )}
+        {typeof r.estilo_jogo === "string" && (
+          <span style={{ fontSize: 11, color: "var(--text-muted)", border: "1px solid var(--surface2)", borderRadius: 6, padding: "3px 9px" }}>{r.estilo_jogo}</span>
+        )}
+      </header>
+      <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+        {/* Manchete: tiles */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 10 }}>
+          {tiles.map(([v, l]) => (
+            <div key={l} style={{ background: "var(--surface)", border: "1px solid var(--surface2)", borderRadius: 10, padding: "12px 6px", textAlign: "center" }}>
+              <div style={{ fontSize: 22, fontWeight: 800, color: "var(--accent)" }}>{v}</div>
+              <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{l}</div>
+            </div>
+          ))}
+        </div>
+        {/* Componentes do score + stats avançadas, lado a lado */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
+          <div>
+            <SectionLabel texto="Componentes do score" cor="var(--text-muted)" />
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+              {SCORE_COMPS.map((c) => {
+                const v = r[c.key];
+                const val = typeof v === "number" ? v : null;
+                return (
+                  <div key={c.key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                    <span style={{ width: 76, color: "var(--text-muted)", flexShrink: 0 }}>{c.label}</span>
+                    <div style={{ flex: 1, height: 7, background: "var(--surface2)", borderRadius: 4, overflow: "hidden" }}>
+                      <div style={{ width: `${val ?? 0}%`, height: "100%", background: c.color }} />
+                    </div>
+                    <span style={{ width: 26, textAlign: "right", fontWeight: 700, color: "var(--text)", flexShrink: 0 }}>{val != null ? Math.round(val) : "—"}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <div>
+            <SectionLabel texto="Números" cor="var(--text-muted)" />
+            <div style={{ marginTop: 8 }}>
+              {stats.map(([v, l]) => (
+                <div key={l} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, borderTop: "1px solid var(--surface)", padding: "7px 0" }}>
+                  <span style={{ color: "var(--text-muted)" }}>{l}</span>
+                  <span style={{ fontWeight: 700 }}>{v}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -256,7 +411,7 @@ function GameReport({ match, matchId, items, narrative, tipoLabel, enabled }: {
     items.filter((i) => i.team === team && i.direcao === dir && i.categoria !== "Veredito" && i.categoria !== "Contexto");
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 18, maxWidth: 1000, margin: "0 auto", width: "100%" }}>
       {/* ── HERO: placar + veredito ─────────────────────────────────────── */}
       <header style={{ background: "var(--surface)", border: "1px solid var(--surface2)", borderRadius: 14, padding: "18px 20px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14, justifyContent: "center" }}>
@@ -441,6 +596,87 @@ function Badge({ texto }: { texto: string }) {
 
 function Aviso({ texto, cor = "var(--text-muted)" }: { texto: string; cor?: string }) {
   return <div style={{ padding: "24px 0", textAlign: "center", fontSize: 13, color: cor }}>{texto}</div>;
+}
+
+// Barra de foco — chips das seleções em foco + popover de busca pra adicionar.
+function TeamFocusBar({ teams, selected, onToggle, onClear }: { teams: string[]; selected: string[]; onToggle: (t: string) => void; onClear: () => void }) {
+  const [open, setOpen] = React.useState(false);
+  const [q, setQ] = React.useState("");
+  const ref = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+  const norm = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  const filtered = q ? teams.filter((t) => norm(t).includes(norm(q))) : teams;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 16, minHeight: 34 }}>
+      <span style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "var(--text-muted)", fontWeight: 700, flexShrink: 0 }}>Em foco</span>
+      {selected.length === 0 && <span style={{ fontSize: 12.5, color: "var(--text-muted)" }}>nenhuma — mostrando o panorama geral</span>}
+      {selected.map((t) => (
+        <span key={t} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12.5, background: "#10213a", border: "1px solid var(--accent)", borderRadius: 16, padding: "3px 5px 3px 10px", color: "var(--text)" }}>
+          <Flag team={t} height={12} />{t}
+          <button onClick={() => onToggle(t)} title="Remover" style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: "0 3px" }}>×</button>
+        </span>
+      ))}
+      <div ref={ref} style={{ position: "relative" }}>
+        <button onClick={() => setOpen((o) => !o)}
+          style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, background: open ? "#1a2233" : "var(--surface)", border: `1px solid ${open ? "var(--accent)" : "var(--surface2)"}`, color: "var(--text)", borderRadius: 16, padding: "4px 12px", cursor: "pointer", fontFamily: "inherit" }}>
+          ＋ seleção
+        </button>
+        {open && (
+          <div style={{ position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 60, width: 520, maxWidth: "90vw", background: "var(--surface)", border: "1px solid var(--surface2)", borderRadius: 10, boxShadow: "0 12px 32px rgba(0,0,0,0.5)", overflow: "hidden" }}>
+            <div style={{ padding: 8, borderBottom: "1px solid var(--surface2)" }}>
+              <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar seleção…"
+                style={{ width: "100%", background: "var(--background)", color: "var(--text)", border: "1px solid var(--surface2)", borderRadius: 6, padding: "6px 9px", fontSize: 12.5, outline: "none", fontFamily: "inherit" }} />
+            </div>
+            <div style={{ maxHeight: 320, overflowY: "auto", padding: 8, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 4 }}>
+              {filtered.map((t) => {
+                const on = selected.includes(t);
+                return (
+                  <button key={t} onClick={() => onToggle(t)} title={t}
+                    style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", padding: "5px 8px", borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "inherit", background: on ? "#10213a" : "transparent", border: `1px solid ${on ? "var(--accent)" : "transparent"}`, color: on ? "var(--text)" : "var(--text-muted)" }}>
+                    <Flag team={t} height={11} />
+                    <span style={{ flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t}</span>
+                    {on && <span style={{ color: "var(--accent)", fontSize: 10, flexShrink: 0 }}>✓</span>}
+                  </button>
+                );
+              })}
+              {filtered.length === 0 && <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "var(--text-muted)", textAlign: "center", padding: 8 }}>nenhuma</div>}
+            </div>
+          </div>
+        )}
+      </div>
+      {selected.length > 0 && (
+        <button onClick={onClear} style={{ fontSize: 11.5, color: "var(--accent)", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }}>limpar ({selected.length})</button>
+      )}
+    </div>
+  );
+}
+
+// Picker de jogos da seleção marcada (Diagnóstica isola por jogo).
+function GamePicker({ games, activeMatchId, matchSnapshot, onPick }: { games: Match[]; activeMatchId?: string; matchSnapshot: Map<string, number>; onPick: (snap: number) => void }) {
+  return (
+    <div style={{ display: "flex", gap: 8, overflowX: "auto", padding: "0 0 12px" }}>
+      {games.map((m) => {
+        const on = m.match_id === activeMatchId;
+        const snap = matchSnapshot.get(m.match_id);
+        return (
+          <button key={m.match_id} onClick={() => snap && onPick(snap)} disabled={!snap} title={`${m.home_team} x ${m.away_team}`}
+            style={{
+              flexShrink: 0, display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 8, fontSize: 12, cursor: snap ? "pointer" : "default", fontFamily: "inherit",
+              background: on ? "#10213a" : "var(--surface)", border: `1px solid ${on ? "var(--accent)" : "var(--surface2)"}`, color: "var(--text)",
+            }}>
+            <Flag team={m.home_team ?? ""} height={12} />
+            <b>{m.home_score}–{m.away_score}</b>
+            <Flag team={m.away_team ?? ""} height={12} />
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 // Mesmo visual das abas do dashboard (v2/page.tsx → tabStyle).

@@ -199,13 +199,16 @@ export interface DescriptiveDigest {
   zebras: { titulo: string; nota: string; match_id?: string }[];
 }
 
-// Padrões e relações entre jogos (camada Exploratória).
+// Padrões e relações entre jogos (camada Exploratória — EDA com sentido).
 export interface ExploratoryData {
   amostra: number;
-  decisao?: { metric: string; label: string; corr: number }[];
-  estilos?: { team: string; arquetipo: string | null; posse: number; verticalidade: number; pressao: number }[];
-  eficiencia?: { team: string; xg: number; gols: number }[];
-  correlacoes?: { a: string; b: string; label_a: string; label_b: string; corr: number }[];
+  decide?: { metric: string; label: string; corr: number }[];
+  eficiencia?: { team: string; xg: number; gols: number; overperf: number }[];
+  quadrante?: { cria_ref: number | null; mx?: number; my?: number; pontos: { team: string; cria: number; converte: number; perfil: string }[] };
+  estilo_resultado?: { arquetipo: string; n: number; pts_jogo: number; aproveitamento: number }[];
+  estilos_mapa?: { team: string; posse: number; verticalidade: number; arquetipo: string | null }[];
+  fases?: { fase: string; team: string }[];
+  defesa?: { team: string; xg_sofrido: number; clean_sheets: number; estilo: string | null }[];
 }
 
 // Métricas das duas seleções no jogo, lado a lado (head-to-head).
