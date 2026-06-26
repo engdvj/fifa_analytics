@@ -24,15 +24,18 @@ import RankingRaceScores, { METRIC_OPTIONS } from "@/components/dashboard/Rankin
 import SelecoesTab from "@/components/dashboard/SelecoesTab";
 import PlayersTab from "@/components/dashboard/PlayersTab";
 import GruposChaveTab from "@/components/dashboard/GruposChaveTab";
+import AnaliseTab from "@/components/dashboard/AnaliseTab";
 import Flag from "@/components/ui/Flag";
+import { useAuth } from "@/lib/auth-context";
 
-type Tab = "race" | "teams" | "players" | "groups";
+type Tab = "race" | "teams" | "players" | "groups" | "analise";
 
-const TABS: { id: Tab; label: string }[] = [
+const TABS: { id: Tab; label: string; adminOnly?: boolean }[] = [
   { id: "groups", label: "Grupos" },
   { id: "teams", label: "Seleções" },
   { id: "players", label: "Jogadores" },
   { id: "race", label: "Ranking Race" },
+  { id: "analise", label: "Analytics", adminOnly: true },
 ];
 
 // Rótulos pt-BR das fases (o gold guarda em inglês).
@@ -173,6 +176,9 @@ const WEIGHT_DETAILS: Record<WeightKey, {
 };
 
 export default function DashboardV2Page() {
+  const { user } = useAuth();
+  const isAdmin = !!user?.is_admin;
+  const visibleTabs = React.useMemo(() => TABS.filter((t) => !t.adminOnly || isAdmin), [isAdmin]);
   const [tab, setTab] = React.useState<Tab>("groups");
   const [filters, setFilters] = React.useState<DashboardFilters>(EMPTY_FILTERS);
   const [selectedTeams, setSelectedTeams] = React.useState<string[]>([]);
@@ -361,7 +367,7 @@ export default function DashboardV2Page() {
       {/* Header + abas */}
       <header style={{ display: "flex", alignItems: "center", gap: 16, height: 48, padding: "0 20px", background: "#0d1117", borderBottom: "1px solid #21262d" }}>
         <nav style={{ display: "flex", gap: 4 }}>
-          {TABS.map((t) => (
+          {visibleTabs.map((t) => (
             <button key={t.id} onClick={() => setTab(t.id)} style={tabStyle(tab === t.id)}>
               {t.label}
             </button>
@@ -535,6 +541,8 @@ export default function DashboardV2Page() {
           />
         ) : tab === "players" ? (
           <PlayersTab activeSnapshot={activeSnapshot} passesFilters={passesFilters} selectedTeams={selectedTeams} search={dashSearch} />
+        ) : tab === "analise" ? (
+          <AnaliseTab matches={matches} activeSnapshot={activeSnapshot} isAdmin={isAdmin} />
         ) : (
           <GruposChaveTab
             matches={matches}

@@ -78,6 +78,32 @@ def test_sem_token_401(client):
     assert client.post("/admin/recalc").status_code == 401
 
 
+def test_insights_restrito_a_admin(client):
+    # sem token → 401
+    assert client.get("/analytics/insights").status_code == 401
+    # usuário comum → 403
+    tok = _register(client, "user@x.com")
+    h = {"Authorization": f"Bearer {tok}"}
+    assert client.get("/analytics/insights", headers=h).status_code == 403
+    # admin → 200 (lista; pode ser vazia se não houver gold)
+    _make_admin(client, "user@x.com")
+    r = client.get("/analytics/insights", headers=h)
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
+
+
+def test_insight_narrative_restrito_a_admin(client):
+    assert client.get("/analytics/insights/narrative").status_code == 401
+    tok = _register(client, "user@x.com")
+    h = {"Authorization": f"Bearer {tok}"}
+    assert client.get("/analytics/insights/narrative", headers=h).status_code == 403
+    _make_admin(client, "user@x.com")
+    r = client.get("/analytics/insights/narrative", headers=h)
+    assert r.status_code == 200
+    body = r.json()
+    assert "exists" in body and "paragraphs" in body
+
+
 def test_me_expoe_is_admin(client):
     tok = _register(client, "adm@x.com")
     _make_admin(client, "adm@x.com")

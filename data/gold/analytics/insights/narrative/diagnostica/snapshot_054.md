@@ -1,0 +1,4 @@
+<!-- analise-manual -->
+A África do Sul venceu a Coreia do Sul por 1 a 0 num jogo que é quase um manual sobre a diferença entre mandar no campo e mandar no jogo. Os coreanos foram donos do terço final — 71% de controle — e mesmo assim saíram derrotados. Toda aquela presença ofensiva não virou perigo de verdade: a posse rodava, mas parava antes de produzir a chance clara.
+
+Do outro lado, a África do Sul fez o oposto e o suficiente. Cedeu o território de bom grado e, com bem menos bola, foi quem mais ameaçou — o xG terminou 0,89 a 0,74 a favor de quem venceu, detalhe que mostra como o domínio coreano era mais aparente que real. Foi vitória de pragmatismo e transição: esperar, recuperar e atacar o espaço, transformando o pouco que criou no gol que decidiu. No fim, quem controlou o campo não foi quem controlou o placar.

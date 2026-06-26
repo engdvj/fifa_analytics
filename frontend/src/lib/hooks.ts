@@ -52,3 +52,35 @@ export function useWeights() {
   const { data, isLoading, error } = useSWR("weights", () => analytics.weights());
   return { weights: data, isLoading, error };
 }
+
+// Achados de análise (admin-only). `enabled=false` não dispara o fetch (evita
+// 403 para não-admin). Filtra por snapshot quando informado.
+export function useInsights(params?: { snapshot?: number; tipo?: string; enabled?: boolean }) {
+  const enabled = params?.enabled ?? true;
+  const tipo = params?.tipo ?? "diagnostica";
+  const { data, isLoading, error } = useSWR(
+    enabled ? ["insights", tipo, params?.snapshot ?? "all"] : null,
+    () => analytics.insights({ tipo, snapshot: params?.snapshot })
+  );
+  return { insights: data ?? [], isLoading, error };
+}
+
+// Métricas head-to-head de um jogo. `enabled=false` não dispara.
+export function useMatchComparison(matchId: string | null, enabled = true) {
+  const { data, isLoading } = useSWR(
+    enabled && matchId ? ["match-comparison", matchId] : null,
+    () => analytics.matchComparison(matchId as string)
+  );
+  return { comparison: data, isLoading };
+}
+
+// Narrativa (prosa) de um snapshot. `enabled=false` não dispara (evita 403).
+export function useInsightNarrative(params?: { snapshot?: number; tipo?: string; enabled?: boolean }) {
+  const enabled = params?.enabled ?? true;
+  const tipo = params?.tipo ?? "diagnostica";
+  const { data, isLoading } = useSWR(
+    enabled ? ["insight-narrative", tipo, params?.snapshot ?? "latest"] : null,
+    () => analytics.insightNarrative({ tipo, snapshot: params?.snapshot })
+  );
+  return { narrative: data, isLoading };
+}

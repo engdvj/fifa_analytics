@@ -1,0 +1,4 @@
+<!-- analise-manual -->
+A Copa abre com um recado claro do México: 2 a 0 sobre a África do Sul fazendo por merecer. O xG conta a história sem espaço para dúvida — 1,78 a 0,10 —, ou seja, os anfitriões não só venceram como praticamente monopolizaram o perigo real da partida. O domínio veio acompanhado de controle territorial (62% do terço final), o casamento que todo treinador quer: mandar no jogo e transformar esse mando em gols.
+
+O jogo, porém, foi áspero: três expulsões no total (uma mexicana, duas sul-africanas) deixaram a partida desfalcada dos dois lados e ajudam a explicar o placar enxuto diante de tamanha superioridade ofensiva. Vale o lembrete de método: com um único jogo disputado, qualquer leitura aqui é um ponto solto, não uma tendência — o "2º no ranking" da África do Sul é só efeito de ainda haver apenas duas seleções em campo. A partir das próximas rodadas as comparações começam a ganhar lastro.

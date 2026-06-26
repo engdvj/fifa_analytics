@@ -12,8 +12,10 @@ from typing import Any
 
 import pandas as pd
 import yaml
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from api.app.models import User
+from api.app.routers.auth import require_admin
 from fifa_analytics.paths import CONFIG_DIR, GOLD_DIR
 from fifa_analytics.transforms.team_names import traduzir_selecao
 
@@ -273,6 +275,122 @@ def score_weights() -> dict:
     if not path.exists():
         raise HTTPException(404, "weights não disponíveis (rode fifa-coletar)")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+# ── Análise (insights) — RESTRITO A ADMIN ─────────────────────────────────────
+
+@router.get("/insights")
+def insights(
+    tipo: str = Query("diagnostica", description="tipo de análise (diagnostica, …)"),
+    snapshot: int | None = Query(None, description="filtra um snapshot_jogo"),
+    match_id: str | None = Query(None, description="filtra um jogo"),
+    _admin: User = Depends(require_admin),
+) -> list[dict]:
+    """Achados de análise do `fact_insights` (camada de inferência da plataforma).
+
+    Cada item carrega a evidência numérica que o sustenta. Acesso restrito a
+    administradores — é a leitura analítica, não conteúdo público."""
+    df = _parquet("analytics/insights/fact_insights.parquet")
+    if df.empty:
+        return []
+    if tipo and "tipo_analise" in df.columns:
+        df = df[df["tipo_analise"] == tipo]
+    if snapshot is not None:
+        df = df[df["snapshot"] == snapshot]
+    if match_id:
+        df = df[df["match_id"] == match_id]
+    df = df.sort_values(["snapshot", "match_id"]) if "snapshot" in df.columns else df
+    out = []
+    for r in df.to_dict("records"):
+        item = {k: _safe_val(v) for k, v in r.items()}
+        # evidencia é JSON serializado no parquet — devolve como objeto.
+        ev = item.get("evidencia")
+        if isinstance(ev, str):
+            try:
+                item["evidencia"] = json.loads(ev)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        out.append(item)
+    return out
+
+
+# Métricas do confronto, lado a lado (alimenta o head-to-head da aba Analytics).
+_COMPARISON_COLS = [
+    "xg", "posse", "final_third_control", "threat",
+    "chutes", "chutes_no_alvo", "chutes_dentro_area",
+    "passes", "precisao_passes",
+    "defesas_goleiro", "turnovers_forcados", "pressoes_defensivas",
+    "faltas_cometidas", "amarelos", "vermelhos", "escanteios",
+    "distancia_total_km", "sprints",
+]
+
+
+@router.get("/matches/{match_id}/comparison")
+def match_comparison(match_id: str) -> dict:
+    """Métricas-chave das duas seleções no jogo, lado a lado (de team_match_wide).
+
+    Base do comparativo head-to-head da análise diagnóstica."""
+    wide = _parquet("analytics/team_match_wide.parquet")
+    dim = _parquet("dim_match.parquet")
+    if wide.empty or dim.empty:
+        raise HTTPException(404, "dados não disponíveis (rode fifa-coletar)")
+    md = dim[dim["match_id"] == match_id]
+    if md.empty:
+        raise HTTPException(404, "jogo não encontrado")
+    m = md.iloc[0]
+    rows = wide[wide["match_id"] == match_id]
+    cols = [c for c in _COMPARISON_COLS if c in rows.columns]
+
+    def metrics_for(team: str) -> dict:
+        r = rows[rows["team"] == team]
+        if r.empty:
+            return {}
+        rec = r.iloc[0]
+        return {c: _safe_val(rec[c]) for c in cols}
+
+    return {
+        "match_id": match_id,
+        "home_team": _safe_val(m["home_team"]),
+        "away_team": _safe_val(m["away_team"]),
+        "home_score": _safe_val(m.get("home_score")),
+        "away_score": _safe_val(m.get("away_score")),
+        "home": metrics_for(str(m["home_team"])),
+        "away": metrics_for(str(m["away_team"])),
+    }
+
+
+@router.get("/insights/narrative")
+def insight_narrative(
+    tipo: str = Query("diagnostica", description="tipo de análise"),
+    snapshot: int | None = Query(None, description="snapshot (default: o mais recente disponível)"),
+    _admin: User = Depends(require_admin),
+) -> dict:
+    """Leitura analítica em prosa de um snapshot (a 'memória semântica').
+
+    Escrita pela skill `analisar-snapshot` — Claude lê os achados estruturados +
+    a narrativa do snapshot anterior e escreve a leitura. Arquivos em
+    `data/gold/analytics/insights/narrative/{tipo}/snapshot_NNN.md`. Restrito a
+    admin."""
+    base = GOLD_DIR / "analytics" / "insights" / "narrative" / tipo
+    if snapshot is None:
+        # Mais recente disponível.
+        existing = sorted(base.glob("snapshot_*.md")) if base.exists() else []
+        if not existing:
+            return {"tipo": tipo, "snapshot": None, "exists": False, "paragraphs": []}
+        path = existing[-1]
+        snapshot = int(path.stem.split("_")[-1])
+    else:
+        path = base / f"snapshot_{snapshot:03d}.md"
+
+    if not path.exists():
+        return {"tipo": tipo, "snapshot": snapshot, "exists": False, "paragraphs": []}
+
+    text = path.read_text(encoding="utf-8")
+    # Remove o marcador <!-- analise-manual --> e parágrafos vazios.
+    lines = [ln for ln in text.splitlines() if not ln.strip().startswith("<!--")]
+    body = "\n".join(lines).strip()
+    paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+    return {"tipo": tipo, "snapshot": snapshot, "exists": True, "paragraphs": paragraphs}
 
 
 @router.get("/teams/{id_team}/stats")

@@ -168,12 +168,32 @@ export interface Insight {
   team: string;
   adversario: string;
   tipo_analise: string;
+  categoria: string;
   achado_key: string;
   titulo: string;
   detalhe: string;
   direcao: "positivo" | "negativo" | "neutro";
   severidade: "alta" | "media" | "baixa" | "info";
   evidencia: Record<string, unknown>;
+}
+
+// Leitura analítica em prosa de um snapshot (escrita pela skill analisar-snapshot).
+export interface InsightNarrative {
+  tipo: string;
+  snapshot: number | null;
+  exists: boolean;
+  paragraphs: string[];
+}
+
+// Métricas das duas seleções no jogo, lado a lado (head-to-head).
+export interface MatchComparison {
+  match_id: string;
+  home_team: string | null;
+  away_team: string | null;
+  home_score: number | null;
+  away_score: number | null;
+  home: Record<string, number | null>;
+  away: Record<string, number | null>;
 }
 
 export const analytics = {
@@ -185,6 +205,13 @@ export const analytics = {
       Object.fromEntries(Object.entries(params ?? {}).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]))
     ).toString();
     return req<Insight[]>(`/analytics/insights${qs ? `?${qs}` : ""}`);
+  },
+
+  insightNarrative: (params?: { tipo?: string; snapshot?: number }) => {
+    const qs = new URLSearchParams(
+      Object.fromEntries(Object.entries(params ?? {}).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]))
+    ).toString();
+    return req<InsightNarrative>(`/analytics/insights/narrative${qs ? `?${qs}` : ""}`);
   },
 
   teamSnapshots: (snapshot?: number) =>
@@ -204,6 +231,9 @@ export const analytics = {
 
   matchStats: (matchId: string) =>
     req<MatchStatsResponse>(`/analytics/matches/${matchId}/stats`),
+
+  matchComparison: (matchId: string) =>
+    req<MatchComparison>(`/analytics/matches/${matchId}/comparison`),
 
   matchLineups: (matchId: string) =>
     req<LineupPlayer[]>(`/analytics/matches/${matchId}/lineups`),

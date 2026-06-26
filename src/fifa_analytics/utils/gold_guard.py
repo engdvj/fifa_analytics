@@ -33,6 +33,7 @@ KNOWN_GOLD_PARQUETS: frozenset[str] = frozenset({
     "analytics/player_match_wide.parquet",
     "analytics/snapshot_timeline.parquet",
     "analytics/snapshots/player_snapshot_timeline.parquet",
+    "analytics/insights/fact_insights.parquet",
     "standings/fifa_group_standings.parquet",
     "tournament_status/tournament_status.parquet",
 })

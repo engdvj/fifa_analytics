@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+from fifa_analytics.analytics.diagnostic import build_insights
 from fifa_analytics.analytics.player_snapshot import build_player_snapshots
 from fifa_analytics.analytics.snapshot import build_snapshots
 from fifa_analytics.fifa import client, transforms
@@ -154,10 +155,14 @@ def run(*, only_finished: bool = True) -> dict[str, int]:
             player_tl = build_player_snapshots(player_stats, lineups, matches, timeline, power_ranking)
             n_players = player_tl["id_player"].nunique() if not player_tl.empty else 0
             logger.info("FIFA: player_snapshot_timeline — %d jogadores", n_players)
+
+        # 7. ANÁLISE DIAGNÓSTICA: achados do "porquê" por jogo ----------------
+        insights = build_insights(wide, matches, timeline)
+        logger.info("FIFA: fact_insights — %d achados diagnósticos", len(insights))
     else:
         logger.warning("FIFA: sem team_stats — pivot e snapshots pulados")
 
-    # 7. guard anti-stale: remove parquets antigos fora do conjunto canônico
+    # 8. guard anti-stale: remove parquets antigos fora do conjunto canônico
     # (caminhos que mudaram, legado, duplicatas) para o gold não acumular lixo.
     prune_unknown_gold()
 
