@@ -42,3 +42,12 @@ manifests/*.yaml
 
 # Watcher: estado de runtime da janela (posição/tamanho)
 watcher/.window-geometry.json
+
+# Logs de execução/dev (servidores subidos localmente, codex, etc.)
+*.log
+logs_*.txt
+codex-dev.*.log
+frontend/codex-dev.*.log
+
+# Dashboard HTML gerado (saída do scripts/bar_chart_race.py)
+frontend/public/ranking_race.html
