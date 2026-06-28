@@ -288,9 +288,16 @@ function StyleMatchupReading({ a, b, matchup, reverse }: {
 function StyleColumn({ detailStyle, color, row, oppStyle, highlight }: {
   detailStyle: string; color: string; row: StyleMatchup | null; oppStyle: string; highlight: boolean;
 }) {
-  const border = highlight ? color : "var(--surface2)";
+  const side = highlight ? color : "var(--surface2)";
   return (
-    <div style={{ background: "var(--surface)", border: `1px solid ${border}${highlight ? "" : ""}`, borderTop: `3px solid ${color}`, borderRadius: 8, padding: "11px 12px", display: "flex", flexDirection: "column", gap: 9, minWidth: 0 }}>
+    <div style={{
+      background: "var(--surface)",
+      borderTop: `3px solid ${color}`,
+      borderRight: `1px solid ${side}`,
+      borderBottom: `1px solid ${side}`,
+      borderLeft: `1px solid ${side}`,
+      borderRadius: 8, padding: "11px 12px", display: "flex", flexDirection: "column", gap: 9, minWidth: 0,
+    }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
         <b style={{ color, fontSize: 13.5 }}>{styleName(detailStyle)}</b>
         {highlight && <span style={{ fontSize: 10, fontWeight: 800, color, background: `${color}22`, borderRadius: 4, padding: "1px 6px" }}>leva vantagem</span>}
