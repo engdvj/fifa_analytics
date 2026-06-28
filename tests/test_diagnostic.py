@@ -122,3 +122,20 @@ def test_finalizacao_clinica():
     df = build_insights(wide, dim, write=False)
     clinica = _by_key(df, "m1", "finalizacao_clinica")
     assert clinica is not None and clinica["team"] == "A" and clinica["direcao"] == "positivo"
+
+
+def test_goleiro_nao_vira_destaque_em_derrota_pesada():
+    dim = _dim([
+        {"match_id": "m1", "match_number": 1, "status": "finalizado",
+         "home_team": "A", "away_team": "B", "home_score": 0, "away_score": 3,
+         "date_utc": "2026-06-01T00:00:00Z", "stage": "First Stage", "group": "Group A"},
+    ])
+    wide = pd.DataFrame([
+        {"match_id": "m1", "team": "A", "xg": 0.4, "defesas_goleiro": 5, "save_pct_goleiro": 0.7},
+        {"match_id": "m1", "team": "B", "xg": 2.1, "defesas_goleiro": 1, "save_pct_goleiro": 1.0},
+    ])
+    df = build_insights(wide, dim, write=False)
+    loser_keys = set(df[df["team"] == "A"]["achado_key"])
+
+    assert "goleiro_seguro" not in loser_keys
+    assert "goleiro_decisivo" not in loser_keys

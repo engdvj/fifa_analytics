@@ -9,6 +9,7 @@ import TeamRoster from "./TeamRoster";
 import PitchView from "./PitchView";
 import MatchTimeline from "./MatchTimeline";
 import { DefinitionBubble } from "@/components/DefinitionLink";
+import { styleDescription, styleName } from "@/lib/styleMeta";
 
 // métrica FIFA (chave do data hub) → id de conceito. Só inclui as que têm
 // definição na Central; o resto fica sem bolinha.
@@ -42,12 +43,12 @@ const TAB_LABEL: Record<Tab, string> = {
 // 6 arquétipos de estilo (do `estilo_jogo` no snapshot) — rótulo + descrição +
 // id da definição ESPECÍFICA daquele estilo (não a genérica "estilo_jogo").
 const ARCHETYPES: Record<string, { emoji: string; desc: string; def: string }> = {
-  "Posse": { emoji: "🎯", desc: "Domina com a bola — constrói com paciência e progride em posse.", def: "estilo_posse" },
-  "Pressão Alta": { emoji: "🔥", desc: "Sufoca no campo adversário: recupera alto e pressiona a saída de bola.", def: "estilo_pressao_alta" },
-  "Contra-ataque": { emoji: "⚡", desc: "Cede a bola e ataca na transição — rápido e vertical.", def: "estilo_contra_ataque" },
-  "Retranca": { emoji: "🧱", desc: "Bloco baixo, defende compacto e cede o território ao rival.", def: "estilo_retranca" },
-  "Jogo Direto": { emoji: "🚀", desc: "Pula o meio-campo com bola longa, busca o ataque direto.", def: "estilo_jogo_direto" },
-  "Bola Parada": { emoji: "⛳", desc: "Tira proveito das bolas paradas — escanteios e faltas.", def: "estilo_bola_parada" },
+  "Posse": { emoji: "🎯", desc: styleDescription("Posse"), def: "estilo_posse" },
+  "Pressão Alta": { emoji: "🔥", desc: styleDescription("Pressão Alta"), def: "estilo_pressao_alta" },
+  "Contra-ataque": { emoji: "⚡", desc: styleDescription("Contra-ataque"), def: "estilo_contra_ataque" },
+  "Retranca": { emoji: "🧱", desc: styleDescription("Retranca"), def: "estilo_retranca" },
+  "Jogo Direto": { emoji: "🚀", desc: styleDescription("Jogo Direto"), def: "estilo_jogo_direto" },
+  "Bola Parada": { emoji: "⛳", desc: styleDescription("Bola Parada"), def: "estilo_bola_parada" },
 };
 // 4 eixos bipolares do snapshot (z-score 0-100, 50 = média do torneio).
 // `hint` explica o eixo em uma linha; low/high são os polos.
@@ -679,7 +680,7 @@ export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
                         <span style={{ fontSize: 30, lineHeight: 1, flexShrink: 0 }}>{info.emoji}</span>
                         <div style={{ minWidth: 0 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                            <span style={{ fontSize: 17, fontWeight: 800, color: "var(--accent2)" }}>{arch}</span>
+                            <span title={info.desc} style={{ fontSize: 17, fontWeight: 800, color: "var(--accent2)", cursor: "help" }}>{styleName(arch)}</span>
                             <DefinitionBubble id={info.def} size={13} />
                           </div>
                           <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 3, lineHeight: 1.4 }}>{info.desc}</div>

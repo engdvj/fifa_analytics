@@ -159,6 +159,10 @@ def run(*, only_finished: bool = True) -> dict[str, int]:
         # 7. ANÁLISE DIAGNÓSTICA: achados do "porquê" por jogo ----------------
         insights = build_insights(wide, matches, timeline)
         logger.info("FIFA: fact_insights — %d achados diagnósticos", len(insights))
+
+        # Nota: o AUTO-APRENDIZADO da preditiva (learn_and_save) NÃO roda aqui — é
+        # disparado pelo scheduler logo após a coleta (api/app/scheduler.py),
+        # como job próprio visível no histórico, para não bloquear o pipeline.
     else:
         logger.warning("FIFA: sem team_stats — pivot e snapshots pulados")
 

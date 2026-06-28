@@ -217,7 +217,7 @@ def _team_findings(
             "Manteve o gol em branco.", "positivo", "baixa", {"clean_sheet": True})
 
     # ── Goleiro ─────────────────────────────────────────────────────────────
-    if not np.isnan(saves) and saves >= _GK_SAVES_MIN and not np.isnan(save_pct) and save_pct >= _GK_SAVE_PCT_MIN:
+    if venceu is not False and not np.isnan(saves) and saves >= _GK_SAVES_MIN and not np.isnan(save_pct) and save_pct >= _GK_SAVE_PCT_MIN:
         add("Goleiro", "goleiro_decisivo", "Goleiro decisivo",
             f"{int(saves)} defesas, {save_pct*100:.0f}% de aproveitamento — segurou o resultado.",
             "positivo", "media", {"defesas": int(saves), "save_pct": _round(save_pct)})
@@ -260,7 +260,7 @@ def _team_findings(
             add("Controle", "mais_presente", "Mais presente no ataque",
                 f"Esteve mais perto do gol adversário ({ctrl:.0f}% de controle no terço final).",
                 "positivo", "baixa", {"final_third_control": _round(ctrl)})
-        elif not np.isnan(saves) and saves >= 3:
+        elif venceu is not False and gols_contra <= 1 and not np.isnan(saves) and saves >= 3:
             add("Goleiro", "goleiro_seguro", "Goleiro seguro",
                 f"{int(saves)} defesas para manter a equipe viva no jogo.",
                 "positivo", "baixa", {"defesas": int(saves)})

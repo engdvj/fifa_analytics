@@ -56,3 +56,22 @@ def test_estilo_resultado_e_fases_e_defesa():
     assert fases["Bola parada"] == "H0" and fases["Contra-ataque"] == "A0"
     # melhor defesa = H0 (0.3 xG sofrido)
     assert d["defesa"][0]["team"] == "H0"
+
+
+def test_confronto_de_estilos_e_direcional():
+    dim, wide, tl = _frames()
+    tl["score_geral"] = [75.0, 45.0]
+    tl["score_ataque"] = [80.0, 40.0]
+    tl["score_defesa"] = [70.0, 50.0]
+    d = build_exploratory(dim, wide, tl)
+
+    pressao = next(x for x in d["confrontos_estilo"] if x["estilo"] == "Pressão Alta" and x["contra"] == "Retranca")
+    retranca = next(x for x in d["confrontos_estilo"] if x["estilo"] == "Retranca" and x["contra"] == "Pressão Alta")
+
+    assert pressao["jogos"] == 1
+    assert pressao["vitorias"] == 1
+    assert pressao["pts_jogo"] == 3.0
+    assert pressao["xg_diff_pj"] == 1.5
+    assert pressao["score_diff_medio"] == 30.0
+    assert retranca["derrotas"] == 1
+    assert {i["fator"] for i in d["influencias_confronto"]} >= {"Score geral", "Score de ataque", "Score de defesa", "xG do jogo"}
