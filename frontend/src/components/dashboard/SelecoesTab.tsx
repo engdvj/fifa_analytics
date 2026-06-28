@@ -138,7 +138,7 @@ export default function SelecoesTab({ matches, snapshots, activeSnapshot, matchS
       {cards.length === 0 ? (
         <p style={{ color: "#8b949e", fontSize: 13 }}>Nenhuma seleção encontrada com esses filtros.</p>
       ) : (
-        // 6 por linha (24/página = 4 linhas). paddingBottom reserva espaço p/ a barra fixa.
+        // Grade fluida. paddingBottom reserva espaço p/ a barra fixa.
         <div className="v2-teams-grid">
           {pageCards.map((c) => (
             <TeamCard

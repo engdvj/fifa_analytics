@@ -2609,7 +2609,7 @@ function DashboardV2MotionStyles() {
 
       .v2-teams-grid {
         display: grid;
-        grid-template-columns: repeat(6, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
         gap: 12px;
         padding-bottom: 56px;
       }
