@@ -138,8 +138,8 @@ function buildPoints(rows: Row[], selected: string[], activeStyle?: string | nul
       arquetipo,
       jogos: r.jogos,
       color: STYLE_COLOR[arquetipo] ?? "#8b949e",
-      value: [clamp(r.posse + offset[0]), clamp(r.verticalidade + offset[1])],
-      rawValue: [r.posse, r.verticalidade],
+      value: [clamp(r.proatividade + offset[0]), clamp(r.diretude + offset[1])],
+      rawValue: [r.proatividade, r.diretude],
       active,
       selected: selectedTeam,
     };
@@ -170,15 +170,15 @@ function buildOption(points: PlotPoint[]): echarts.EChartsOption {
         const jogos = d.jogos != null ? `<br/>amostra: ${d.jogos} jogo${d.jogos === 1 ? "" : "s"}` : "";
         return `<b>${d.team}</b><br/>estilo: <b>${styleName(d.arquetipo)}</b>`
           + `<br/><span style="color:#8b949e">${styleDescription(d.arquetipo)}</span>`
-          + `<br/>posse: ${d.rawValue[0].toFixed(1)}`
-          + `<br/>verticalidade: ${d.rawValue[1].toFixed(1)}${jogos}`;
+          + `<br/>proatividade: ${d.rawValue[0].toFixed(0)} <span style="color:#8b949e">(reativo↔proativo)</span>`
+          + `<br/>diretude: ${d.rawValue[1].toFixed(0)} <span style="color:#8b949e">(direto↔elaborado)</span>${jogos}`;
       },
     },
     xAxis: {
       type: "value",
       min: 0,
       max: 100,
-      name: "posse e controle ->",
+      name: "← reativo          proativo →",
       nameLocation: "middle",
       nameGap: 30,
       nameTextStyle: { color: "#8b949e", fontSize: 11 },
@@ -191,7 +191,7 @@ function buildOption(points: PlotPoint[]): echarts.EChartsOption {
       type: "value",
       min: 0,
       max: 100,
-      name: "verticalidade ->",
+      name: "← direto          elaborado →",
       nameLocation: "middle",
       nameGap: 38,
       nameTextStyle: { color: "#8b949e", fontSize: 11 },

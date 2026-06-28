@@ -346,6 +346,15 @@ export default function DashboardV2Page() {
   }, [snapshots, activeSnapshot, filters, teamMeta]);
 
   const currentMatch = snapByGame.get(activeSnapshot);
+  const currentTimelineMatch = React.useMemo(
+    () =>
+      chronologicalMatches.find((m) => {
+        const timelineSnapshot = matchSnapshot.get(m.match_id) ?? m.match_number;
+        return timelineSnapshot === activeSnapshot;
+      }),
+    [activeSnapshot, chronologicalMatches, matchSnapshot]
+  );
+  const activeStage = currentTimelineMatch?.stage ?? currentMatch?.stage ?? null;
 
   const searchSuggestions = React.useMemo(() => {
     const norm = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
@@ -549,12 +558,23 @@ export default function DashboardV2Page() {
         ) : tab === "players" ? (
           <PlayersTab activeSnapshot={activeSnapshot} passesFilters={passesFilters} selectedTeams={selectedTeams} search={dashSearch} />
         ) : tab === "analise" ? (
-          <AnaliseTab matches={matches} activeSnapshot={activeSnapshot} isAdmin={isAdmin} onSnapshotChange={setCurrentSnapshot} onPredictiveActive={setPredictiveActive} />
+          <AnaliseTab
+            matches={matches}
+            activeSnapshot={activeSnapshot}
+            isAdmin={isAdmin}
+            selectedTeams={selectedTeams}
+            onToggleTeam={toggleTeam}
+            onClearTeams={() => setSelectedTeams([])}
+            onFocusTeams={(teams) => setSelectedTeams(teams)}
+            onSnapshotChange={setCurrentSnapshot}
+            onPredictiveActive={setPredictiveActive}
+          />
         ) : (
           <GruposChaveTab
             matches={matches}
             snapshots={snapshots}
             activeSnapshot={activeSnapshot}
+            activeStage={activeStage}
             matchSnapshot={matchSnapshot}
             filters={filters}
             passesFilters={passesFilters}
@@ -2609,7 +2629,7 @@ function DashboardV2MotionStyles() {
 
       .v2-teams-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
         gap: 12px;
         padding-bottom: 56px;
       }
@@ -2696,7 +2716,7 @@ function DashboardV2MotionStyles() {
 
       .v2-groups-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr));
+        grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 16px;
       }
 
@@ -2769,18 +2789,24 @@ function DashboardV2MotionStyles() {
       }
 
       .v2-bracket-scroll {
-        overflow-x: auto;
+        overflow-x: hidden;
         padding-bottom: 8px;
-        scrollbar-width: thin;
-        scroll-snap-type: x proximity;
       }
 
       .v2-bracket-board {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+        gap: 12px;
+        align-items: start;
+        width: 100%;
+        margin: 0 auto;
+      }
+
+      .v2-bracket-board.is-full {
         display: flex;
         gap: 14px;
         align-items: stretch;
         width: fit-content;
-        margin: 0 auto;
       }
 
       .v2-bracket-column {
@@ -2788,7 +2814,6 @@ function DashboardV2MotionStyles() {
         display: flex;
         flex: 0 0 auto;
         flex-direction: column;
-        scroll-snap-align: start;
       }
 
       .v2-bracket-center {
@@ -2798,7 +2823,62 @@ function DashboardV2MotionStyles() {
         flex-direction: column;
         justify-content: center;
         gap: 22px;
-        scroll-snap-align: center;
+      }
+
+      .v2-bracket-summary {
+        color: #8b949e;
+        font-size: 12px;
+        margin: 0 0 14px;
+        text-align: center;
+      }
+
+      .v2-bracket-phase-panel {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        background: #0a0e14;
+        border: 1px solid #21262d;
+        border-radius: 10px;
+        padding: 10px;
+      }
+
+      .v2-bracket-phase-panel.is-current {
+        border-color: #2f81f7;
+        box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.08);
+      }
+
+      .v2-bracket-phase-head {
+        min-height: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+      }
+
+      .v2-bracket-phase-head span {
+        border: 1px solid #1f6feb;
+        border-radius: 999px;
+        padding: 1px 7px;
+        color: #58a6ff;
+        font-size: 10px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      .v2-bracket-matches-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
+        gap: 8px;
+      }
+
+      .v2-bracket-match-card {
+        min-width: 0;
+        overflow: hidden;
+        background: #0d1117;
+        border: 1px solid #21262d;
+        border-radius: 9px;
       }
 
       .v2-fixed-pager {
@@ -4945,7 +5025,7 @@ function DashboardV2MotionStyles() {
         }
 
         .v2-team-focus-options {
-          grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
+          grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
           max-height: min(360px, calc(100vh - 220px));
         }
 
@@ -4959,7 +5039,7 @@ function DashboardV2MotionStyles() {
         }
 
         .v2-advice-strip {
-          grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
+          grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
         }
 
         .v2-teams-summary,
@@ -5410,14 +5490,6 @@ function DashboardV2MotionStyles() {
 
         .v2-bracket-board {
           margin: 0;
-        }
-
-        .v2-bracket-column {
-          min-width: 148px;
-        }
-
-        .v2-bracket-center {
-          min-width: 210px;
         }
       }
 

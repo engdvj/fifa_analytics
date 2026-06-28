@@ -219,7 +219,7 @@ export interface ExploratoryData {
       metricas_chave?: { label: string; valor: number; unit?: string; decimals?: number }[];
     }[];
   }[];
-  estilos_mapa?: { team: string; posse: number; verticalidade: number; arquetipo: string | null; jogos?: number }[];
+  estilos_mapa?: { team: string; proatividade: number; diretude: number; posse?: number | null; verticalidade?: number | null; arquetipo: string | null; jogos?: number }[];
   confrontos_estilo?: {
     estilo: string; contra: string; jogos: number; vitorias: number; empates: number; derrotas: number;
     pts_jogo: number; aproveitamento: number;
