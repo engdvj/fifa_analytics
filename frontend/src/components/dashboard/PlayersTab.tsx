@@ -60,14 +60,6 @@ const STAT_COLS: Record<string, Col[]> = {
   atacante: [["goals", "Gols"], ["expected_goals", "xG", 2], ["shots_on_target", "No alvo"]],
 };
 
-const DETAIL: Col[] = [
-  ["goals", "Gols"], ["assists", "Assist."], ["expected_goals", "xG", 2], ["shots", "Finalizações"],
-  ["shots_on_target", "No alvo"], ["key_passes", "Passes-chave"], ["dribbles_won", "Dribles"],
-  ["tackles_won", "Desarmes"], ["interceptions", "Intercept."], ["ball_recovery", "Recuperações"],
-  ["duels_won", "Duelos"], ["saves", "Defesas"], ["goals_conceded", "Gols sofridos"],
-  ["fouls_committed", "Faltas"], ["yellow_cards", "Amarelos"], ["red_cards", "Vermelhos"],
-];
-
 function num(p: PlayerSnapshot, k: string): number | null {
   const v = p[k];
   return typeof v === "number" ? v : null;
@@ -116,16 +108,11 @@ export default function PlayersTab({ activeSnapshot, passesFilters, selectedTeam
   const useSelection = onlySelected && selSet.size > 0;
 
   const sortOptions = SORT_BY_PERFIL[perfil] ?? SORT_BY_PERFIL[""];
-  // ao trocar de perfil, se a métrica de ordenação não fizer sentido, volta p/ a 1ª
-  React.useEffect(() => {
-    if (!sortOptions.includes(sortKey)) setSortKey(sortOptions[0]);
-    setPage(0);
-  }, [perfil]); // eslint-disable-line react-hooks/exhaustive-deps
-  React.useEffect(() => { setPage(0); }, [search, sortKey, sortDir, onlyPlayed, activeSnapshot, useSelection]);
+  const activeSortKey = sortOptions.includes(sortKey) ? sortKey : sortOptions[0];
 
   const statCols = STAT_COLS[perfil] ?? STAT_COLS[""];
   const baseKeys = new Set(["score_geral", "score_proprio", "jogos", ...statCols.map((c) => c[0])]);
-  const metricCol = baseKeys.has(sortKey) ? null : sortKey;
+  const metricCol = baseKeys.has(activeSortKey) ? null : activeSortKey;
 
   const players = React.useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -136,7 +123,7 @@ export default function PlayersTab({ activeSnapshot, passesFilters, selectedTeam
       .filter((p) => !q || (p.player_name ?? "").toLowerCase().includes(q) || (p.team ?? "").toLowerCase().includes(q))
       .filter((p) => !onlyPlayed || (num(p, "jogos") ?? 0) > 0);
     list.sort((a, b) => {
-      const av = num(a, sortKey), bv = num(b, sortKey);
+      const av = num(a, activeSortKey), bv = num(b, activeSortKey);
       if (av == null && bv == null) return (a.player_name ?? "").localeCompare(b.player_name ?? "", "pt-BR");
       if (av == null) return 1;
       if (bv == null) return -1;
@@ -144,33 +131,32 @@ export default function PlayersTab({ activeSnapshot, passesFilters, selectedTeam
       return sortDir === "asc" ? av - bv : bv - av;
     });
     return list;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, search, sortKey, sortDir, perfil, onlyPlayed, passesFilters, useSelection, selSet]);
+  }, [data, search, activeSortKey, sortDir, perfil, onlyPlayed, passesFilters, useSelection, selSet]);
 
   const rankBy = React.useMemo(() => {
-    const ranked = players.map((p) => ({ id: p.player_slug ?? p.id_player, v: num(p, sortKey) })).filter((x) => x.v != null) as { id: string; v: number }[];
+    const ranked = players.map((p) => ({ id: p.player_slug ?? p.id_player, v: num(p, activeSortKey) })).filter((x) => x.v != null) as { id: string; v: number }[];
     const m = new Map<string, number>();
     ranked.forEach((x, i) => m.set(x.id, i > 0 && x.v === ranked[i - 1].v ? m.get(ranked[i - 1].id)! : i + 1));
     return m;
-  }, [players, sortKey]);
+  }, [players, activeSortKey]);
 
   const pageCount = Math.max(1, Math.ceil(players.length / PAGE_SIZE));
   const safePage = Math.min(page, pageCount - 1);
   const pageItems = players.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
 
   const sortByCol = (key: string) => {
-    if (key === sortKey) setSortDir((d) => (d === "desc" ? "asc" : "desc"));
+    if (key === activeSortKey) setSortDir((d) => (d === "desc" ? "asc" : "desc"));
     else { setSortKey(key); setSortDir("desc"); }
   };
-  const arrow = (key: string) => (key === sortKey ? (sortDir === "asc" ? " ▲" : " ▼") : "");
+  const arrow = (key: string) => (key === activeSortKey ? (sortDir === "asc" ? " ▲" : " ▼") : "");
 
   return (
-    <div style={{ paddingBottom: pageCount > 1 ? 56 : 0 }}>
+    <div className="v2-players-tab" style={{ paddingBottom: pageCount > 1 ? 56 : 0 }}>
       {/* filtros */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8b949e" }}>
+      <div className="v2-players-toolbar">
+        <label className="v2-players-control">
           Ordenar por
-          <select value={sortKey} onChange={(e) => { setSortKey(e.target.value); setSortDir("desc"); }} style={selStyle}>
+          <select value={activeSortKey} onChange={(e) => { setSortKey(e.target.value); setSortDir("desc"); }} style={selStyle}>
             {sortOptions.map((k) => <option key={k} value={k}>{LABEL[k] ?? k}</option>)}
           </select>
         </label>
@@ -182,7 +168,7 @@ export default function PlayersTab({ activeSnapshot, passesFilters, selectedTeam
           <span style={{ fontSize: 13 }}>{sortDir === "desc" ? "↓" : "↑"}</span>
           {sortDir === "desc" ? "Maior" : "Menor"}
         </button>
-        <div style={{ display: "inline-flex", gap: 3, background: "#0d1117", border: "1px solid #21262d", borderRadius: 8, padding: 3 }}>
+        <div className="v2-players-segments">
           {PERFIS.map((pf) => (
             <button key={pf.key} onClick={() => setPerfil(pf.key)} style={{
               border: 0, borderRadius: 6, padding: "4px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
@@ -190,15 +176,15 @@ export default function PlayersTab({ activeSnapshot, passesFilters, selectedTeam
             }}>{pf.label}</button>
           ))}
         </div>
-        <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#8b949e", cursor: "pointer" }}>
+        <label className="v2-players-check">
           <input type="checkbox" checked={onlyPlayed} onChange={(e) => setOnlyPlayed(e.target.checked)} /> só quem jogou
         </label>
         {selSet.size > 0 && (
-          <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: onlySelected ? "#58a6ff" : "#8b949e", cursor: "pointer", fontWeight: 700 }} title="Mostrar só jogadores das seleções selecionadas na Ranking Race / Seleções">
+          <label className="v2-players-check" style={{ color: onlySelected ? "#58a6ff" : "#8b949e", fontWeight: 700 }} title="Mostrar só jogadores das seleções selecionadas na Ranking Race / Seleções">
             <input type="checkbox" checked={onlySelected} onChange={(e) => setOnlySelected(e.target.checked)} /> só selecionadas ({selSet.size})
           </label>
         )}
-        <span style={{ color: "#8b949e", fontSize: 12, marginLeft: "auto" }}>{players.length} jogadores · pág. {safePage + 1}/{pageCount}</span>
+        <span className="v2-players-count">{players.length} jogadores · pág. {safePage + 1}/{pageCount}</span>
       </div>
 
       {isLoading ? (
@@ -206,8 +192,8 @@ export default function PlayersTab({ activeSnapshot, passesFilters, selectedTeam
       ) : players.length === 0 ? (
         <p style={{ color: "#8b949e", fontSize: 13 }}>Nenhum jogador com esses filtros neste snapshot.</p>
       ) : (
-        <div style={{ overflowX: "auto", border: "1px solid #21262d", borderRadius: 8 }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <div className="v2-players-table-wrap">
+          <table className="v2-players-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
               <tr style={{ background: "#0d1117" }}>
                 <Th align="right" w={40}>#</Th>
@@ -216,10 +202,10 @@ export default function PlayersTab({ activeSnapshot, passesFilters, selectedTeam
                 <Th>Time</Th>
                 <Th w={48}>Pos</Th>
                 {metricCol && <ThSort active onClick={() => sortByCol(metricCol)} metric>{LABEL[metricCol] ?? metricCol}{arrow(metricCol)}</ThSort>}
-                <ThSort active={sortKey === "score_proprio"} onClick={() => sortByCol("score_proprio")} title="Nosso score analítico (0-100, por posição · 50 = média da posição)">Score{arrow("score_proprio")}</ThSort>
-                <ThSort active={sortKey === "score_geral"} onClick={() => sortByCol("score_geral")} title="Power Ranking FIFA (oficial · só ~244 jogadores)">PR FIFA<DefinitionBubble id="powerranking" size={13} />{arrow("score_geral")}</ThSort>
-                {statCols.map((c) => <ThSort key={c[0]} active={sortKey === c[0]} onClick={() => sortByCol(c[0])}>{c[1]}{arrow(c[0])}</ThSort>)}
-                <ThSort active={sortKey === "jogos"} onClick={() => sortByCol("jogos")}>Jogos{arrow("jogos")}</ThSort>
+                <ThSort active={activeSortKey === "score_proprio"} onClick={() => sortByCol("score_proprio")} title="Nosso score analítico (0-100, por posição · 50 = média da posição)">Score{arrow("score_proprio")}</ThSort>
+                <ThSort active={activeSortKey === "score_geral"} onClick={() => sortByCol("score_geral")} title="Power Ranking FIFA (oficial · só ~244 jogadores)">PR FIFA<DefinitionBubble id="powerranking" size={13} />{arrow("score_geral")}</ThSort>
+                {statCols.map((c) => <ThSort key={c[0]} active={activeSortKey === c[0]} onClick={() => sortByCol(c[0])}>{c[1]}{arrow(c[0])}</ThSort>)}
+                <ThSort active={activeSortKey === "jogos"} onClick={() => sortByCol("jogos")}>Jogos{arrow("jogos")}</ThSort>
               </tr>
             </thead>
             <tbody>
@@ -283,7 +269,7 @@ function PlayerCard({ player, index = 0, onClose }: { player: PlayerSnapshot; in
   const sections = CARD_SECTIONS.filter((s) => (isGK ? s.gk || (!s.out && !s.gk) : !s.gk));
 
   return (
-    <div style={{ position: "fixed", left: pos.x, top: pos.y, zIndex: 80, width: 400, maxWidth: "96vw" }}>
+    <div className="v2-player-card-shell" style={{ position: "fixed", left: pos.x, top: pos.y, zIndex: 80, width: 400, maxWidth: "96vw" }}>
       <div style={{ background: "#010409", border: "1px solid #30363d", borderRadius: 12, boxShadow: "0 20px 60px rgba(0,0,0,0.55)", overflow: "hidden" }}>
         {/* cabeçalho (arrasta) */}
         <div onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp}

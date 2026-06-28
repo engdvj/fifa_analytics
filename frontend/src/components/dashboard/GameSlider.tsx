@@ -25,12 +25,18 @@ export default function GameSlider({ matches, currentGame, onGameChange, compact
   const [speed, setSpeed] = useState<Speed>("normal");
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const currentGameRef = useRef(currentGame);
-  currentGameRef.current = currentGame;
 
   const maxGame = matches.length > 0 ? Math.max(...matches.map((m) => m.match_number)) : 1;
   const minGame = matches.length > 0 ? Math.min(...matches.map((m) => m.match_number)) : 1;
   const maxGameRef = useRef(maxGame);
-  maxGameRef.current = maxGame;
+
+  useEffect(() => {
+    currentGameRef.current = currentGame;
+  }, [currentGame]);
+
+  useEffect(() => {
+    maxGameRef.current = maxGame;
+  }, [maxGame]);
 
   const step = useCallback(
     (dir: 1 | -1) => {
@@ -76,27 +82,30 @@ export default function GameSlider({ matches, currentGame, onGameChange, compact
   // ── Versão compacta para o header ──────────────────────────────────────────
   if (compact) {
     return (
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+      <div className="v2-game-slider is-compact" style={{ display: "flex", alignItems: "center", gap: 8, flex: "1 1 260px", minWidth: 0, maxWidth: 420 }}>
         <button
           onClick={() => setPlaying((p) => !p)}
           aria-label={playing ? "Pausar" : "Reproduzir"}
+          className="v2-game-play"
           style={{ background: "#1f6feb", color: "#fff", border: "none", borderRadius: 6, width: 28, height: 28, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontWeight: 700 }}
         >
           {playing ? "⏸" : "▶"}
         </button>
-        <span style={{ fontSize: 12, fontWeight: 700, color: "#58a6ff", whiteSpace: "nowrap" }}>
+        <span className="v2-game-count" style={{ fontSize: 12, fontWeight: 700, color: "#58a6ff", whiteSpace: "nowrap" }}>
           Jogo {currentGame}/{maxGame}
         </span>
         <input
+          className="v2-game-range"
           type="range"
           min={minGame}
           max={maxGame}
           value={currentGame}
           onChange={(e) => onGameChange(Number(e.target.value))}
-          style={{ width: 200, accentColor: "#1f6feb", cursor: "pointer" }}
+          style={{ flex: "1 1 120px", minWidth: 92, width: "clamp(92px, 14vw, 200px)", accentColor: "#1f6feb", cursor: "pointer" }}
           aria-label="Navegar jogos"
         />
         <select
+          className="v2-game-speed"
           value={speed}
           onChange={(e) => setSpeed(e.target.value as Speed)}
           aria-label="Velocidade"

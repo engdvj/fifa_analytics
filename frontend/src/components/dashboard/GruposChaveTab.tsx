@@ -28,8 +28,8 @@ const SUBTABS: { id: View; label: string }[] = [
 export default function GruposChaveTab(props: Props) {
   const [view, setView] = React.useState<View>("tabela");
   return (
-    <div>
-      <div style={{ display: "inline-flex", gap: 4, background: "#0d1117", border: "1px solid #21262d", borderRadius: 9, padding: 4, marginBottom: 16 }}>
+    <div className="v2-groups-shell">
+      <div className="v2-groups-subtabs">
         {SUBTABS.map((t) => (
           <button
             key={t.id}

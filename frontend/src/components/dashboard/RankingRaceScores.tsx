@@ -127,10 +127,10 @@ export default function RankingRaceScores({
   const maxValue = ranked.length ? Math.max(...ranked.map((r) => Math.abs(r.value)), 1) : 1;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+    <div className="v2-race-list">
+      <div className="v2-race-list-head">
         <SnapshotMatchLabel snapshot={currentSnapshot} maxSnapshot={maxSnapshot} match={currentMatch} />
-        <span style={{ display: "inline-flex", alignItems: "center", color: "#8b949e", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+        <span className="v2-race-metric-label">
           {METRIC_LABEL[metric] ?? metric}
           {METRIC_DEF_ID[metric] && <DefinitionBubble id={METRIC_DEF_ID[metric]} size={14} />}
         </span>
@@ -142,11 +142,11 @@ export default function RankingRaceScores({
       </div>
 
       {ranked.length === 0 ? (
-        <p style={{ color: "#8b949e", fontSize: 13, padding: "16px 0" }}>
+        <p className="v2-race-empty">
           Sem dados para essa métrica no snapshot {currentSnapshot}.
         </p>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+        <div className="v2-race-rows">
           {ranked.map((row) => {
             // posição/medalha/cor = rank de QUALIDADE (melhor=1=verde), não a
             // posição na lista — assim invertendo a ordem o vermelho vai pro topo.
@@ -166,27 +166,22 @@ export default function RankingRaceScores({
             return (
               <button
                 key={row.team}
+                className={`v2-race-row ${isSelected ? "is-selected" : ""} ${isPlaying ? "is-playing" : ""}`}
                 onClick={() => onTeamToggle(row.team)}
                 aria-pressed={isSelected}
                 style={{
-                  display: "grid",
-                  gridTemplateColumns: "24px 22px minmax(138px, 170px) minmax(0, 1fr) 64px",
-                  alignItems: "center",
-                  columnGap: 8,
-                  padding: "5px 8px",
-                  borderRadius: 7,
                   border: isSelected ? "1px solid #58a6ff" : "1px solid transparent",
                   background: isSelected ? "linear-gradient(90deg, rgba(88,166,255,0.16), rgba(88,166,255,0.05))" : "transparent",
                   boxShadow: isSelected ? "inset 0 0 0 1px rgba(88,166,255,0.35), 0 0 18px rgba(88,166,255,0.08)" : "none",
                   opacity: isDimmed ? 0.16 : 1,
-                  cursor: "pointer", width: "100%", textAlign: "left", transition: "opacity 0.18s ease, background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease", fontFamily: "inherit",
+                  transition: "opacity 0.18s ease, background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease",
                 }}
               >
                 <span style={badge}>{rank}</span>
-                <span style={{ width: 22, display: "inline-flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+                <span className="v2-race-flag">
                   <Flag team={row.team} height={14} />
                 </span>
-                <span style={{ fontSize: 13, fontWeight: isSelected || isPlaying ? 700 : 400, color: isSelected ? "#58a6ff" : "#e6edf3", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: 5 }}>
+                <span className="v2-race-team" style={{ fontWeight: isSelected || isPlaying ? 700 : 400, color: isSelected ? "#58a6ff" : "#e6edf3" }}>
                   <span
                     role="button"
                     title="Clique para comparar scores (abre/adiciona no card)"
@@ -197,11 +192,11 @@ export default function RankingRaceScores({
                   >{row.team}</span>
                   {isPlaying && <span title="Jogou neste snapshot" aria-label="Jogou neste snapshot" style={{ flexShrink: 0, fontSize: 12 }}>⚽</span>}
                 </span>
-                <div style={{ width: "100%", minWidth: 0, height: 20, position: "relative" }}>
+                <div className="v2-race-bar">
                   <div style={{ position: "absolute", inset: 0, borderRadius: 4, background: isSelected ? "#13233a" : "#111722" }} />
                   <div style={{ position: "absolute", top: 0, left: 0, bottom: 0, width: `${pct}%`, borderRadius: 4, background: barColor, transition: "width 0.55s cubic-bezier(0.4,0,0.2,1), background 0.45s ease", opacity: isSelected ? 1 : 0.85 }} />
                 </div>
-                <span style={{ fontSize: 12, fontWeight: 700, width: 64, textAlign: "right", color: isSelected ? "#58a6ff" : "#e6edf3" }}>
+                <span className="v2-race-value" style={{ color: isSelected ? "#58a6ff" : "#e6edf3" }}>
                   {formatValue(row.value, metric)}
                 </span>
               </button>
@@ -243,7 +238,7 @@ function SnapshotMatchLabel({
 }) {
   if (!match) {
     return (
-      <span style={{ color: "#8b949e", fontSize: 13 }}>
+      <span className="v2-snapshot-label">
         Snapshot {snapshot}/{maxSnapshot}
       </span>
     );
@@ -251,9 +246,9 @@ function SnapshotMatchLabel({
 
   const hasScore = match.home_score != null && match.away_score != null;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6, color: "#b7c7dc", fontSize: 13, minWidth: 0 }}>
+    <div className="v2-snapshot-label">
       <span>Após {snapshot}/{maxSnapshot} · Jogo {String(match.match_number).padStart(3, "0")} ·</span>
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "#f0f6fc", fontWeight: 800, minWidth: 0 }}>
+      <span className="v2-snapshot-match">
         <Flag team={match.home_team} height={12} />
         <span>{match.home_team ?? "Mandante"}</span>
         <span style={{ color: "#79c0ff" }}>{hasScore ? `${match.home_score}–${match.away_score}` : "vs"}</span>

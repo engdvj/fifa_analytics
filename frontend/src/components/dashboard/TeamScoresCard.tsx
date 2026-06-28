@@ -268,16 +268,16 @@ export default function TeamScoresCard({ team, rows, metric, color, index = 0, o
     : areaTitle;
 
   return (
-    <div style={{ position: "fixed", left: pos.x, top: pos.y, zIndex: 80, width: size.w, height: size.h ?? undefined, maxWidth: "96vw" }}>
-      <div style={{ background: "#010409", border: "1px solid #30363d", borderRadius: 12, boxShadow: "0 20px 60px rgba(0,0,0,0.55)", overflow: "hidden", height: "100%", display: "flex", flexDirection: "column", position: "relative" }}>
+    <div className="v2-team-score-card-shell" style={{ position: "fixed", left: pos.x, top: pos.y, zIndex: 80, width: size.w, height: size.h ?? undefined, maxWidth: "96vw" }}>
+      <div className="v2-team-score-card" style={{ background: "#010409", border: "1px solid #30363d", borderRadius: 12, boxShadow: "0 20px 60px rgba(0,0,0,0.55)", overflow: "hidden", height: "100%", display: "flex", flexDirection: "column", position: "relative" }}>
         {/* faixa de cor da seleção (distingue cards no multi-país) */}
         <div style={{ height: 3, background: accent, flexShrink: 0 }} />
         {/* cabeçalho (arrasta) */}
-        <div onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp}
+        <div className="v2-team-score-head" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp}
           style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "#0d1117", borderBottom: "1px solid #21262d", cursor: "grab", touchAction: "none" }}>
           <Flag team={team} height={22} style={{ borderRadius: 3 }} />
-          <span style={{ fontSize: 16, fontWeight: 800, color: "#f0f6fc" }}>{team}</span>
-          <span style={{ fontSize: 12, color: "#8b949e" }}>
+          <span className="v2-team-score-name" style={{ fontSize: 16, fontWeight: 800, color: "#f0f6fc" }}>{team}</span>
+          <span className="v2-team-score-meta" style={{ fontSize: 12, color: "#8b949e" }}>
             {geral ? `#${geral.rank}${geral.tied ? "=" : ""} no ranking` : ""} · {jogos} {jogos === 1 ? "jogo" : "jogos"}
             <span style={{ marginLeft: 8, display: "inline-flex", alignItems: "center", gap: 5 }}>
               <span style={{ width: 9, height: 9, borderRadius: 2, background: accent }} />
@@ -297,7 +297,7 @@ export default function TeamScoresCard({ team, rows, metric, color, index = 0, o
         </div>
 
         {/* seletor de área: ‹ chips › */}
-        <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 10px 7px", borderBottom: "1px solid #161b22", flexShrink: 0 }}>
+        <div className="v2-team-score-tabs" style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 10px 7px", borderBottom: "1px solid #161b22", flexShrink: 0 }}>
           <ArrowBtn dir="‹" onClick={() => setAreaH(safeArea - 1)} />
           <div style={{ display: "flex", gap: 4, overflowX: "auto", flex: 1, scrollbarWidth: "none" }}>
             {METRIC_GROUPS.map(([title], i) => {
@@ -321,7 +321,7 @@ export default function TeamScoresCard({ team, rows, metric, color, index = 0, o
         </div>
 
         {/* área selecionada (um grupo, coluna única) */}
-        <div style={{ padding: "8px 12px 10px", flex: 1, minHeight: 0, maxHeight: size.h == null ? "70vh" : undefined, overflowY: "auto" }}>
+        <div className="v2-team-score-body" style={{ padding: "8px 12px 10px", flex: 1, minHeight: 0, maxHeight: size.h == null ? "70vh" : undefined, overflowY: "auto" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 4, minHeight: 22 }}>
             <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.8px", color: accent }}>{displayTitle}</span>
             {areaToggleable && <ModeToggle mode={activeMode} onChange={setModeH} accent={accent} />}
@@ -363,7 +363,7 @@ export default function TeamScoresCard({ team, rows, metric, color, index = 0, o
         </div>
 
         {/* legenda */}
-        <div style={{ display: "flex", gap: 14, padding: "7px 12px 8px", borderTop: "1px solid #21262d", fontSize: 10, color: "#8b949e", flexWrap: "wrap", alignItems: "center", flexShrink: 0 }}>
+        <div className="v2-team-score-legend" style={{ display: "flex", gap: 14, padding: "7px 12px 8px", borderTop: "1px solid #21262d", fontSize: 10, color: "#8b949e", flexWrap: "wrap", alignItems: "center", flexShrink: 0 }}>
           <span style={{ display: "flex", alignItems: "center" }}><span style={{ color: "#4a86d8", fontSize: 10, marginRight: 5 }}>▪</span>base do score geral</span>
           {hasRelated && <span style={{ display: "flex", alignItems: "center" }}><span style={{ width: 8, height: 8, borderRadius: 2, background: "#4ade80", marginRight: 5 }} />relação direta com a métrica atual</span>}
           {hasIndirect && <span style={{ display: "flex", alignItems: "center" }}><span style={{ width: 8, height: 8, borderRadius: 2, background: "#f0c040", marginRight: 5 }} />contexto/correlação</span>}
@@ -372,6 +372,7 @@ export default function TeamScoresCard({ team, rows, metric, color, index = 0, o
 
         {/* alça de resize (canto inferior direito) */}
         <div
+          className="v2-team-score-resize"
           onPointerDown={onRzDown} onPointerMove={onRzMove} onPointerUp={onRzUp}
           title="Arraste para redimensionar"
           style={{ position: "absolute", right: 2, bottom: 2, width: 16, height: 16, cursor: "nwse-resize", touchAction: "none", color: "#56606b", display: "flex", alignItems: "flex-end", justifyContent: "flex-end", fontSize: 12, lineHeight: 1, userSelect: "none" }}

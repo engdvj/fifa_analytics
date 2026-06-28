@@ -124,7 +124,7 @@ export default function BracketTab({ matches, selectedTeams, onToggleTeam, searc
   );
 
   const Column = (col: { label: string; matches: BMatch[] }, key: string) => (
-    <div key={key} style={{ display: "flex", flexDirection: "column", minWidth: 158, flex: "0 0 auto" }}>
+    <div key={key} className="v2-bracket-column">
       <ColHead>{col.label}</ColHead>
       <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-around", flex: 1, gap: 8 }}>
         {col.matches.map((bm) => card(bm))}
@@ -133,16 +133,16 @@ export default function BracketTab({ matches, selectedTeams, onToggleTeam, searc
   );
 
   return (
-    <div>
+    <div className="v2-bracket-tab">
       <p style={{ color: "#8b949e", fontSize: 12, marginBottom: 14, textAlign: "center" }}>
         Chave do mata-mata · os confrontos se preenchem conforme a fase de grupos e cada jogo terminam. Clique numa seleção definida para fixá-la nas outras abas.
       </p>
-      <div style={{ overflowX: "auto", paddingBottom: 8 }}>
-        <div style={{ display: "flex", gap: 14, alignItems: "stretch", width: "fit-content", margin: "0 auto" }}>
+      <div className="v2-bracket-scroll">
+        <div className="v2-bracket-board">
           {LEFT.map((c, i) => Column(c, `L${i}`))}
 
           {/* Centro: Final + Semifinais + 3º lugar */}
-          <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", minWidth: 230, gap: 22, flex: "0 0 auto" }}>
+          <div className="v2-bracket-center">
             <div>
               <ColHead>Final</ColHead>
               {card(FINAL, { final: true })}

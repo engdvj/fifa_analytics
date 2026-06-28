@@ -72,7 +72,6 @@ function statsFromGames(name: string, games: Match[]) {
 
 export default function SelecoesTab({ matches, snapshots, activeSnapshot, matchSnapshot, passesFilters, selectedTeams, onToggleTeam, metric, sortDir = "desc", search = "" }: Props) {
   const [page, setPage] = React.useState(0);
-  React.useEffect(() => { setPage(0); }, [search]);
   const [detail, setDetail] = React.useState<TeamSummary | null>(null);
   const metricLabel = METRIC_LABEL[metric] ?? "Score Geral";
 
@@ -119,7 +118,6 @@ export default function SelecoesTab({ matches, snapshots, activeSnapshot, matchS
     let r = 0;
     for (const c of built) if (c.active) c.rank = ++r;
     return built;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [matches, search, rowByTeam, passesFilters, playedUpTo, metric, metricLabel, sortDir, selectedTeams]);
 
   const pageCount = Math.max(1, Math.ceil(cards.length / PAGE_SIZE));
@@ -127,8 +125,8 @@ export default function SelecoesTab({ matches, snapshots, activeSnapshot, matchS
   const pageCards = cards.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
 
   return (
-    <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+    <div className="v2-teams-tab">
+      <div className="v2-teams-summary">
         {selectedTeams.length > 0 && (
           <span style={{ color: "#8b949e", fontSize: 12 }}>{selectedTeams.length} selecionada(s) · clique pra comparar na Ranking Race</span>
         )}
@@ -141,7 +139,7 @@ export default function SelecoesTab({ matches, snapshots, activeSnapshot, matchS
         <p style={{ color: "#8b949e", fontSize: 13 }}>Nenhuma seleção encontrada com esses filtros.</p>
       ) : (
         // 6 por linha (24/página = 4 linhas). paddingBottom reserva espaço p/ a barra fixa.
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 12, paddingBottom: 56 }}>
+        <div className="v2-teams-grid">
           {pageCards.map((c) => (
             <TeamCard
               key={c.team.name}

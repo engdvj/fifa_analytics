@@ -2,7 +2,6 @@
 
 import React from "react";
 import { Match, TeamSnapshot } from "@/lib/api";
-import { selectionColor } from "@/lib/teamUtils";
 import Flag from "@/components/ui/Flag";
 import { METRIC_OPTIONS } from "@/lib/metrics";
 import { DefinitionBubble } from "@/components/DefinitionLink";
@@ -146,7 +145,6 @@ export default function GruposTab({
   const [page, setPage] = React.useState(0);
   const pageCount = Math.max(1, Math.ceil(all.length / PER_PAGE));
   const safePage = Math.min(page, pageCount - 1);
-  React.useEffect(() => { setPage(0); }, [filters.group]);
   const shown = all.slice(safePage * PER_PAGE, safePage * PER_PAGE + PER_PAGE);
 
   if (all.length === 0) {
@@ -154,15 +152,16 @@ export default function GruposTab({
   }
 
   return (
-    <div style={{ paddingBottom: pageCount > 1 ? 56 : 0 }}>
+    <div className="v2-groups-table-tab" style={{ paddingBottom: pageCount > 1 ? 56 : 0 }}>
       <Legend />
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 16 }}>
+      <div className="v2-groups-grid">
         {shown.map((t) => (
-          <section key={t.group} style={{ background: "#0d1117", border: "1px solid #21262d", borderRadius: 12, overflow: "hidden" }}>
+          <section key={t.group} className="v2-group-card">
             <header style={{ padding: "11px 16px", borderBottom: "1px solid #21262d", fontSize: 14, fontWeight: 800, color: "#f0f6fc" }}>
               {t.label}
             </header>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+            <div className="v2-group-table-wrap">
+            <table className="v2-group-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
               <thead>
                 <tr style={{ color: "#8b949e", fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.03em" }}>
                   <Th w={26} align="center">#</Th>
@@ -223,6 +222,7 @@ export default function GruposTab({
                 })}
               </tbody>
             </table>
+            </div>
           </section>
         ))}
       </div>
@@ -256,7 +256,7 @@ function Legend() {
     ["#d29922", "3º em disputa"],
   ];
   return (
-    <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 14, fontSize: 11.5, color: "#8b949e" }}>
+    <div className="v2-groups-legend">
       {items.map(([c, l]) => (
         <span key={l} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
           <span style={{ width: 10, height: 10, borderRadius: 3, background: c }} /> {l}
