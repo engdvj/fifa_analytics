@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import "./globals.css";
 import SWRProvider from "@/components/SWRProvider";
 import { AuthProvider } from "@/lib/auth-context";
@@ -18,7 +19,9 @@ export default function RootLayout({
         <SWRProvider>
           <AuthProvider>
             {/* Barra global fixa — só aparece logado (some no login/registro) */}
-            <Header />
+            <Suspense fallback={null}>
+              <Header />
+            </Suspense>
             {children}
           </AuthProvider>
         </SWRProvider>
