@@ -2557,7 +2557,7 @@ function DashboardV2MotionStyles() {
         overflow-y: auto;
         padding: 8px;
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
         gap: 4px;
       }
 
@@ -2588,7 +2588,7 @@ function DashboardV2MotionStyles() {
 
       .v2-advice-strip {
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
         gap: 7px;
       }
 
@@ -2696,7 +2696,7 @@ function DashboardV2MotionStyles() {
 
       .v2-groups-grid {
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr));
         gap: 16px;
       }
 
@@ -4464,7 +4464,7 @@ function DashboardV2MotionStyles() {
 
       .v2-component-picker {
         display: grid;
-        grid-template-columns: repeat(6, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
         gap: 7px;
       }
 
@@ -4759,7 +4759,7 @@ function DashboardV2MotionStyles() {
         }
 
         .v2-groups-grid {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+          grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
         }
 
         .v2-race-workspace {
@@ -4945,7 +4945,7 @@ function DashboardV2MotionStyles() {
         }
 
         .v2-team-focus-options {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+          grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
           max-height: min(360px, calc(100vh - 220px));
         }
 
@@ -4959,7 +4959,7 @@ function DashboardV2MotionStyles() {
         }
 
         .v2-advice-strip {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+          grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
         }
 
         .v2-teams-summary,
@@ -5074,7 +5074,7 @@ function DashboardV2MotionStyles() {
         }
 
         .v2-team-modal-summary-grid {
-          grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+          grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr)) !important;
         }
 
         .v2-team-modal-identity {

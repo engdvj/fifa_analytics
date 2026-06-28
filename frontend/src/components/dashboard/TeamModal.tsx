@@ -493,7 +493,7 @@ export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
               {/* Grid de stats campanha com bordas coloridas */}
               <div className="v2-team-modal-summary-grid" style={{
                 display: "grid",
-                gridTemplateColumns: "repeat(4, 1fr)",
+                gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 120px), 1fr))",
                 gap: 8,
                 marginBottom: 20,
               }}>
