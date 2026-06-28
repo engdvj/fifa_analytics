@@ -4733,23 +4733,51 @@ function DashboardV2MotionStyles() {
       }
 
       @media (max-width: 760px) {
+        .v2-dashboard-shell {
+          min-height: calc(100vh - 48px);
+        }
+
         .v2-dashboard-sticky {
-          top: 52px;
+          top: 48px;
         }
 
         .v2-dashboard-header {
-          padding: 8px 10px;
-          gap: 8px;
+          min-height: 42px;
+          padding: 6px 8px;
+          gap: 6px;
         }
 
         .v2-primary-tabs button {
-          padding: 5px 10px !important;
+          padding: 4px 8px !important;
+          font-size: 11.5px !important;
+        }
+
+        .v2-weight-strip {
+          gap: 4px !important;
+          padding-bottom: 1px;
+        }
+
+        .v2-weight-pill {
+          gap: 4px;
+          padding: 3px 7px;
+          font-size: 10.5px;
+        }
+
+        .v2-weight-dot {
+          width: 8px;
+          height: 8px;
+          border-radius: 2px;
+        }
+
+        .v2-weight-help {
+          width: 24px;
+          height: 24px;
         }
 
         .v2-filter-bar {
           align-items: stretch;
-          gap: 8px;
-          padding: 8px 10px;
+          gap: 6px;
+          padding: 6px 8px;
         }
 
         .v2-filter-control {
@@ -4757,7 +4785,21 @@ function DashboardV2MotionStyles() {
           min-width: 150px;
           align-items: stretch;
           flex-direction: column;
-          gap: 4px;
+          gap: 3px;
+        }
+
+        .v2-filter-control label,
+        .v2-api-status {
+          font-size: 11px !important;
+        }
+
+        .v2-filter-control select,
+        .v2-metric-select,
+        .v2-dashboard-search,
+        .v2-sort-button {
+          min-height: 32px;
+          padding-block: 4px !important;
+          font-size: 11.5px !important;
         }
 
         .v2-sort-button {
@@ -4779,23 +4821,29 @@ function DashboardV2MotionStyles() {
         }
 
         .v2-progress-shell {
-          padding: 5px 6px;
+          padding: 3px 5px;
         }
 
         .v2-fixed-pager {
           justify-content: flex-start !important;
-          padding: 8px 10px !important;
-          gap: 6px !important;
+          padding: 6px 8px !important;
+          gap: 5px !important;
         }
 
         .v2-fixed-pager-count {
           display: none;
         }
 
+        .v2-fixed-pager button,
+        .v2-fixed-pager span {
+          font-size: 11px !important;
+        }
+
         .v2-progress-legend {
           flex-wrap: nowrap !important;
-          gap: 10px !important;
-          padding: 2px 6px 7px !important;
+          gap: 8px !important;
+          padding: 1px 5px 5px !important;
+          font-size: 10.5px !important;
         }
 
         .v2-progress-legend span {
@@ -4805,16 +4853,16 @@ function DashboardV2MotionStyles() {
 
         .v2-progress-scroll {
           scroll-snap-type: x proximity;
-          padding: 7px 4px 10px !important;
+          padding: 5px 3px 7px !important;
         }
 
         .v2-progress-group {
-          padding-inline: 10px !important;
+          padding-inline: 8px !important;
         }
 
         .v2-main,
         .v2-main.is-race {
-          padding: 14px 10px 20px;
+          padding: 10px 8px 18px;
         }
 
         .v2-analytics-tabs {
@@ -4827,7 +4875,8 @@ function DashboardV2MotionStyles() {
 
         .v2-analytics-tabs button {
           flex: 0 0 auto;
-          padding: 5px 10px !important;
+          padding: 4px 8px !important;
+          font-size: 11.5px !important;
         }
 
         .v2-team-focus-bar {
@@ -5101,7 +5150,21 @@ function DashboardV2MotionStyles() {
         }
 
         .v2-game-slider.is-compact {
-          gap: 7px;
+          gap: 5px;
+        }
+
+        .v2-game-slider.is-compact button {
+          width: 30px !important;
+          height: 30px !important;
+          font-size: 13px !important;
+        }
+
+        .v2-game-count {
+          font-size: 12px !important;
+        }
+
+        .v2-game-range {
+          height: 16px;
         }
 
         .v2-game-speed {
@@ -5163,15 +5226,31 @@ function DashboardV2MotionStyles() {
         }
 
         .v2-dashboard-header {
-          padding-inline: 8px;
+          padding-inline: 7px;
+        }
+
+        .v2-primary-tabs {
+          gap: 3px;
+        }
+
+        .v2-primary-tabs button,
+        .v2-analytics-tabs button,
+        .v2-groups-subtabs button {
+          font-size: 11px !important;
+        }
+
+        .v2-weight-pill {
+          padding: 2px 6px;
+          font-size: 10px;
         }
 
         .v2-game-count {
-          min-width: 66px;
+          min-width: 60px;
+          font-size: 11.5px !important;
         }
 
         .v2-game-range {
-          min-width: 80px !important;
+          min-width: 72px !important;
         }
 
         .v2-race-row {
@@ -5233,7 +5312,45 @@ function DashboardV2MotionStyles() {
 
         .v2-groups-grid {
           grid-template-columns: minmax(0, 1fr);
-          gap: 12px;
+          gap: 10px;
+        }
+
+        .v2-groups-subtabs {
+          margin-bottom: 10px !important;
+          padding: 3px !important;
+        }
+
+        .v2-groups-subtabs button {
+          padding: 7px 12px !important;
+        }
+
+        .v2-groups-legend {
+          gap: 10px !important;
+          margin-bottom: 10px !important;
+          font-size: 10.5px !important;
+        }
+
+        .v2-group-card {
+          border-radius: 10px;
+        }
+
+        .v2-group-card header {
+          padding: 9px 12px !important;
+          font-size: 13px !important;
+        }
+
+        .v2-group-table {
+          min-width: 500px;
+          font-size: 11.5px !important;
+        }
+
+        .v2-group-table th {
+          padding: 6px 6px !important;
+          font-size: 9.5px !important;
+        }
+
+        .v2-group-table td {
+          padding: 7px 6px !important;
         }
 
         .v2-groups-legend span:last-child {
