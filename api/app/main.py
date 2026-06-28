@@ -32,6 +32,7 @@ async def lifespan(app: FastAPI):
         try:
             seed_rules(db)
             seed_admin(db)
+            admin.recover_stale_jobs(db)
         finally:
             db.close()
     except Exception:  # noqa: BLE001

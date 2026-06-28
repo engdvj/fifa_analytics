@@ -10,6 +10,10 @@ from __future__ import annotations
 
 import traceback
 from datetime import datetime, timezone
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
@@ -27,6 +31,8 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 # Fábrica de sessão usada pelo runner de background. Em produção é a SessionLocal
 # real; os testes (SQLite) sobrescrevem para apontar ao mesmo banco do request.
 _session_factory = SessionLocal
+_ROOT = Path(__file__).resolve().parents[3]
+_PIPELINE_TIMEOUT_SECONDS = int(os.getenv("ADMIN_COLLECT_TIMEOUT_SECONDS", "1800"))
 
 
 def set_session_factory(factory) -> None:
@@ -44,10 +50,108 @@ def _append_log(job: CollectionJob, line: str) -> None:
 
 
 def _run_pipeline() -> dict:
-    """Roda o pipeline FIFA (coleta -> gold). Isolado para facilitar testes."""
-    from fifa_analytics.fifa.pipeline import run as pipeline_run
+    """Roda o pipeline FIFA (coleta -> gold) em subprocesso matável.
 
-    return pipeline_run(only_finished=True)
+    Rodar em processo separado evita que uma chamada externa presa deixe a thread
+    do servidor e o job eternamente em `running`. Em timeout, o subprocesso é
+    encerrado e o job registra erro.
+    """
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    cmd = [sys.executable, "-m", "fifa_analytics", "fifa-coletar"]
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=_ROOT,
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=_PIPELINE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        partial = "\n".join(part for part in [exc.stdout, exc.stderr] if part)
+        tail = partial[-4000:] if partial else ""
+        raise TimeoutError(
+            f"pipeline excedeu {_PIPELINE_TIMEOUT_SECONDS}s e foi encerrado"
+            + (f"\n{tail}" if tail else "")
+        ) from exc
+    output = "\n".join(part for part in [completed.stdout, completed.stderr] if part).strip()
+    if completed.returncode != 0:
+        tail = output[-4000:] if output else "(sem saída)"
+        raise RuntimeError(f"pipeline saiu com código {completed.returncode}\n{tail}")
+    return {"returncode": completed.returncode, "output": output[-4000:]}
+
+
+def _job_age_seconds(job: CollectionJob) -> float:
+    ref = job.started_at or job.created_at
+    if ref is None:
+        return 0.0
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    return max(0.0, (_now() - ref).total_seconds())
+
+
+def recover_stale_jobs(db: Session, *, reason: str = "servidor reiniciado") -> int:
+    """Marca jobs ativos órfãos como erro.
+
+    BackgroundTasks não sobrevivem a restart do processo. Portanto, qualquer
+    job `pending`/`running` encontrado no boot é órfão do processo anterior.
+    """
+    jobs = db.scalars(
+        select(CollectionJob).where(CollectionJob.status.in_(["pending", "running"]))
+    ).all()
+    for job in jobs:
+        _append_log(job, f"job marcado como interrompido: {reason}")
+        job.status = "error"
+        job.finished_at = _now()
+    if jobs:
+        db.commit()
+    return len(jobs)
+
+
+def _expire_overdue_jobs(db: Session) -> int:
+    """Fecha jobs ativos que passaram do teto sem depender de restart."""
+    max_age = _PIPELINE_TIMEOUT_SECONDS + 60
+    jobs = db.scalars(
+        select(CollectionJob).where(CollectionJob.status.in_(["pending", "running"]))
+    ).all()
+    expired = 0
+    for job in jobs:
+        if _job_age_seconds(job) <= max_age:
+            continue
+        _append_log(job, f"job excedeu {max_age}s sem finalizar; marcado como erro")
+        job.status = "error"
+        job.finished_at = _now()
+        expired += 1
+    if expired:
+        db.commit()
+    return expired
+
+
+def _active_job(db: Session) -> CollectionJob | None:
+    _expire_overdue_jobs(db)
+    return db.scalars(
+        select(CollectionJob)
+        .where(CollectionJob.status.in_(["pending", "running"]))
+        .order_by(CollectionJob.id.desc())
+    ).first()
+
+
+def _reject_if_active(db: Session) -> None:
+    active = _active_job(db)
+    if active is None:
+        return
+    raise HTTPException(
+        409,
+        {
+            "message": "ja existe um job administrativo em andamento",
+            "job_id": active.id,
+            "kind": active.kind,
+            "status": active.status,
+        },
+    )
 
 
 # ── Runners (rodam em thread de background, com sessão própria) ────────────────
@@ -126,6 +230,7 @@ def trigger_collect(
     db: Session = Depends(get_db),
 ):
     """Dispara coleta FIFA + reload + recálculo, em background."""
+    _reject_if_active(db)
     job = _create_job(db, "coleta", admin)
     background.add_task(_run_job, job.id, do_collect=True)
     return job
@@ -138,6 +243,7 @@ def trigger_recalc(
     db: Session = Depends(get_db),
 ):
     """Recarrega matches do gold + recalcula todos os pontos, em background."""
+    _reject_if_active(db)
     job = _create_job(db, "recalc", admin)
     background.add_task(_run_job, job.id, do_collect=False)
     return job
@@ -187,6 +293,7 @@ def trigger_predictive_learn(
 ):
     """Re-treina a preditiva (calibração + pesos) com os resultados reais. Pesado;
     roda em background e pode levar minutos."""
+    _reject_if_active(db)
     job = _create_job(db, "preditiva-learn", admin)
     background.add_task(_run_learn_job, job.id)
     return job

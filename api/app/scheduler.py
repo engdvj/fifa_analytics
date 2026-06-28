@@ -128,10 +128,19 @@ def _collect_now() -> None:
     """Cria um CollectionJob e roda o mesmo job do POST /admin/collect."""
     from api.app.db import SessionLocal
     from api.app.models import CollectionJob
-    from api.app.routers.admin import _run_job
+    from api.app.routers.admin import _active_job, _run_job
 
     db = SessionLocal()
     try:
+        active = _active_job(db)
+        if active is not None:
+            log.info(
+                "auto-collect: pulando; job %s (%s/%s) ainda em andamento",
+                active.id,
+                active.kind,
+                active.status,
+            )
+            return
         job = CollectionJob(kind="coleta", status="pending", triggered_by=None)
         db.add(job)
         db.commit()
@@ -146,10 +155,19 @@ def _learn_now() -> None:
     """Re-treina a preditiva (job próprio, visível no histórico). Síncrono."""
     from api.app.db import SessionLocal
     from api.app.models import CollectionJob
-    from api.app.routers.admin import _run_learn_job
+    from api.app.routers.admin import _active_job, _run_learn_job
 
     db = SessionLocal()
     try:
+        active = _active_job(db)
+        if active is not None:
+            log.info(
+                "auto-collect: pulando re-treino; job %s (%s/%s) ainda em andamento",
+                active.id,
+                active.kind,
+                active.status,
+            )
+            return
         job = CollectionJob(kind="preditiva-learn", status="pending", triggered_by=None)
         db.add(job)
         db.commit()
