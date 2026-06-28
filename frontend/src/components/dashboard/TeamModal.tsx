@@ -69,11 +69,6 @@ const DISPLAY_METRICS: [string, string][] = [
   ["PitchControl", "Controle de campo"],
 ];
 
-function getStat(stats: TeamStat[], metric: string): string {
-  const s = stats.find(x => x.metric === metric);
-  return s?.value != null ? Number(s.value).toFixed(2) : "—";
-}
-
 function statNum(stats: TeamStat[], metric: string): number | null {
   const s = stats.find(x => x.metric === metric);
   return s?.value != null ? Number(s.value) : null;
@@ -262,12 +257,12 @@ function GameDetailRow({ match, team }: { match: Match; team: TeamSummary }) {
   const rightTeam = oppName ?? "";
 
   return (
-    <div style={{
+    <div className="v2-team-game-detail" style={{
       padding: "12px 16px",
       borderTop: "1px solid var(--border)",
       background: "var(--background)",
     }}>
-      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+      <div className="v2-team-game-detail-tabs" style={{ display: "flex", gap: 6, marginBottom: 12 }}>
         {(["lineup", "stats", "timeline"] as const).map(t => (
           <button key={t}
             onClick={() => setSubTab(t)}
@@ -372,7 +367,6 @@ export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
   }, [onClose]);
 
   const finalized = team.games.filter(m => m.status === "finalizado");
-  const firstGame = finalized[0] ?? null;
 
   // Infos curadas (identidade) — alimentam o Resumo
   const { data: teamInfo } = useSWR(
@@ -414,11 +408,12 @@ export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
   return (
     <div
       ref={overlayRef}
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      className="v2-team-modal-overlay fixed inset-0 z-50 flex items-center justify-center p-4"
       style={{ background: "rgba(0,0,0,0.74)" }}
       onClick={e => { if (e.target === overlayRef.current) onClose(); }}
     >
       <div
+        className="v2-team-modal-dialog"
         style={{
           background: "var(--surface)",
           border: "1px solid var(--border)",
@@ -432,7 +427,7 @@ export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
         onClick={e => e.stopPropagation()}
       >
         {/* Header com camisa kit */}
-        <div style={{
+        <div className="v2-team-modal-header" style={{
           background: "linear-gradient(135deg, var(--surface2), var(--background))",
           borderBottom: "1px solid var(--border)",
           padding: "16px 24px",
@@ -443,7 +438,7 @@ export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
         }}>
           {/* Só a bandeira, maior (sem a caixa do kit) */}
           <Flag team={team.name} height={46} style={{ flexShrink: 0, borderRadius: 4, boxShadow: "0 3px 12px rgba(0,0,0,0.5)" }} />
-          <div style={{ flex: 1 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
             <h2 style={{ color: "var(--text)", fontSize: 20, fontWeight: 700, margin: 0 }}>
               {team.name}
             </h2>
@@ -460,7 +455,7 @@ export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
         </div>
 
         {/* Tabs */}
-        <div style={{
+        <div className="v2-team-modal-tabs" style={{
           display: "flex",
           gap: 2,
           padding: "0 24px",
@@ -490,13 +485,13 @@ export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
         </div>
 
         {/* Body */}
-        <div style={{ overflow: "auto", flex: 1, padding: "20px 24px" }}>
+        <div className="v2-team-modal-body" style={{ overflow: "auto", flex: 1, padding: "20px 24px" }}>
 
           {/* ── RESUMO ── */}
           {activeTab === "resumo" && (
             <div>
               {/* Grid de stats campanha com bordas coloridas */}
-              <div style={{
+              <div className="v2-team-modal-summary-grid" style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(4, 1fr)",
                 gap: 8,
@@ -524,7 +519,7 @@ export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
 
               {/* Identidade: apelido · técnico · 💡 curiosidade */}
               {(teamInfo?.apelido || teamInfo?.tecnico || teamInfo?.curiosidade) && (
-                <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 16 }}>
+                <div className="v2-team-modal-identity" style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 16 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     {teamInfo?.apelido && <div style={{ fontSize: 15, fontWeight: 800, color: "var(--accent2)" }}>{teamInfo.apelido}</div>}
                     <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 3 }}>
@@ -536,7 +531,7 @@ export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
               )}
 
               {/* Duas colunas: História em Copas | Nesta Copa */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div className="v2-team-modal-info-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                 <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px" }}>
                   <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.6px", color: "var(--accent)", marginBottom: 10 }}>História em Copas</div>
                   {teamInfo?.titulos_copa != null && <KV k={teamInfo.titulos_copa === 1 ? "Título mundial" : "Títulos mundiais"} v={teamInfo.titulos_copa} />}
@@ -575,7 +570,7 @@ export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
 
           {/* ── JOGOS ── */}
           {activeTab === "jogos" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <div className="v2-team-modal-games" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
               {[...team.games]
                 .sort((a, b) => (a.match_number ?? 0) - (b.match_number ?? 0))
                 .map(m => {
@@ -595,6 +590,7 @@ export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
                       overflow: "hidden",
                     }}>
                       <div
+                        className="v2-team-modal-game-row"
                         style={{
                           padding: "10px 14px",
                           display: "flex",

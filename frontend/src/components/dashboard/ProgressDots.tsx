@@ -72,7 +72,7 @@ interface Group {
   endMatchNumber: number; // match_number do último jogo da fase (marcador ⚽/🏆)
 }
 
-export default function ProgressDots({ matches, matchSnapshot, currentSnapshot, onSelect, predictionResults, minPredictionGame = 25 }: ProgressDotsProps) {
+export default function ProgressDots({ matches, matchSnapshot, currentSnapshot, onSelect, predictionResults }: ProgressDotsProps) {
   const predMode = !!predictionResults;
   const groups = useMemo<Group[]>(() => {
     const byKey = new Map<string, Group>();
@@ -104,9 +104,9 @@ export default function ProgressDots({ matches, matchSnapshot, currentSnapshot, 
   }, [matches]);
 
   return (
-    <div>
+    <div className="v2-progress-dots">
       {predMode && (
-        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", padding: "2px 8px 8px", fontSize: 11, color: "#8b949e" }}>
+        <div className="v2-progress-legend" style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", padding: "2px 8px 8px", fontSize: 11, color: "#8b949e" }}>
           <LegendItem color={PRED_COLORS.exact} label="placar cravado" />
           <LegendItem color={PRED_COLORS.winner} label="acertou vencedor" />
           <LegendItem color={PRED_COLORS.partial} label="acertou só o saldo" />
@@ -116,13 +116,14 @@ export default function ProgressDots({ matches, matchSnapshot, currentSnapshot, 
           <LegendItem color={PRED_COLORS.notpredicted} label="sem base" />
         </div>
       )}
-      <div style={{ overflowX: "auto", padding: "8px 6px 12px", display: "flex", alignItems: "stretch", width: "100%" }}>
+      <div className="v2-progress-scroll" style={{ overflowX: "auto", padding: "8px 6px 12px", display: "flex", alignItems: "stretch", width: "100%" }}>
       {groups.map((g, gi) => {
         // largura mínima = espaço real dos dots (16px cada) ou o rótulo, o que for
         // maior — garante que nada embola e que as fases curtas têm folga.
         const minW = Math.max(g.matches.length * 16 + 24, 86);
         return (
         <div
+          className="v2-progress-group"
           key={g.key}
           style={{
             flex: `${g.matches.length} 1 auto`, minWidth: minW,

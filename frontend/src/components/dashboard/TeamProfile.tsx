@@ -74,7 +74,7 @@ function CompactProfile({ snapshot: r, overlay, title }: { snapshot: TeamSnapsho
   const ptsJogo = overlay?.pts_jogo ?? (typeof r.points === "number" && r.jogos ? r.points / r.jogos : null);
   const saldoPj = overlay?.saldo_pj ?? (typeof r.saldo_gols === "number" && r.jogos ? r.saldo_gols / r.jogos : null);
   return (
-    <div style={{ background: "var(--surface)", border: "1px solid var(--surface2)", borderRadius: 8, padding: "12px 13px", minWidth: 0 }}>
+    <div className="v2-team-profile-compact" style={{ background: "var(--surface)", border: "1px solid var(--surface2)", borderRadius: 8, padding: "12px 13px", minWidth: 0 }}>
       {title && <div style={{ color: "var(--text-muted)", fontSize: 10.5, textTransform: "uppercase", letterSpacing: 0.4, fontWeight: 800 }}>{title}</div>}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: title ? 8 : 0 }}>
         <Flag team={r.team} height={15} />
@@ -82,7 +82,7 @@ function CompactProfile({ snapshot: r, overlay, title }: { snapshot: TeamSnapsho
       </div>
       {style && <div style={{ color: accent, fontSize: 18, lineHeight: 1.1, fontWeight: 900, marginTop: 8 }}>{styleName(style)}</div>}
       <div style={{ color: "var(--text-muted)", fontSize: 11, marginTop: 4 }}>{record}</div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8, marginTop: 10 }}>
+      <div className="v2-team-profile-compact-metrics" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8, marginTop: 10 }}>
         <SmallMetric label="Pts/jogo" value={nv(ptsJogo)} color={accent} />
         <SmallMetric label="Aproveit." value={aproveitamentoPct(r, overlay)} color={accent} />
         <SmallMetric label="Saldo/jogo" value={nv(saldoPj)} color={accent} />
@@ -108,8 +108,8 @@ function FullProfile({ snapshot: r, overlay }: { snapshot: TeamSnapshot; overlay
     [r.elo_rating != null ? String(Math.round(r.elo_rating)) : "—", "Elo"],
   ];
   return (
-    <section style={{ background: "var(--background)", border: "1px solid var(--surface2)", borderRadius: 12, overflow: "hidden" }}>
-      <header style={{ display: "flex", alignItems: "center", gap: 10, padding: "13px 16px", background: "var(--surface)", borderBottom: "1px solid var(--surface2)" }}>
+    <section className="v2-team-profile-full" style={{ background: "var(--background)", border: "1px solid var(--surface2)", borderRadius: 12, overflow: "hidden" }}>
+      <header className="v2-team-profile-header" style={{ display: "flex", alignItems: "center", gap: 10, padding: "13px 16px", background: "var(--surface)", borderBottom: "1px solid var(--surface2)" }}>
         <Flag team={r.team} height={22} />
         <span style={{ fontWeight: 700, fontSize: 16, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.team}</span>
         {r.ranking_score_geral != null && (
@@ -128,7 +128,7 @@ function FullProfile({ snapshot: r, overlay }: { snapshot: TeamSnapshot; overlay
             </div>
           ))}
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
+        <div className="v2-team-profile-detail-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))", gap: 16 }}>
           <div>
             <SectionLabel texto="Componentes do score" />
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>

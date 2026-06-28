@@ -16,7 +16,7 @@ export default function FixedPager({
   if (pageCount <= 1) return null;
   const showNumbers = pageCount <= 9;
   return (
-    <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 40, background: "#0d1117ee", borderTop: "1px solid #21262d", backdropFilter: "blur(6px)", padding: "9px 16px", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+    <div className="v2-fixed-pager" style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 40, background: "#0d1117ee", borderTop: "1px solid #21262d", backdropFilter: "blur(6px)", padding: "9px 16px", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
       <PageBtn disabled={page === 0} onClick={() => onPage(page - 1)}>← Anterior</PageBtn>
       {showNumbers ? (
         Array.from({ length: pageCount }).map((_, i) => (
@@ -32,7 +32,7 @@ export default function FixedPager({
         <span style={{ minWidth: 96, textAlign: "center", color: "#8b949e", fontSize: 12 }}>pág. {page + 1} / {pageCount}</span>
       )}
       <PageBtn disabled={page >= pageCount - 1} onClick={() => onPage(page + 1)}>Próxima →</PageBtn>
-      <span style={{ marginLeft: 12, color: "#8b949e", fontSize: 12 }}>{total} {unit} · pág. {page + 1}/{pageCount}</span>
+      <span className="v2-fixed-pager-count" style={{ marginLeft: 12, color: "#8b949e", fontSize: 12 }}>{total} {unit} · pág. {page + 1}/{pageCount}</span>
     </div>
   );
 }

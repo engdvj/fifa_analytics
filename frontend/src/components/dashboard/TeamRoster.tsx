@@ -103,10 +103,10 @@ export default function TeamRoster({ players, loading, kit }: Props) {
   })).filter((g) => g.list.length > 0);
 
   return (
-    <div>
+    <div className="v2-team-roster">
       {/* Líderes de estatística */}
       {leaders.length > 0 && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8, marginBottom: 18 }}>
+        <div className="v2-roster-leaders" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8, marginBottom: 18 }}>
           {leaders.map((l) => (
             <div key={l.key} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "9px 12px" }}>
               <div style={{ fontSize: 10, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.04em", display: "inline-flex", alignItems: "center" }}>
@@ -132,7 +132,7 @@ export default function TeamRoster({ players, loading, kit }: Props) {
           <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>
             {g.label} · {g.list.length}
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(116px, 1fr))", gap: 10 }}>
+          <div className="v2-roster-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(116px, 1fr))", gap: 10 }}>
             {g.list.map((p) => {
               const id = p.player_slug ?? p.id_player;
               const open = openIds.includes(id);
@@ -185,7 +185,7 @@ function PlayerCard({ player, kit, index, onClose }: { player: PlayerSnapshot; k
   const [pos, setPos] = React.useState({ x: 120 + index * 28, y: 120 + index * 28 });
   const drag = React.useRef<{ px: number; py: number; x: number; y: number } | null>(null);
   return (
-    <div style={{ position: "fixed", left: pos.x, top: pos.y, width: 360, maxWidth: "92vw", maxHeight: "82vh", overflowY: "auto", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, boxShadow: "0 22px 64px rgba(0,0,0,0.62)", zIndex: 300 + index }}>
+    <div className="v2-roster-player-card" style={{ position: "fixed", left: pos.x, top: pos.y, width: 360, maxWidth: "92vw", maxHeight: "82vh", overflowY: "auto", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, boxShadow: "0 22px 64px rgba(0,0,0,0.62)", zIndex: 300 + index }}>
       {/* Header arrastável: camisa + nome + PR FIFA + fechar */}
       <div
         onPointerDown={(e) => { drag.current = { px: e.clientX, py: e.clientY, x: pos.x, y: pos.y }; (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); }}
@@ -207,7 +207,7 @@ function PlayerCard({ player, kit, index, onClose }: { player: PlayerSnapshot; k
         <button onClick={onClose} onPointerDown={(e) => e.stopPropagation()} style={{ background: "none", border: "none", color: "var(--text-muted)", fontSize: 19, cursor: "pointer", lineHeight: 1, padding: 0, flexShrink: 0 }}>×</button>
       </div>
       {/* Grid de stats */}
-      <div style={{ padding: "13px 15px", display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "11px 8px" }}>
+      <div className="v2-roster-player-stats" style={{ padding: "13px 15px", display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "11px 8px" }}>
         <Stat label="Jogos" value={Math.round(num(player, "jogos"))} />
         {DETAIL_STATS.map((s) => {
           const v = num(player, s.key);

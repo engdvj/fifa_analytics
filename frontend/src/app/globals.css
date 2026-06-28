@@ -34,6 +34,65 @@ body {
   margin: 0;
 }
 
+html,
+body {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+@media (max-width: 640px) {
+  .app-header {
+    padding-inline: 8px !important;
+    gap: 6px !important;
+  }
+
+  .app-header-brand {
+    max-width: 52px;
+    margin-right: 2px !important;
+    font-size: 0.86rem !important;
+    line-height: 1.08;
+  }
+
+  .app-header-nav {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+  }
+
+  .app-header-nav a {
+    padding: 5px 10px !important;
+  }
+
+  .app-header-actions {
+    gap: 6px !important;
+  }
+
+  .app-header-profile {
+    gap: 0 !important;
+    padding: 3px !important;
+  }
+
+  .app-header-name {
+    display: none;
+  }
+
+  .app-header-logout {
+    padding: 5px 8px !important;
+  }
+}
+
+@media (max-width: 430px) {
+  .app-header-nav a {
+    padding-inline: 9px !important;
+  }
+
+  .app-header-logout {
+    max-width: 38px;
+    overflow: hidden;
+    text-overflow: clip;
+  }
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;

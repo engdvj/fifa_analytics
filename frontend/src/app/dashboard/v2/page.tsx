@@ -2321,6 +2321,8 @@ function DashboardV2MotionStyles() {
         background: #060910;
         color: #e6edf3;
         font-family: "Segoe UI", system-ui, sans-serif;
+        width: 100%;
+        max-width: 100vw;
         overflow-x: clip;
       }
 
@@ -2747,6 +2749,105 @@ function DashboardV2MotionStyles() {
         justify-content: center;
         gap: 22px;
         scroll-snap-align: center;
+      }
+
+      .v2-fixed-pager {
+        max-width: 100vw;
+        overflow-x: auto;
+        scrollbar-width: thin;
+      }
+
+      .v2-fixed-pager > * {
+        flex: 0 0 auto;
+      }
+
+      .v2-progress-dots {
+        min-width: 0;
+      }
+
+      .v2-progress-legend {
+        max-width: 100%;
+        overflow-x: auto;
+        scrollbar-width: thin;
+      }
+
+      .v2-progress-scroll {
+        scrollbar-width: thin;
+      }
+
+      .v2-progress-group {
+        scroll-snap-align: start;
+      }
+
+      .v2-team-modal-dialog {
+        min-width: 0;
+        box-shadow: 0 28px 88px rgba(0, 0, 0, 0.5);
+      }
+
+      .v2-team-modal-header,
+      .v2-team-modal-tabs,
+      .v2-team-modal-body,
+      .v2-team-modal-games,
+      .v2-team-game-detail,
+      .v2-team-profile-full,
+      .v2-team-profile-compact {
+        min-width: 0;
+      }
+
+      .v2-team-modal-tabs {
+        overflow-x: auto;
+        scrollbar-width: thin;
+      }
+
+      .v2-team-modal-tabs button {
+        flex: 0 0 auto;
+      }
+
+      .v2-team-modal-game-row {
+        min-width: 0;
+      }
+
+      .v2-team-game-detail-tabs {
+        overflow-x: auto;
+        scrollbar-width: thin;
+      }
+
+      .v2-team-game-detail-tabs button {
+        flex: 0 0 auto;
+      }
+
+      .v2-team-profile-header {
+        min-width: 0;
+      }
+
+      .v2-team-roster,
+      .v2-roster-leaders,
+      .v2-roster-grid,
+      .v2-pitch-view,
+      .v2-pitch-stage,
+      .v2-pitch-reserves,
+      .v2-match-timeline,
+      .v2-match-timeline-summary,
+      .v2-match-timeline-axis,
+      .v2-match-event-row,
+      .v2-match-event-card {
+        min-width: 0;
+      }
+
+      .v2-roster-player-card,
+      .v2-pitch-player-card {
+        max-width: calc(100vw - 16px);
+        max-height: calc(100vh - 16px);
+        overflow: auto;
+      }
+
+      .v2-match-event-card {
+        overflow: hidden;
+        overflow-wrap: anywhere;
+      }
+
+      .v2-match-event-card span {
+        min-width: 0;
       }
 
       .v2-game-slider.is-compact {
@@ -4681,6 +4782,36 @@ function DashboardV2MotionStyles() {
           padding: 5px 6px;
         }
 
+        .v2-fixed-pager {
+          justify-content: flex-start !important;
+          padding: 8px 10px !important;
+          gap: 6px !important;
+        }
+
+        .v2-fixed-pager-count {
+          display: none;
+        }
+
+        .v2-progress-legend {
+          flex-wrap: nowrap !important;
+          gap: 10px !important;
+          padding: 2px 6px 7px !important;
+        }
+
+        .v2-progress-legend span {
+          flex: 0 0 auto;
+          white-space: nowrap;
+        }
+
+        .v2-progress-scroll {
+          scroll-snap-type: x proximity;
+          padding: 7px 4px 10px !important;
+        }
+
+        .v2-progress-group {
+          padding-inline: 10px !important;
+        }
+
         .v2-main,
         .v2-main.is-race {
           padding: 14px 10px 20px;
@@ -4765,6 +4896,112 @@ function DashboardV2MotionStyles() {
           top: 64px !important;
           width: auto !important;
           max-width: none !important;
+        }
+
+        .v2-roster-player-card,
+        .v2-pitch-player-card {
+          left: 8px !important;
+          right: 8px !important;
+          top: 64px !important;
+          width: auto !important;
+          max-width: none !important;
+          max-height: calc(100vh - 80px) !important;
+          border-radius: 10px !important;
+        }
+
+        .v2-roster-player-stats {
+          grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        }
+
+        .v2-pitch-reserves {
+          grid-template-columns: minmax(0, 1fr) !important;
+          gap: 12px !important;
+        }
+
+        .v2-pitch-player-card-stats {
+          grid-template-columns: minmax(0, 1fr) !important;
+          gap: 5px 10px !important;
+        }
+
+        .v2-match-timeline-summary {
+          padding: 10px 12px !important;
+        }
+
+        .v2-match-event-row {
+          grid-template-columns: minmax(0, 1fr) 52px minmax(0, 1fr) !important;
+          gap: 4px !important;
+        }
+
+        .v2-match-event-card {
+          gap: 5px !important;
+          padding: 4px 7px !important;
+        }
+
+        .v2-team-modal-overlay {
+          align-items: stretch !important;
+          justify-content: stretch !important;
+          padding: 8px !important;
+        }
+
+        .v2-team-modal-dialog {
+          max-width: none !important;
+          max-height: none !important;
+          height: calc(100vh - 16px);
+          border-radius: 10px !important;
+        }
+
+        .v2-team-modal-header {
+          padding: 12px 14px !important;
+          gap: 10px !important;
+        }
+
+        .v2-team-modal-header h2 {
+          font-size: 17px !important;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .v2-team-modal-tabs {
+          padding: 0 10px !important;
+        }
+
+        .v2-team-modal-tabs button {
+          padding: 9px 12px !important;
+        }
+
+        .v2-team-modal-body {
+          padding: 14px 12px !important;
+        }
+
+        .v2-team-modal-summary-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        }
+
+        .v2-team-modal-identity {
+          align-items: flex-start !important;
+        }
+
+        .v2-team-modal-info-grid {
+          grid-template-columns: minmax(0, 1fr) !important;
+        }
+
+        .v2-team-modal-game-row {
+          align-items: flex-start !important;
+          flex-wrap: wrap;
+        }
+
+        .v2-team-modal-game-row > span:last-child {
+          flex: 1 1 100%;
+        }
+
+        .v2-team-game-detail {
+          padding: 10px !important;
+        }
+
+        .v2-team-profile-header {
+          align-items: flex-start !important;
+          flex-wrap: wrap;
         }
 
         .v2-race-stage {
@@ -4966,6 +5203,32 @@ function DashboardV2MotionStyles() {
 
         .v2-players-table {
           min-width: 820px;
+        }
+
+        .v2-team-modal-summary-grid {
+          grid-template-columns: minmax(0, 1fr) !important;
+        }
+
+        .v2-team-profile-compact-metrics {
+          grid-template-columns: minmax(0, 1fr) !important;
+          gap: 6px !important;
+        }
+
+        .v2-roster-grid {
+          grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)) !important;
+          gap: 8px !important;
+        }
+
+        .v2-roster-player-stats {
+          grid-template-columns: minmax(0, 1fr) !important;
+        }
+
+        .v2-match-event-row {
+          grid-template-columns: minmax(0, 1fr) 46px minmax(0, 1fr) !important;
+        }
+
+        .v2-match-event-card {
+          font-size: 11px !important;
         }
 
         .v2-groups-grid {

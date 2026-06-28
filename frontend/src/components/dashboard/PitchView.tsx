@@ -270,8 +270,8 @@ export default function PitchView({
   const allPlayers = [...homePlayers, ...awayPlayers];
 
   return (
-    <div>
-      <div style={{ position: "relative", maxWidth: DISPLAY_MAX, margin: "0 auto" }}>
+    <div className="v2-pitch-view">
+      <div className="v2-pitch-stage" style={{ position: "relative", maxWidth: DISPLAY_MAX, margin: "0 auto" }}>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         style={{ width: "100%", maxWidth: DISPLAY_MAX, display: "block", margin: "0 auto", borderRadius: 8 }}
@@ -348,7 +348,7 @@ export default function PitchView({
       </div>
 
       {/* Reservas dos dois times (a linha do tempo virou sub-aba própria) */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginTop: 16, alignItems: "start", maxWidth: DISPLAY_MAX, marginLeft: "auto", marginRight: "auto" }}>
+      <div className="v2-pitch-reserves" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginTop: 16, alignItems: "start", maxWidth: DISPLAY_MAX, marginLeft: "auto", marginRight: "auto" }}>
         <ReservesCol title={homeTeam} subs={subs.home} subInMinute={subInMinute} align="left" onSelect={togglePlayer} goalPlayers={goalPlayers} yellowCards={yellowCards} redCards={redCards} />
         <ReservesCol title={awayTeam} subs={subs.away} subInMinute={subInMinute} align="right" onSelect={togglePlayer} goalPlayers={goalPlayers} yellowCards={yellowCards} redCards={redCards} />
       </div>
@@ -398,7 +398,6 @@ function PlayerDetailCard({ player, stats, score, kit, index, sub, onClose }: { 
   const posLabel = POS_LABEL[posKey] ?? player.position ?? "";
   const sections = SECTIONS_BY_POS[posKey] ?? SECTIONS_BY_POS.M;
   const num = (k: string) => stats[k] ?? 0;
-  const isGK = posKey === "G";
   const pr = score != null ? score.toFixed(1) : "—"; // Power Ranking FIFA (oficial, parcial)
   // position: fixed (relativo à viewport) → não é cortado pelo overflow do modal
   // e pode ser arrastado pra fora da área.
@@ -406,7 +405,7 @@ function PlayerDetailCard({ player, stats, score, kit, index, sub, onClose }: { 
   const drag = useRef<{ px: number; py: number; x: number; y: number } | null>(null);
 
   return (
-    <div style={{ position: "fixed", left: pos.x, top: pos.y, width: 340, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, boxShadow: "0 16px 48px rgba(0,0,0,0.65)", zIndex: 200 + index }}>
+    <div className="v2-pitch-player-card" style={{ position: "fixed", left: pos.x, top: pos.y, width: 340, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, boxShadow: "0 16px 48px rgba(0,0,0,0.65)", zIndex: 200 + index }}>
       {/* Header (arrastável) */}
       <div
         onPointerDown={(e) => { drag.current = { px: e.clientX, py: e.clientY, x: pos.x, y: pos.y }; (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); }}
@@ -445,7 +444,7 @@ function PlayerDetailCard({ player, stats, score, kit, index, sub, onClose }: { 
         {sections.map(sec => (
           <div key={sec.title} style={{ marginBottom: 9 }}>
             <div style={{ fontSize: 10, fontWeight: 700, color: "var(--accent)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 5 }}>{sec.title}</div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "5px 16px" }}>
+            <div className="v2-pitch-player-card-stats" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "5px 16px" }}>
               {sec.rows.map(([k, label, dec]) => (
                 <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
                   <span style={{ color: "var(--text-muted)", display: "inline-flex", alignItems: "center" }}>
