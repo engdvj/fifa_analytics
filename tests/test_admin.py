@@ -13,7 +13,7 @@ from sqlalchemy.orm import sessionmaker
 
 from api.app.db import Base, get_db
 from api.app.main import app
-from api.app.models import User
+from api.app.models import CollectionJob, User
 from api.app.routers import admin as admin_router
 from api.app.seed import seed_rules
 
@@ -182,3 +182,39 @@ def test_admin_collect_resiliente(client, monkeypatch):
     assert detail["kind"] == "coleta"
     assert detail["status"] in ("success", "error")
     assert "pipeline falhou" in (detail["log"] or "")
+
+
+def test_admin_bloqueia_novo_job_enquanto_outro_ativo(client):
+    tok = _register(client, "adm@x.com")
+    _make_admin(client, "adm@x.com")
+    h = {"Authorization": f"Bearer {tok}"}
+
+    s = client._SessionLocal()
+    active = CollectionJob(kind="coleta", status="running", triggered_by=None)
+    s.add(active)
+    s.commit()
+    s.refresh(active)
+    active_id = active.id
+    s.close()
+
+    r = client.post("/admin/recalc", headers=h)
+    assert r.status_code == 409
+    body = r.json()["detail"]
+    assert body["job_id"] == active_id
+    assert body["status"] == "running"
+
+
+def test_recover_stale_jobs_fecha_job_orfao(client):
+    s = client._SessionLocal()
+    orphan = CollectionJob(kind="coleta", status="running", triggered_by=None)
+    s.add(orphan)
+    s.commit()
+    s.refresh(orphan)
+    orphan_id = orphan.id
+
+    assert admin_router.recover_stale_jobs(s, reason="teste") == 1
+    refreshed = s.get(CollectionJob, orphan_id)
+    assert refreshed.status == "error"
+    assert refreshed.finished_at is not None
+    assert "job marcado como interrompido: teste" in (refreshed.log or "")
+    s.close()
