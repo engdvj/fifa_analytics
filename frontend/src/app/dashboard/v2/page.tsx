@@ -1,7 +1,6 @@
 "use client";
 
 import React from "react";
-import Link from "next/link";
 import { CircleQuestionMark, Maximize2, X } from "lucide-react";
 import {
   Bar,
@@ -16,7 +15,7 @@ import {
   YAxis,
 } from "recharts";
 import { Match, ScoreWeights, TeamSnapshot } from "@/lib/api";
-import { useMatches, useTeamSnapshots, useWeights } from "@/lib/hooks";
+import { useMatches, useTeamSnapshots, useWeights, usePredictiveBacktest } from "@/lib/hooks";
 import { CONFEDERATION, deriveTeams, flagUrl, getKit, selectionColor } from "@/lib/teamUtils";
 import GameSlider from "@/components/dashboard/GameSlider";
 import ProgressDots from "@/components/dashboard/ProgressDots";
@@ -190,10 +189,23 @@ export default function DashboardV2Page() {
   const [weightsGuideOpen, setWeightsGuideOpen] = React.useState(false);
   const [guideWeight, setGuideWeight] = React.useState<WeightKey>("score_resultado");
   const [sidebarWidth, setSidebarWidth] = React.useState(SIDEBAR_DEFAULT_WIDTH);
+  const [predictiveActive, setPredictiveActive] = React.useState(false);
 
   const { matches, isLoading: mLoading, error: mError } = useMatches();
   const { snapshots, isLoading: sLoading, error: sError } = useTeamSnapshots();
   const { weights } = useWeights();
+  // Quando a Preditiva está ativa, o backtest dá o acerto por jogo → cor das
+  // bolinhas. display_start=2 colore desde os primeiros jogos (baixa confiança),
+  // mas a MÉTRICA do summary continua contando só a partir do jogo 25.
+  const { backtest: predBacktest } = usePredictiveBacktest({ start: 25, display_start: 2, enabled: predictiveActive });
+  const predictionResults = React.useMemo(() => {
+    const map = new Map<string, { cat: "exact" | "winner" | "partial" | "miss"; lowConf: boolean }>();
+    for (const r of predBacktest?.rows ?? []) {
+      const cat = r.exact_score ? "exact" : r.hit ? "winner" : r.partial_hit ? "partial" : "miss";
+      map.set(r.match_id, { cat, lowConf: r.low_confidence });
+    }
+    return map;
+  }, [predBacktest]);
 
   const toggleTeam = React.useCallback(
     (team: string) =>
@@ -267,15 +279,6 @@ export default function DashboardV2Page() {
         .sort((a, b) => matchSortValue(a) - matchSortValue(b))
         .map((m, idx) => ({ ...m, match_number: idx + 1 })),
     [matches]
-  );
-
-  // Só os jogos com snapshot disponível alimentam o slider/play.
-  const snapshotMatches: Match[] = React.useMemo(
-    () =>
-      [...snapByGame.entries()]
-        .sort((a, b) => a[0] - b[0])
-        .map(([n, m]) => ({ ...m, match_number: n })),
-    [snapByGame]
   );
 
   // Metadados estáveis de cada seleção (grupo/confederação) p/ os filtros.
@@ -360,13 +363,13 @@ export default function DashboardV2Page() {
   }, [dashSearch, teamsAtSnapshot]);
 
   return (
-    <div style={{ minHeight: "calc(100vh - 52px)", background: "#060910", color: "#e6edf3", fontFamily: "Segoe UI, system-ui, sans-serif" }}>
+    <div className="v2-dashboard-shell">
       {/* Toolbar fixa: abas + pesos + slider + filtros + dots ficam grudados no
           topo (logo abaixo do header global de 52px) enquanto a lista rola. */}
-      <div style={{ position: "sticky", top: 52, zIndex: 40, background: "#0d1117" }}>
+      <div className="v2-dashboard-sticky">
       {/* Header + abas */}
-      <header style={{ display: "flex", alignItems: "center", gap: 16, height: 48, padding: "0 20px", background: "#0d1117", borderBottom: "1px solid #21262d" }}>
-        <nav style={{ display: "flex", gap: 4 }}>
+      <header className="v2-dashboard-header">
+        <nav className="v2-primary-tabs">
           {visibleTabs.map((t) => (
             <button key={t.id} onClick={() => setTab(t.id)} style={tabStyle(tab === t.id)}>
               {t.label}
@@ -375,7 +378,7 @@ export default function DashboardV2Page() {
         </nav>
         {/* Pills de pesos — não se aplicam ao Analytics, então ficam escondidos lá. */}
         {tab !== "analise" ? (
-        <div className="v2-weight-strip" style={{ flex: 1, display: "flex", justifyContent: "center", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+        <div className="v2-weight-strip">
           <span className="v2-weight-strip-label">Pesos fixos</span>
           {/* Geral = combinação dos 6 (100%); ranqueia pelo score_geral */}
           <button
@@ -419,16 +422,16 @@ export default function DashboardV2Page() {
             <CircleQuestionMark size={16} strokeWidth={2.2} />
           </button>
         </div>
-        ) : <div style={{ flex: 1 }} />}
+        ) : <div className="v2-header-spacer" />}
         {/* Play + slider compacto, no topo (como o legacy) */}
-        {snapshotMatches.length > 0 && (
-          <GameSlider matches={snapshotMatches} currentGame={activeSnapshot} onGameChange={setCurrentSnapshot} compact />
+        {chronologicalMatches.length > 0 && (
+          <GameSlider matches={chronologicalMatches} currentGame={activeSnapshot} onGameChange={setCurrentSnapshot} compact />
         )}
       </header>
 
       {/* Barra de filtros — escondida no Analytics (que tem seu próprio seletor de seleções). */}
       {tab !== "analise" && (
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 20px", background: "#0d1117", borderBottom: "1px solid #161b22", flexWrap: "wrap" }}>
+      <div className="v2-filter-bar">
         <FilterSelect label="Grupo" value={filters.group} onChange={(v) => setFilters((f) => ({ ...f, group: v }))} options={groups.map((g) => [g, g])} suggested={groupSuggested} />
         <FilterSelect label="Confederação" value={filters.confed} onChange={(v) => setFilters((f) => ({ ...f, confed: v }))} options={confeds.map((c) => [c, c])} suggested={confedSuggested} />
         <FilterSelect label="Fase" value={filters.stage} onChange={(v) => setFilters((f) => ({ ...f, stage: v }))} options={stages.map((s) => [s, STAGE_LABELS[s] ?? s])} />
@@ -436,12 +439,12 @@ export default function DashboardV2Page() {
         <button
           onClick={() => setSortDir((d) => (d === "desc" ? "asc" : "desc"))}
           title={sortDir === "desc" ? "Maior primeiro (clique para inverter)" : "Menor primeiro (clique para inverter)"}
-          style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "#161b22", color: "#c9d1d9", border: "1px solid #30363d", borderRadius: 6, padding: "4px 10px", fontSize: 12, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}
+          className="v2-sort-button"
         >
           <span style={{ fontSize: 13 }}>{sortDir === "desc" ? "↓" : "↑"}</span>
           {sortDir === "desc" ? "Maior primeiro" : "Menor primeiro"}
         </button>
-        <div style={{ position: "relative" }}>
+        <div className="v2-search-box">
           <input
             type="text"
             value={dashSearch}
@@ -449,10 +452,10 @@ export default function DashboardV2Page() {
             onFocus={() => setSearchFocused(true)}
             onBlur={() => setTimeout(() => setSearchFocused(false), 150)}
             placeholder={tab === "players" ? "Buscar jogador ou seleção…" : "Buscar seleção…"}
-            style={{ background: "#161b22", color: "#c9d1d9", border: "1px solid #30363d", borderRadius: 6, padding: "4px 10px", fontSize: 12, outline: "none", width: tab === "players" ? 200 : 180, fontFamily: "inherit" }}
+            className="v2-dashboard-search"
           />
           {searchFocused && searchSuggestions.length > 0 && (
-            <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, zIndex: 60, minWidth: 230, maxHeight: 300, overflowY: "auto", background: "#161b22", border: "1px solid #30363d", borderRadius: 8, boxShadow: "0 12px 32px rgba(0,0,0,0.5)", padding: 4 }}>
+            <div className="v2-search-suggestions">
               {searchSuggestions.map((team) => {
                 const sel = selectedTeams.includes(team);
                 return (
@@ -473,8 +476,8 @@ export default function DashboardV2Page() {
         {(filters.group || filters.confed || filters.stage) && (
           <button onClick={() => setFilters(EMPTY_FILTERS)} style={{ ...tabStyle(false), padding: "4px 10px" }}>✕ Limpar</button>
         )}
-        <div style={{ flex: 1 }} />
-        <span style={{ fontSize: 12, color: "#8b949e" }}>
+        <div className="v2-filter-fill" />
+        <span className="v2-api-status">
           {isLoading && "Conectando à API…"}
           {error && <span style={{ color: "#f85149" }}>Erro na API (rodando em :8001?): {String(error)}</span>}
           {!isLoading && !error && <span style={{ color: "#3fb950" }}>● {teamsAtSnapshot.length} seleções no snapshot {activeSnapshot}</span>}
@@ -484,14 +487,14 @@ export default function DashboardV2Page() {
 
       {/* Navegação no tempo: dots de fases, largura total */}
       {chronologicalMatches.length > 0 && (
-        <div style={{ padding: "6px 8px", background: "#0d1117", borderBottom: "1px solid #161b22" }}>
-          <ProgressDots matches={chronologicalMatches} matchSnapshot={matchSnapshot} currentSnapshot={activeSnapshot} onSelect={setCurrentSnapshot} />
+        <div className="v2-progress-shell">
+          <ProgressDots matches={chronologicalMatches} matchSnapshot={matchSnapshot} currentSnapshot={activeSnapshot} onSelect={setCurrentSnapshot} predictionResults={predictiveActive ? predictionResults : undefined} minPredictionGame={25} />
         </div>
       )}
       </div>
 
       {/* Conteúdo da aba */}
-      <main style={{ padding: tab === "race" ? "18px 16px 24px" : 24 }}>
+      <main className={tab === "race" ? "v2-main is-race" : "v2-main"}>
         {tab === "race" ? (
           <div
             className={`v2-race-workspace ${selectedTeams.length > 0 ? "has-selection" : ""}`}
@@ -546,7 +549,7 @@ export default function DashboardV2Page() {
         ) : tab === "players" ? (
           <PlayersTab activeSnapshot={activeSnapshot} passesFilters={passesFilters} selectedTeams={selectedTeams} search={dashSearch} />
         ) : tab === "analise" ? (
-          <AnaliseTab matches={matches} activeSnapshot={activeSnapshot} isAdmin={isAdmin} onSnapshotChange={setCurrentSnapshot} />
+          <AnaliseTab matches={matches} activeSnapshot={activeSnapshot} isAdmin={isAdmin} onSnapshotChange={setCurrentSnapshot} onPredictiveActive={setPredictiveActive} />
         ) : (
           <GruposChaveTab
             matches={matches}
@@ -2313,8 +2316,58 @@ function GuideQuestion({
 function DashboardV2MotionStyles() {
   return (
     <style>{`
+      .v2-dashboard-shell {
+        min-height: calc(100vh - 52px);
+        background: #060910;
+        color: #e6edf3;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        overflow-x: clip;
+      }
+
+      .v2-dashboard-sticky {
+        position: sticky;
+        top: 52px;
+        z-index: 40;
+        background: #0d1117;
+      }
+
+      .v2-dashboard-header {
+        display: flex;
+        align-items: center;
+        gap: clamp(8px, 1.1vw, 16px);
+        min-height: 48px;
+        padding: 8px clamp(12px, 1.8vw, 24px);
+        background: #0d1117;
+        border-bottom: 1px solid #21262d;
+        flex-wrap: wrap;
+      }
+
+      .v2-primary-tabs {
+        display: flex;
+        gap: 4px;
+        min-width: 0;
+        overflow-x: auto;
+        scrollbar-width: thin;
+      }
+
+      .v2-primary-tabs button {
+        flex: 0 0 auto;
+      }
+
+      .v2-header-spacer {
+        flex: 1 1 120px;
+        min-width: 0;
+      }
+
       .v2-weight-strip {
+        flex: 999 1 340px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 5px;
+        flex-wrap: wrap;
         min-width: 340px;
+        max-width: 100%;
       }
 
       .v2-weight-strip-label {
@@ -2325,9 +2378,508 @@ function DashboardV2MotionStyles() {
         white-space: nowrap;
       }
 
+      .v2-filter-bar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px clamp(12px, 1.8vw, 24px);
+        background: #0d1117;
+        border-bottom: 1px solid #161b22;
+        flex-wrap: wrap;
+      }
+
+      .v2-filter-control {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+        max-width: 100%;
+        color: #8b949e;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .v2-filter-control select,
+      .v2-metric-select,
+      .v2-dashboard-search,
+      .v2-game-speed {
+        background: #161b22;
+        color: #e6edf3;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        font-family: inherit;
+      }
+
+      .v2-filter-control select,
+      .v2-metric-select {
+        min-width: 0;
+        max-width: 100%;
+        padding: 4px 8px;
+        font-size: 12px;
+      }
+
+      .v2-metric-control {
+        flex: 0 1 230px;
+      }
+
+      .v2-metric-select {
+        width: min(100%, 180px);
+      }
+
+      .v2-sort-button {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        background: #161b22;
+        color: #c9d1d9;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        padding: 4px 10px;
+        font-size: 12px;
+        cursor: pointer;
+        font-family: inherit;
+        white-space: nowrap;
+      }
+
+      .v2-search-box {
+        position: relative;
+        flex: 1 1 190px;
+        min-width: 160px;
+        max-width: 280px;
+      }
+
+      .v2-dashboard-search {
+        width: 100%;
+        padding: 4px 10px;
+        color: #c9d1d9;
+        font-size: 12px;
+        outline: none;
+      }
+
+      .v2-search-suggestions {
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        z-index: 60;
+        width: min(300px, calc(100vw - 24px));
+        max-height: 300px;
+        overflow-y: auto;
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+        padding: 4px;
+      }
+
+      .v2-filter-fill {
+        flex: 1 1 48px;
+        min-width: 0;
+      }
+
+      .v2-api-status {
+        color: #8b949e;
+        font-size: 12px;
+        min-width: 0;
+      }
+
+      .v2-progress-shell {
+        padding: 6px 8px;
+        background: #0d1117;
+        border-bottom: 1px solid #161b22;
+      }
+
+      .v2-main {
+        width: 100%;
+        max-width: 1760px;
+        margin: 0 auto;
+        padding: 24px clamp(14px, 1.7vw, 28px);
+      }
+
+      .v2-main.is-race {
+        max-width: none;
+        padding: 18px clamp(12px, 1.2vw, 20px) 24px;
+      }
+
+      .v2-analytics-shell {
+        width: 100%;
+        max-width: 1500px;
+        margin: 0 auto;
+        min-width: 0;
+      }
+
+      .v2-analytics-tabs {
+        display: flex;
+        gap: 4px;
+        flex-wrap: wrap;
+        justify-content: center;
+        margin-bottom: 16px;
+        min-width: 0;
+      }
+
+      .v2-diagnostic-shell {
+        max-width: 1000px;
+        margin: 0 auto;
+        min-width: 0;
+      }
+
+      .v2-team-focus-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+        min-height: 34px;
+        min-width: 0;
+      }
+
+      .v2-team-focus-picker {
+        position: relative;
+      }
+
+      .v2-team-focus-popover {
+        position: absolute;
+        top: calc(100% + 6px);
+        left: 0;
+        z-index: 60;
+        width: min(520px, calc(100vw - 24px));
+        max-width: 90vw;
+        background: var(--surface);
+        border: 1px solid var(--surface2);
+        border-radius: 10px;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+        overflow: hidden;
+      }
+
+      .v2-team-focus-options {
+        max-height: 320px;
+        overflow-y: auto;
+        padding: 8px;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 4px;
+      }
+
+      .v2-predictive-shell {
+        min-width: 0;
+      }
+
+      .v2-predictive-track {
+        min-width: 0;
+      }
+
+      .v2-advice-shell {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 14px;
+        max-width: 1180px;
+        margin: 0 auto;
+        min-width: 0;
+      }
+
+      .v2-advice-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+        gap: 14px;
+        align-items: start;
+        min-width: 0;
+      }
+
+      .v2-advice-strip {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 7px;
+      }
+
+      .v2-teams-tab,
+      .v2-players-tab {
+        min-width: 0;
+      }
+
+      .v2-teams-summary,
+      .v2-players-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 14px;
+        flex-wrap: wrap;
+        min-width: 0;
+      }
+
+      .v2-teams-grid {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 12px;
+        padding-bottom: 56px;
+      }
+
+      .v2-players-control,
+      .v2-players-check {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        color: #8b949e;
+        font-size: 12px;
+      }
+
+      .v2-players-check {
+        gap: 5px;
+        cursor: pointer;
+      }
+
+      .v2-players-segments {
+        display: inline-flex;
+        gap: 3px;
+        background: #0d1117;
+        border: 1px solid #21262d;
+        border-radius: 8px;
+        padding: 3px;
+        max-width: 100%;
+        overflow-x: auto;
+        scrollbar-width: thin;
+      }
+
+      .v2-players-segments button {
+        flex: 0 0 auto;
+      }
+
+      .v2-players-count {
+        color: #8b949e;
+        font-size: 12px;
+        margin-left: auto;
+      }
+
+      .v2-players-table-wrap {
+        max-width: 100%;
+        overflow-x: auto;
+        border: 1px solid #21262d;
+        border-radius: 8px;
+        scrollbar-width: thin;
+      }
+
+      .v2-players-table {
+        min-width: 980px;
+      }
+
+      .v2-groups-shell,
+      .v2-groups-table-tab,
+      .v2-bracket-tab {
+        min-width: 0;
+      }
+
+      .v2-groups-subtabs {
+        display: inline-flex;
+        gap: 4px;
+        max-width: 100%;
+        overflow-x: auto;
+        background: #0d1117;
+        border: 1px solid #21262d;
+        border-radius: 9px;
+        padding: 4px;
+        margin-bottom: 16px;
+        scrollbar-width: thin;
+      }
+
+      .v2-groups-subtabs button {
+        flex: 0 0 auto;
+      }
+
+      .v2-groups-legend {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+        margin-bottom: 14px;
+        color: #8b949e;
+        font-size: 11.5px;
+      }
+
+      .v2-groups-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 16px;
+      }
+
+      .v2-group-card {
+        min-width: 0;
+        overflow: hidden;
+        background: #0d1117;
+        border: 1px solid #21262d;
+        border-radius: 12px;
+      }
+
+      .v2-group-table-wrap {
+        max-width: 100%;
+        overflow-x: auto;
+        scrollbar-width: thin;
+      }
+
+      .v2-group-table {
+        min-width: 540px;
+      }
+
+      .v2-bracket-scroll {
+        overflow-x: auto;
+        padding-bottom: 8px;
+        scrollbar-width: thin;
+        scroll-snap-type: x proximity;
+      }
+
+      .v2-bracket-board {
+        display: flex;
+        gap: 14px;
+        align-items: stretch;
+        width: fit-content;
+        margin: 0 auto;
+      }
+
+      .v2-bracket-column {
+        min-width: 158px;
+        display: flex;
+        flex: 0 0 auto;
+        flex-direction: column;
+        scroll-snap-align: start;
+      }
+
+      .v2-bracket-center {
+        min-width: 230px;
+        display: flex;
+        flex: 0 0 auto;
+        flex-direction: column;
+        justify-content: center;
+        gap: 22px;
+        scroll-snap-align: center;
+      }
+
+      .v2-game-slider.is-compact {
+        justify-content: flex-end;
+      }
+
+      .v2-game-count {
+        flex: 0 0 auto;
+      }
+
+      .v2-race-list {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        min-width: 0;
+      }
+
+      .v2-race-list-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+        min-width: 0;
+      }
+
+      .v2-race-metric-label {
+        display: inline-flex;
+        align-items: center;
+        color: #8b949e;
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0;
+        min-width: 0;
+      }
+
+      .v2-race-empty {
+        color: #8b949e;
+        font-size: 13px;
+        padding: 16px 0;
+      }
+
+      .v2-race-rows {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        min-width: 0;
+      }
+
+      .v2-race-row {
+        width: 100%;
+        display: grid;
+        grid-template-columns: 24px 22px minmax(138px, 170px) minmax(0, 1fr) minmax(54px, 64px);
+        align-items: center;
+        column-gap: 8px;
+        padding: 5px 8px;
+        border-radius: 7px;
+        cursor: pointer;
+        text-align: left;
+        font-family: inherit;
+        min-width: 0;
+      }
+
+      .v2-race-row:hover {
+        background: rgba(88, 166, 255, 0.07);
+      }
+
+      .v2-race-flag {
+        width: 22px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+      }
+
+      .v2-race-team {
+        min-width: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        overflow: hidden;
+        color: #e6edf3;
+        font-size: 13px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .v2-race-bar {
+        width: 100%;
+        min-width: 0;
+        height: 20px;
+        position: relative;
+      }
+
+      .v2-race-value {
+        width: 64px;
+        color: #e6edf3;
+        font-size: 12px;
+        font-weight: 700;
+        text-align: right;
+        white-space: nowrap;
+      }
+
+      .v2-snapshot-label {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        color: #b7c7dc;
+        font-size: 13px;
+        flex-wrap: wrap;
+      }
+
+      .v2-snapshot-match {
+        min-width: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        color: #f0f6fc;
+        font-weight: 800;
+      }
+
+      .v2-snapshot-match span {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       .v2-race-workspace {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) 10px min(50vw, var(--v2-sidebar-width, 392px));
+        grid-template-columns: minmax(520px, 1fr) 10px min(50vw, var(--v2-sidebar-width, 392px));
         gap: 12px;
         align-items: start;
       }
@@ -3963,7 +4515,102 @@ function DashboardV2MotionStyles() {
         padding: 0 14px 14px;
       }
 
+      .v2-team-score-card-shell {
+        max-height: calc(100vh - 20px);
+      }
+
+      .v2-team-score-card {
+        max-height: inherit;
+      }
+
+      .v2-team-score-head,
+      .v2-team-score-tabs,
+      .v2-team-score-legend {
+        min-width: 0;
+      }
+
+      .v2-team-score-name,
+      .v2-team-score-meta {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      @media (min-width: 1920px) {
+        .v2-main {
+          max-width: 1840px;
+        }
+
+        .v2-main.is-race {
+          max-width: none;
+        }
+
+        .v2-race-workspace {
+          grid-template-columns: minmax(720px, 1fr) 10px min(32vw, var(--v2-sidebar-width, 460px));
+        }
+      }
+
+      @media (max-width: 980px) {
+        .v2-dashboard-header {
+          align-items: flex-start;
+        }
+
+        .v2-primary-tabs {
+          order: 1;
+          flex: 1 1 100%;
+          padding-bottom: 2px;
+        }
+
+        .v2-weight-strip {
+          order: 2;
+          justify-content: flex-start;
+          min-width: 0;
+          overflow-x: auto;
+          flex-wrap: nowrap;
+          padding-bottom: 2px;
+        }
+
+        .v2-weight-pill,
+        .v2-weight-help {
+          flex: 0 0 auto;
+        }
+
+        .v2-game-slider.is-compact {
+          order: 3;
+          flex-basis: 100% !important;
+          max-width: none !important;
+          justify-content: flex-start;
+        }
+
+        .v2-filter-control {
+          flex: 1 1 170px;
+        }
+
+        .v2-filter-control select,
+        .v2-metric-select {
+          width: 100%;
+        }
+
+        .v2-predictive-shell {
+          grid-template-columns: minmax(0, 1fr) !important;
+          justify-content: stretch !important;
+        }
+
+        .v2-predictive-track {
+          position: static !important;
+        }
+      }
+
       @media (max-width: 1180px) {
+        .v2-teams-grid {
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        }
+
+        .v2-groups-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
         .v2-race-workspace {
           grid-template-columns: minmax(0, 1fr);
         }
@@ -3978,9 +4625,252 @@ function DashboardV2MotionStyles() {
           max-height: none;
           order: -1;
         }
+
+        .v2-race-workspace.has-selection .v2-race-stage {
+          box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.11);
+        }
       }
 
       @media (max-width: 760px) {
+        .v2-dashboard-sticky {
+          top: 52px;
+        }
+
+        .v2-dashboard-header {
+          padding: 8px 10px;
+          gap: 8px;
+        }
+
+        .v2-primary-tabs button {
+          padding: 5px 10px !important;
+        }
+
+        .v2-filter-bar {
+          align-items: stretch;
+          gap: 8px;
+          padding: 8px 10px;
+        }
+
+        .v2-filter-control {
+          flex: 1 1 calc(50% - 4px);
+          min-width: 150px;
+          align-items: stretch;
+          flex-direction: column;
+          gap: 4px;
+        }
+
+        .v2-sort-button {
+          flex: 1 1 150px;
+          justify-content: center;
+        }
+
+        .v2-search-box {
+          flex: 1 1 100%;
+          max-width: none;
+        }
+
+        .v2-filter-fill {
+          display: none;
+        }
+
+        .v2-api-status {
+          flex: 1 1 100%;
+        }
+
+        .v2-progress-shell {
+          padding: 5px 6px;
+        }
+
+        .v2-main,
+        .v2-main.is-race {
+          padding: 14px 10px 20px;
+        }
+
+        .v2-analytics-tabs {
+          justify-content: flex-start;
+          flex-wrap: nowrap;
+          overflow-x: auto;
+          padding-bottom: 2px;
+          scrollbar-width: thin;
+        }
+
+        .v2-analytics-tabs button {
+          flex: 0 0 auto;
+          padding: 5px 10px !important;
+        }
+
+        .v2-team-focus-bar {
+          align-items: flex-start;
+          gap: 7px;
+        }
+
+        .v2-team-focus-popover {
+          position: fixed;
+          left: 10px;
+          right: 10px;
+          top: 122px;
+          width: auto;
+          max-width: none;
+          max-height: calc(100vh - 144px);
+        }
+
+        .v2-team-focus-options {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          max-height: min(360px, calc(100vh - 220px));
+        }
+
+        .v2-predictive-stat-grid,
+        .v2-predictive-reality-grid {
+          grid-template-columns: minmax(0, 1fr) !important;
+        }
+
+        .v2-advice-grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .v2-advice-strip {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .v2-teams-summary,
+        .v2-players-toolbar {
+          align-items: stretch;
+          gap: 8px;
+        }
+
+        .v2-teams-summary > span:last-child,
+        .v2-players-count {
+          margin-left: 0;
+          flex: 1 1 100%;
+        }
+
+        .v2-players-control {
+          flex: 1 1 180px;
+          align-items: stretch;
+          flex-direction: column;
+          gap: 4px;
+        }
+
+        .v2-players-control select {
+          width: 100%;
+        }
+
+        .v2-players-segments {
+          flex: 1 1 100%;
+        }
+
+        .v2-player-card-shell {
+          left: 8px !important;
+          right: 8px !important;
+          top: 64px !important;
+          width: auto !important;
+          max-width: none !important;
+        }
+
+        .v2-race-stage {
+          padding: 0;
+          margin: 0;
+        }
+
+        .v2-race-list-head {
+          gap: 8px;
+        }
+
+        .v2-race-metric-label {
+          width: 100%;
+        }
+
+        .v2-race-row {
+          grid-template-columns: 24px 22px minmax(0, 1fr) auto;
+          grid-template-rows: auto auto;
+          row-gap: 5px;
+          padding: 8px;
+        }
+
+        .v2-race-bar {
+          grid-column: 3 / 5;
+          height: 9px;
+        }
+
+        .v2-race-value {
+          width: auto;
+          min-width: 54px;
+        }
+
+        .v2-snapshot-label {
+          width: 100%;
+          font-size: 12px;
+        }
+
+        .v2-snapshot-match {
+          width: 100%;
+        }
+
+        .v2-selection-sidebar {
+          padding: 10px;
+          gap: 10px;
+        }
+
+        .v2-team-score-card-shell {
+          left: 8px !important;
+          right: 8px !important;
+          top: 64px !important;
+          width: auto !important;
+          height: auto !important;
+          max-width: none !important;
+          max-height: calc(100vh - 78px);
+        }
+
+        .v2-team-score-card {
+          max-height: calc(100vh - 78px);
+        }
+
+        .v2-team-score-head {
+          cursor: default !important;
+          touch-action: auto !important;
+          flex-wrap: wrap;
+          padding: 9px 10px !important;
+        }
+
+        .v2-team-score-name {
+          flex: 1 1 160px;
+        }
+
+        .v2-team-score-meta {
+          order: 4;
+          flex: 1 1 100%;
+        }
+
+        .v2-team-score-tabs {
+          padding: 8px !important;
+        }
+
+        .v2-team-score-body {
+          max-height: calc(100vh - 240px) !important;
+          padding: 8px 10px 10px !important;
+        }
+
+        .v2-team-score-legend {
+          gap: 7px 10px !important;
+          padding: 7px 10px !important;
+        }
+
+        .v2-team-score-legend span:last-child {
+          display: none !important;
+        }
+
+        .v2-team-score-resize {
+          display: none !important;
+        }
+
+        .v2-game-slider.is-compact {
+          gap: 7px;
+        }
+
+        .v2-game-speed {
+          display: none;
+        }
+
         .v2-analysis-backdrop {
           padding: 8px;
         }
@@ -4026,6 +4916,78 @@ function DashboardV2MotionStyles() {
 
         .v2-component-picker {
           grid-template-columns: repeat(auto-fit, minmax(172px, 1fr));
+        }
+      }
+
+      @media (max-width: 520px) {
+        .v2-filter-control,
+        .v2-sort-button {
+          flex-basis: 100%;
+        }
+
+        .v2-dashboard-header {
+          padding-inline: 8px;
+        }
+
+        .v2-game-count {
+          min-width: 66px;
+        }
+
+        .v2-game-range {
+          min-width: 80px !important;
+        }
+
+        .v2-race-row {
+          grid-template-columns: 22px 20px minmax(0, 1fr) auto;
+          column-gap: 6px;
+        }
+
+        .v2-race-team {
+          font-size: 12px;
+        }
+
+        .v2-race-value {
+          font-size: 11px;
+          min-width: 46px;
+        }
+
+        .v2-team-focus-options {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .v2-advice-strip {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .v2-teams-grid {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 10px;
+        }
+
+        .v2-players-table {
+          min-width: 820px;
+        }
+
+        .v2-groups-grid {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 12px;
+        }
+
+        .v2-groups-legend span:last-child {
+          margin-left: 0 !important;
+          flex: 1 1 100%;
+        }
+
+        .v2-bracket-board {
+          margin: 0;
+        }
+
+        .v2-bracket-column {
+          min-width: 148px;
+        }
+
+        .v2-bracket-center {
+          min-width: 210px;
         }
       }
 
@@ -4083,12 +5045,12 @@ function tabStyle(active: boolean): React.CSSProperties {
 function FilterSelect({ label, value, onChange, options, suggested }: { label: string; value: string; onChange: (v: string) => void; options: [string, string][]; suggested?: Map<string, { team: string; color: string }[]> }) {
   const hasSug = suggested && suggested.size > 0;
   return (
-    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8b949e" }}>
+    <label className="v2-filter-control">
       {label}
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        style={{ background: "#161b22", color: "#e6edf3", border: `1px solid ${hasSug ? "#3fb950" : "#30363d"}`, borderRadius: 6, padding: "4px 8px", fontSize: 12, fontFamily: "inherit" }}
+        style={{ borderColor: hasSug ? "#3fb950" : "#30363d" }}
       >
         <option value="">Todas</option>
         {options.map(([v, l]) => {
@@ -4120,14 +5082,14 @@ function MetricSelect({
   const isModal = variant === "modal";
   return (
     <label
-      className={isModal ? "v2-modal-metric-select" : undefined}
-      style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8b949e" }}
+      className={isModal ? "v2-modal-metric-select" : "v2-filter-control v2-metric-control"}
     >
       {label}
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        style={{ background: "#161b22", color: "#e6edf3", border: "1px solid #30363d", borderRadius: 6, padding: isModal ? "6px 10px" : "4px 8px", fontSize: 12, fontFamily: "inherit", minWidth: isModal ? 190 : 150 }}
+        className={isModal ? undefined : "v2-metric-select"}
+        style={isModal ? { background: "#161b22", color: "#e6edf3", border: "1px solid #30363d", borderRadius: 6, padding: "6px 10px", fontSize: 12, fontFamily: "inherit", minWidth: 190 } : undefined}
       >
         {METRIC_OPTIONS.map((g) => (
           <optgroup key={g.group} label={g.group}>
@@ -4138,40 +5100,5 @@ function MetricSelect({
         ))}
       </select>
     </label>
-  );
-}
-
-function ShellState(props: {
-  tab: Tab;
-  snapshot: number;
-  maxSnapshot: number;
-  match: Match | undefined;
-  teamCount: number;
-  selectedCount: number;
-  filters: DashboardFilters;
-}) {
-  const { tab, snapshot, maxSnapshot, match, teamCount, filters } = props;
-  const tabLabel = TABS.find((t) => t.id === tab)?.label;
-  const nextEtapa = tab === "race" ? "Etapa 3" : tab === "teams" ? "Etapa 4" : "Etapa 5";
-  return (
-    <div style={{ border: "1px dashed #30363d", borderRadius: 10, padding: 32 }}>
-      <h2 style={{ margin: 0, fontSize: 18 }}>{tabLabel}</h2>
-      <p style={{ color: "#8b949e", fontSize: 13, marginTop: 6 }}>{nextEtapa} — conteúdo desta aba será preenchido em seguida.</p>
-      <div style={{ marginTop: 16, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
-        <Stat label="Snapshot atual" value={`${snapshot} / ${maxSnapshot}`} />
-        <Stat label="Jogo de referência" value={match ? `${match.home_team} ${match.home_score ?? "–"}×${match.away_score ?? "–"} ${match.away_team}` : "—"} />
-        <Stat label="Seleções visíveis (pós-filtro)" value={String(teamCount)} />
-        <Stat label="Filtros ativos" value={[filters.group, filters.confed, filters.stage].filter(Boolean).join(" · ") || "nenhum"} />
-      </div>
-    </div>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div style={{ background: "#0d1117", border: "1px solid #21262d", borderRadius: 8, padding: "10px 12px" }}>
-      <div style={{ fontSize: 11, color: "#8b949e" }}>{label}</div>
-      <div style={{ fontSize: 14, fontWeight: 600, marginTop: 2 }}>{value}</div>
-    </div>
   );
 }

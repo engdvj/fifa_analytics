@@ -142,6 +142,24 @@ def _collect_now() -> None:
     _run_job(job_id, do_collect=True)  # cria a própria sessão; é síncrono
 
 
+def _learn_now() -> None:
+    """Re-treina a preditiva (job próprio, visível no histórico). Síncrono."""
+    from api.app.db import SessionLocal
+    from api.app.models import CollectionJob
+    from api.app.routers.admin import _run_learn_job
+
+    db = SessionLocal()
+    try:
+        job = CollectionJob(kind="preditiva-learn", status="pending", triggered_by=None)
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        job_id = job.id
+    finally:
+        db.close()
+    _run_learn_job(job_id)
+
+
 def _loop(interval_seconds: float, grace_seconds: float) -> None:
     # Semente: o que o gold já conhece como finalizado. Restart não recoleta tudo;
     # jogo que terminou durante uma queda é detectado no primeiro ciclo.
@@ -196,6 +214,13 @@ def _loop(interval_seconds: float, grace_seconds: float) -> None:
             _status["last_collect_ok"] = True
             _status["last_error"] = None
             log.info("auto-collect: coleta concluída (%d finalizados no total)", len(seen))
+            # Novos resultados chegaram → re-treina a preditiva (gated por env).
+            if os.getenv("PREDICTIVE_AUTOLEARN", "0") == "1":
+                try:
+                    log.info("auto-collect: re-treinando preditiva com os novos resultados")
+                    _learn_now()
+                except Exception:  # noqa: BLE001 — aprendizado nunca derruba o ciclo
+                    log.exception("auto-collect: re-treino da preditiva falhou (ignorado)")
         except Exception:  # noqa: BLE001 — mantém `seen` p/ tentar de novo no próximo ciclo
             _status["last_collect_at"] = _utcnow_iso()
             _status["last_collect_ok"] = False

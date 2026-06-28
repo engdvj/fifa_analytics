@@ -131,6 +131,38 @@ def test_admin_dispara_recalc_e_job_conclui(client):
     assert jobs[0]["id"] == job["id"]  # mais recente primeiro
 
 
+def test_admin_dispara_learn_preditiva(client, monkeypatch):
+    """O re-treino da preditiva cria um job 'preditiva-learn' e conclui, deixando
+    log. learn_and_save é stubado (o real custa minutos e lê o gold)."""
+    import fifa_analytics.analytics.predictive as predictive
+
+    monkeypatch.setattr(
+        predictive,
+        "learn_and_save",
+        lambda *a, **k: {"metrics": {"before": {"log_loss": 0.9}, "after": {"log_loss": 0.88}}, "evaluated_games": 42},
+    )
+
+    tok = _register(client, "adm@x.com")
+    _make_admin(client, "adm@x.com")
+    h = {"Authorization": f"Bearer {tok}"}
+
+    r = client.post("/admin/predictive/learn", headers=h)
+    assert r.status_code == 202
+    job = r.json()
+    assert job["kind"] == "preditiva-learn"
+    detail = client.get(f"/admin/jobs/{job['id']}", headers=h).json()
+    assert detail["status"] in ("success", "error")
+    assert detail["finished_at"] is not None
+    assert detail["log"]
+
+
+def test_learn_preditiva_restrito_a_admin(client):
+    tok = _register(client, "user@x.com")
+    h = {"Authorization": f"Bearer {tok}"}
+    assert client.post("/admin/predictive/learn", headers=h).status_code == 403
+    assert client.post("/admin/predictive/learn").status_code == 401
+
+
 def test_admin_collect_resiliente(client, monkeypatch):
     """Pipeline falhando não derruba o servidor; job termina registrado como
     error mas com reload/recompute tentados (resiliência)."""

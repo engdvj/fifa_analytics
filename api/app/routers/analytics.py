@@ -404,6 +404,55 @@ def exploratory_patterns(
     )
 
 
+@router.get("/predictive")
+def predictive_matches(
+    snapshot: int | None = Query(None, description="snapshot/jogo a prever (default: próximo jogo a partir do último snapshot)"),
+    _admin: User = Depends(require_admin),
+) -> dict:
+    """Previsão do jogo correspondente à bolinha: gols esperados, 1X2 e fatores.
+
+    Camada preditiva explicável: prevê UM jogo (o do snapshot-alvo) usando apenas
+    os dados disponíveis até o snapshot anterior (as-of). Admin.
+    """
+    from fifa_analytics.analytics.predictive import build_predictive
+
+    dim = _parquet("dim_match.parquet")
+    if dim.empty:
+        return {}
+    return build_predictive(
+        dim,
+        _parquet("analytics/snapshot_timeline.parquet"),
+        snapshot,
+        freeze=True,
+    )
+
+
+@router.get("/predictive/backtest")
+def predictive_backtest(
+    start: int = Query(25, ge=25, description="primeiro jogo/snapshot a testar"),
+    end: int | None = Query(None, ge=25, description="ultimo jogo/snapshot a testar"),
+    display_start: int | None = Query(None, ge=2, description="gera linhas desde este jogo (p/ colorir bolinhas); métrica continua a partir de `start`"),
+    _admin: User = Depends(require_admin),
+) -> dict:
+    """Backtest walk-forward da preditiva: jogo N usa snapshots ate N-1.
+
+    `display_start` gera linhas de avaliação desde os jogos iniciais (p/ colorir as
+    bolinhas), mas o summary de qualidade continua contando só a partir de `start`.
+    """
+    from fifa_analytics.analytics.predictive import build_backtest
+
+    dim = _parquet("dim_match.parquet")
+    if dim.empty:
+        return {"summary": {}, "rows": []}
+    return build_backtest(
+        dim,
+        _parquet("analytics/snapshot_timeline.parquet"),
+        start=start,
+        end=end,
+        display_start=display_start,
+    )
+
+
 @router.get("/insights/narrative")
 def insight_narrative(
     tipo: str = Query("diagnostica", description="tipo de análise"),

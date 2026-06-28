@@ -3,12 +3,28 @@
 import { useMemo } from "react";
 import { Match } from "@/lib/api";
 
+// Resultado da previsão por jogo (vem do backtest). undefined = modo normal.
+type PredCat = "exact" | "winner" | "partial" | "miss";
+type PredictionResult = { cat: PredCat; lowConf: boolean };
+
 interface ProgressDotsProps {
   matches: Match[]; // TODOS os jogos (match_number real + stage real)
   matchSnapshot: Map<string, number>; // match_id → snapshot (só finalizados)
   currentSnapshot: number;
   onSelect: (snapshot: number) => void;
+  predictionResults?: Map<string, PredictionResult>; // ativa o modo Preditiva
+  minPredictionGame?: number; // antes disso: "não previsto"
 }
+
+// Cores do modo Preditiva — semáforo de acerto da previsão.
+const PRED_COLORS = {
+  exact: "#2dd4ff",   // acertou placar EXATO (cravado) — azul
+  winner: "#3fb950",  // acertou o vencedor — verde
+  partial: "#f5c542", // errou vencedor mas acertou o saldo (chegou perto) — amarelo
+  miss: "#f85149",    // errou tudo — vermelho
+  future: "#a78bfa",  // jogo futuro (ainda vai prever) — roxo
+  notpredicted: "#6b7280", // antes do jogo mínimo — cinza
+} as const;
 
 // stage (gold, inglês) → rótulo pt-BR + cor + ordem
 const STAGE_PTBR: Record<string, string> = {
@@ -56,7 +72,8 @@ interface Group {
   endMatchNumber: number; // match_number do último jogo da fase (marcador ⚽/🏆)
 }
 
-export default function ProgressDots({ matches, matchSnapshot, currentSnapshot, onSelect }: ProgressDotsProps) {
+export default function ProgressDots({ matches, matchSnapshot, currentSnapshot, onSelect, predictionResults, minPredictionGame = 25 }: ProgressDotsProps) {
+  const predMode = !!predictionResults;
   const groups = useMemo<Group[]>(() => {
     const byKey = new Map<string, Group>();
     for (const m of matches) {
@@ -87,7 +104,19 @@ export default function ProgressDots({ matches, matchSnapshot, currentSnapshot, 
   }, [matches]);
 
   return (
-    <div style={{ overflowX: "auto", padding: "8px 6px 12px", display: "flex", alignItems: "stretch", width: "100%" }}>
+    <div>
+      {predMode && (
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", padding: "2px 8px 8px", fontSize: 11, color: "#8b949e" }}>
+          <LegendItem color={PRED_COLORS.exact} label="placar cravado" />
+          <LegendItem color={PRED_COLORS.winner} label="acertou vencedor" />
+          <LegendItem color={PRED_COLORS.partial} label="acertou só o saldo" />
+          <LegendItem color={PRED_COLORS.miss} label="errou" />
+          <LegendItem color={PRED_COLORS.future} label="vai prever" hollow />
+          <LegendItem color="#8b949e" label="pouca base (não conta)" dashed />
+          <LegendItem color={PRED_COLORS.notpredicted} label="sem base" />
+        </div>
+      )}
+      <div style={{ overflowX: "auto", padding: "8px 6px 12px", display: "flex", alignItems: "stretch", width: "100%" }}>
       {groups.map((g, gi) => {
         // largura mínima = espaço real dos dots (16px cada) ou o rótulo, o que for
         // maior — garante que nada embola e que as fases curtas têm folga.
@@ -109,46 +138,76 @@ export default function ProgressDots({ matches, matchSnapshot, currentSnapshot, 
             {g.matches
               .sort((a, b) => a.match_number - b.match_number)
               .map((m) => {
-                const snap = matchSnapshot.get(m.match_id);
-                const hasData = snap !== undefined;
-                const isCurrent = hasData && snap === currentSnapshot;
-                const isDone = hasData && (snap as number) < currentSnapshot;
+                const finalizedSnap = matchSnapshot.get(m.match_id);
+                const snap = finalizedSnap ?? m.match_number;
+                const hasData = finalizedSnap !== undefined;
+                const canSelect = !!m.home_team && !!m.away_team;
+                const isCurrent = snap === currentSnapshot;
+                const isDone = hasData && finalizedSnap < currentSnapshot;
                 const isPhaseEnd = m.match_number === g.endMatchNumber;
                 const marker = isPhaseEnd ? (TERMINAL_STAGES.has(g.stage) ? "🏆" : "⚽") : null;
                 const size = isCurrent ? 15 : 11;
                 let bg = "transparent";
                 let border = `2px solid ${g.color}55`;
                 let shadow = "none";
-                if (isCurrent) {
+                let predLabel: string | null = null;
+                let predLowConf = false;
+                if (predMode) {
+                  // Semáforo de acerto: cada jogo finalizado pega a cor do resultado
+                  // da previsão. Jogos de baixa confiança (antes do jogo mínimo)
+                  // mostram a cor, mas com borda tracejada e mais apagada.
+                  const result = predictionResults!.get(m.match_id);
+                  let color: string = PRED_COLORS.future;
+                  if (result) {
+                    predLowConf = result.lowConf;
+                    if (result.cat === "exact") { color = PRED_COLORS.exact; predLabel = "cravou o placar exato"; }
+                    else if (result.cat === "winner") { color = PRED_COLORS.winner; predLabel = "acertou o vencedor"; }
+                    else if (result.cat === "partial") { color = PRED_COLORS.partial; predLabel = "errou o vencedor, mas acertou o saldo"; }
+                    else { color = PRED_COLORS.miss; predLabel = "errou"; }
+                    if (predLowConf) predLabel += " · pouca base (não conta na métrica)";
+                  } else if (hasData) {
+                    color = PRED_COLORS.notpredicted; predLabel = "não previsto (sem base)";
+                  } else {
+                    predLabel = "ainda vai prever";
+                  }
+                  bg = result ? color : `${color}33`;
+                  border = `2px ${predLowConf ? "dashed" : "solid"} ${color}`;
+                  if (isCurrent) { border = "2px solid white"; shadow = `0 0 9px 2px ${color}cc`; }
+                } else if (isCurrent) {
                   bg = "#2dd4ff"; border = "2px solid white"; shadow = "0 0 9px 2px #2dd4ffcc";
                 } else if (isDone) {
                   bg = g.color; border = "none";
                 } else if (hasData) {
                   bg = `${g.color}55`; border = `2px solid ${g.color}`;
+                } else if (canSelect) {
+                  bg = "transparent"; border = `2px solid ${g.color}88`;
                 }
                 // O marcador de fim de fase (⚽/🏆) vira o próprio "dot": brilho dourado.
-                if (marker && !isCurrent) {
+                // No modo Preditiva os marcadores não roubam a cor do semáforo.
+                if (marker && !isCurrent && !predMode) {
                   shadow = `0 0 0 1px ${hasData ? "#ffffff88" : "#6b728088"}, 0 0 8px 2px ${hasData ? "#f5c542aa" : "#6b728044"}`;
                 }
+                const showMarker = marker && !predMode;
+                const title = predLabel ? `${tooltip(m)} — ${predLabel}` : tooltip(m);
                 return (
                   <button
                     key={m.match_id}
-                    onClick={() => hasData && onSelect(snap as number)}
-                    title={tooltip(m)}
-                    aria-label={tooltip(m)}
-                    disabled={!hasData}
+                    onClick={() => canSelect && onSelect(snap)}
+                    title={title}
+                    aria-label={title}
+                    disabled={!canSelect}
                     style={{
                       position: "relative",
-                      width: marker ? 17 : size, height: marker ? 17 : size, borderRadius: "50%",
-                      background: marker ? "transparent" : bg, border: marker ? "none" : border, padding: 0,
-                      cursor: hasData ? "pointer" : "default", boxShadow: marker ? "none" : shadow,
+                      width: showMarker ? 17 : size, height: showMarker ? 17 : size, borderRadius: "50%",
+                      background: showMarker ? "transparent" : bg, border: showMarker ? "none" : border, padding: 0,
+                      cursor: canSelect ? "pointer" : "default", boxShadow: showMarker ? "none" : shadow,
                       transform: isCurrent ? "scale(1.3)" : "scale(1)", transition: "all 0.15s",
                       display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-                      opacity: hasData ? 1 : marker ? 0.5 : 0.35,
+                      opacity: !canSelect ? (showMarker ? 0.5 : 0.35) : predLowConf ? 0.5 : 1,
                     }}
                   >
-                    {marker && (
-                      <span style={{ fontSize: 16, lineHeight: 1, filter: hasData ? "drop-shadow(0 1px 2px rgba(0,0,0,0.85))" : "grayscale(1) opacity(0.7)" }}>
+                    {showMarker && (
+                      <span style={{ fontSize: 16, lineHeight: 1, filter: canSelect ? "drop-shadow(0 1px 2px rgba(0,0,0,0.85))" : "grayscale(1) opacity(0.7)" }}>
                         {marker}
                       </span>
                     )}
@@ -159,6 +218,16 @@ export default function ProgressDots({ matches, matchSnapshot, currentSnapshot, 
         </div>
         );
       })}
+      </div>
     </div>
+  );
+}
+
+function LegendItem({ color, label, hollow, dashed }: { color: string; label: string; hollow?: boolean; dashed?: boolean }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+      <span style={{ width: 10, height: 10, borderRadius: "50%", background: hollow || dashed ? `${color}33` : color, border: `2px ${dashed ? "dashed" : "solid"} ${color}`, flexShrink: 0, opacity: dashed ? 0.6 : 1 }} />
+      {label}
+    </span>
   );
 }

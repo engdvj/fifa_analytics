@@ -83,6 +83,24 @@ export function useExploratory(snapshot: number, enabled = true) {
   return { explore: data, isLoading };
 }
 
+// Próximos jogos com probabilidade e placar provável.
+export function usePredictive(params?: { snapshot?: number; enabled?: boolean }) {
+  const enabled = params?.enabled ?? true;
+  const { data, isLoading, error } = useSWR(
+    enabled ? ["predictive", params?.snapshot ?? "latest"] : null,
+    () => analytics.predictive({ snapshot: params?.snapshot })
+  );
+  return { predictive: data, isLoading, error };
+}
+
+export function usePredictiveBacktest(params?: { start?: number; end?: number; display_start?: number; enabled?: boolean }) {
+  const enabled = params?.enabled ?? true;
+  const { data, isLoading, error } = useSWR(
+    enabled ? ["predictive-backtest", params?.start ?? 25, params?.end ?? "latest", params?.display_start ?? "none"] : null,
+    () => analytics.predictiveBacktest({ start: params?.start, end: params?.end, display_start: params?.display_start })
+  );
+  return { backtest: data, isLoading, error };
+}
 // Métricas head-to-head de um jogo. `enabled=false` não dispara.
 export function useMatchComparison(matchId: string | null, enabled = true) {
   const { data, isLoading } = useSWR(

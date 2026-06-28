@@ -143,6 +143,55 @@ def trigger_recalc(
     return job
 
 
+def _run_learn_job(job_id: int) -> None:
+    """Re-treina a calibração/pesos da preditiva a partir dos resultados reais."""
+    db: Session = _session_factory()
+    try:
+        job = db.get(CollectionJob, job_id)
+        if job is None:
+            return
+        job.status = "running"
+        job.started_at = _now()
+        db.commit()
+        try:
+            import pandas as pd
+
+            from fifa_analytics.analytics.predictive import learn_and_save
+            from fifa_analytics.paths import GOLD_DIR
+
+            dim = pd.read_parquet(GOLD_DIR / "dim_match.parquet")
+            timeline = pd.read_parquet(GOLD_DIR / "analytics" / "snapshot_timeline.parquet")
+            report = learn_and_save(dim, timeline)
+            m = report.get("metrics", {})
+            _append_log(
+                job,
+                "auto-aprendizado ok: log_loss "
+                f"{m.get('before', {}).get('log_loss')} -> {m.get('after', {}).get('log_loss')} "
+                f"em {report.get('evaluated_games')} jogos",
+            )
+            job.status = "success"
+        except Exception as exc:  # noqa: BLE001 — aprendizado pode falhar sem dados
+            _append_log(job, f"auto-aprendizado falhou: {exc!r}")
+            job.status = "error"
+        job.finished_at = _now()
+        db.commit()
+    finally:
+        db.close()
+
+
+@router.post("/predictive/learn", response_model=JobOut, status_code=202)
+def trigger_predictive_learn(
+    background: BackgroundTasks,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Re-treina a preditiva (calibração + pesos) com os resultados reais. Pesado;
+    roda em background e pode levar minutos."""
+    job = _create_job(db, "preditiva-learn", admin)
+    background.add_task(_run_learn_job, job.id)
+    return job
+
+
 @router.get("/auto-collect")
 def auto_collect_status(admin: User = Depends(require_admin)) -> dict:
     """Estado da coleta automática dirigida pelo calendário (scheduler)."""

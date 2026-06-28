@@ -15,7 +15,7 @@ const STATUS_STYLE: Record<AdminJob["status"], { color: string; label: string }>
   success: { color: "#22c55e", label: "Concluído" },
   error: { color: "#ef4444", label: "Erro" },
 };
-const KIND_LABEL: Record<AdminJob["kind"], string> = { coleta: "Coleta", recalc: "Recálculo" };
+const KIND_LABEL: Record<AdminJob["kind"], string> = { coleta: "Coleta", recalc: "Recálculo", "preditiva-learn": "Re-treino preditiva" };
 
 function fmt(ts: string | null): string {
   if (!ts) return "—";
@@ -143,7 +143,7 @@ function AutoCollectCard() {
 }
 
 function CollectTab() {
-  const [busy, setBusy] = useState<"collect" | "recalc" | null>(null);
+  const [busy, setBusy] = useState<"collect" | "recalc" | "learn" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const PER = 8;
@@ -152,9 +152,12 @@ function CollectTab() {
   });
   const running = jobs?.some(j => j.status === "running" || j.status === "pending") ?? false;
 
-  async function trigger(which: "collect" | "recalc") {
+  async function trigger(which: "collect" | "recalc" | "learn") {
     setBusy(which); setError(null);
-    try { await (which === "collect" ? admin.collect() : admin.recalc()); await mutate(); }
+    try {
+      await (which === "collect" ? admin.collect() : which === "recalc" ? admin.recalc() : admin.learnPredictive());
+      await mutate();
+    }
     catch (err) { setError(err instanceof Error ? err.message : "Falha ao disparar o job."); }
     finally { setBusy(null); }
   }
@@ -169,6 +172,8 @@ function CollectTab() {
           desc="Busca os dados oficiais da FIFA (calendário, jogos, escalações, stats) e regera scores e relatórios." />
         <ActionCard icon="↻" title="Recalcular" disabled={!!busy || running} busy={busy === "recalc"} onClick={() => trigger("recalc")}
           desc="Reprocessa os scores das seleções/jogadores e os pontos dos bolões com os dados já coletados." />
+        <ActionCard icon="◎" title="Re-treinar preditiva" disabled={!!busy || running} busy={busy === "learn"} onClick={() => trigger("learn")}
+          desc="Recalibra os parâmetros e pesos do modelo de previsão com os resultados reais. Pode levar alguns minutos." />
       </div>
 
       <AutoCollectCard />

@@ -202,13 +202,160 @@ export interface DescriptiveDigest {
 // Padrões e relações entre jogos (camada Exploratória — EDA com sentido).
 export interface ExploratoryData {
   amostra: number;
-  decide?: { metric: string; label: string; corr: number }[];
-  eficiencia?: { team: string; xg: number; gols: number; overperf: number }[];
-  quadrante?: { cria_ref: number | null; mx?: number; my?: number; pontos: { team: string; cria: number; converte: number; perfil: string }[] };
-  estilo_resultado?: { arquetipo: string; n: number; pts_jogo: number; aproveitamento: number }[];
-  estilos_mapa?: { team: string; posse: number; verticalidade: number; arquetipo: string | null }[];
-  fases?: { fase: string; team: string }[];
-  defesa?: { team: string; xg_sofrido: number; clean_sheets: number; estilo: string | null }[];
+  confianca?: { nivel: "robusto" | "moderado" | "baixo" | "insuficiente"; label: string };
+  decide?: { metric: string; label: string; corr: number; n?: number }[];
+  eficiencia?: { team: string; xg: number; gols: number; overperf: number; jogos?: number }[];
+  quadrante?: { cria_ref: number | null; mx?: number; my?: number; pontos: { team: string; cria: number; converte: number; perfil: string; jogos?: number }[] };
+  estilo_resultado?: {
+    arquetipo: string; n: number; pts_jogo: number; aproveitamento: number;
+    jogos?: number; vitorias?: number; empates?: number; derrotas?: number;
+    gols_pj?: number | null; xg_pj?: number | null; xg_sofrido_pj?: number | null; saldo_pj?: number | null;
+    metricas_chave?: { label: string; valor: number; unit?: string; decimals?: number }[];
+    times?: string[];
+    times_detalhe?: {
+      team: string; arquetipo: string; jogos?: number; points?: number; pts_jogo: number; aproveitamento: number;
+      vitorias?: number; empates?: number; derrotas?: number;
+      gols_pj?: number | null; xg_pj?: number | null; xg_sofrido_pj?: number | null; saldo_pj?: number | null;
+      metricas_chave?: { label: string; valor: number; unit?: string; decimals?: number }[];
+    }[];
+  }[];
+  estilos_mapa?: { team: string; posse: number; verticalidade: number; arquetipo: string | null; jogos?: number }[];
+  confrontos_estilo?: {
+    estilo: string; contra: string; jogos: number; vitorias: number; empates: number; derrotas: number;
+    pts_jogo: number; aproveitamento: number;
+    saldo_pj?: number | null; xg_diff_pj?: number | null; score_diff_medio?: number | null;
+    times?: string[];
+  }[];
+  influencias_confronto?: {
+    fator: string; corr: number | null; n?: number; leitura: string; nota?: string;
+  }[];
+  fases?: { fase: string; team: string; top?: { team: string; valor: number; jogos?: number }[] }[];
+  defesa?: { team: string; xg_sofrido: number; clean_sheets: number; estilo: string | null; jogos?: number }[];
+}
+
+export interface PredictiveData {
+  snapshot: number | null;
+  as_of_snapshot?: number | null;
+  base?: {
+    xg_medio_time: number | null;
+    gols_medio_time: number | null;
+    modelo?: string;
+    treino_jogos?: number;
+    modelos?: string[];
+    modo?: string;
+    min_prediction_game?: number;
+    min_display_game?: number;
+    low_confidence?: boolean;
+    status?: string;
+  };
+  matches: {
+    match_id: string;
+    match_number: number | null;
+    official_match_number?: number | null;
+    home_team: string;
+    away_team: string;
+    stage: string | null;
+    group: string | null;
+    date_utc: string | null;
+    expected_goals: { home: number | null; away: number | null };
+    probabilities: {
+      home_win: number;
+      draw: number;
+      away_win: number;
+      score: { home: number; away: number };
+      scoreline?: {
+        recommended: { home: number; away: number; probability: number };
+        most_likely: { home: number; away: number; probability: number };
+        alternatives: { home: number; away: number; probability: number; result: "home" | "draw" | "away" }[];
+      };
+    };
+    favorite: string;
+    favorite_side?: "home" | "draw" | "away";
+    low_confidence?: boolean;
+    frozen_at?: string | null;
+    actual_result?: { home: number; away: number; outcome: "home" | "draw" | "away" } | null;
+    evaluation?: {
+      predicted_outcome: "home" | "draw" | "away";
+      actual_outcome: "home" | "draw" | "away";
+      winner_hit: boolean;
+      exact_score: boolean;
+      goal_error_home: number;
+      goal_error_away: number;
+      goal_error_total: number;
+      goal_mae: number | null;
+      actual_probability: number | null;
+    } | null;
+    models?: Record<string, {
+      available: boolean;
+      reason?: string;
+      probabilities?: {
+        home_win: number;
+        draw: number;
+        away_win: number;
+        score?: { home: number; away: number };
+        scoreline?: {
+          recommended: { home: number; away: number; probability: number };
+          most_likely: { home: number; away: number; probability: number };
+          alternatives: { home: number; away: number; probability: number; result: "home" | "draw" | "away" }[];
+        };
+      };
+      expected_goals?: { home: number | null; away: number | null };
+      sample_size?: number;
+    }>;
+    ensemble?: {
+      level: "forte" | "media" | "baixa";
+      divergence: "baixa" | "media" | "alta";
+      avg_probability_gap?: number | null;
+      models: string[];
+    };
+    consensus?: "forte" | "media" | "baixa";
+    divergence?: "baixa" | "media" | "alta";
+    confidence: { nivel: "alta" | "media" | "baixa"; label: string };
+    summary?: {
+      title: string;
+      detail: string;
+      draw_risk: "baixo" | "medio" | "alto";
+      total_xg: number | null;
+      xg_gap: number | null;
+      draw_calibration: number | null;
+    };
+    factors: { label: string; home: number | null; away: number | null; diff?: number | null; unit?: string; edge: "home" | "away" | "even" }[];
+  }[];
+}
+
+export interface PredictiveBacktest {
+  summary: {
+    n?: number;
+    accuracy?: number | null;
+    log_loss?: number | null;
+    brier?: number | null;
+    goal_mae?: number | null;
+    draw_rate?: { predicted: number | null; actual: number | null };
+    evolution?: {
+      early?: { n?: number; accuracy?: number | null; log_loss?: number | null; brier?: number | null; goal_mae?: number | null };
+      recent?: { n?: number; accuracy?: number | null; log_loss?: number | null; brier?: number | null; goal_mae?: number | null };
+      accuracy_delta?: number | null;
+      log_loss_delta?: number | null;
+    };
+    models?: Record<string, { n?: number; accuracy?: number | null; log_loss?: number | null; brier?: number | null; goal_mae?: number | null }>;
+  };
+  rows: {
+    snapshot: number;
+    as_of_snapshot: number | null;
+    match_id: string;
+    match_number: number;
+    home_team: string;
+    away_team: string;
+    predicted_outcome: "home" | "draw" | "away";
+    actual: { home: number; away: number; outcome: "home" | "draw" | "away" };
+    hit: boolean;
+    exact_score: boolean;
+    partial_hit: boolean;
+    low_confidence: boolean;
+    log_loss: number;
+    brier: number;
+    goal_mae: number;
+  }[];
 }
 
 // Métricas das duas seleções no jogo, lado a lado (head-to-head).
@@ -245,6 +392,20 @@ export const analytics = {
 
   exploratory: (snapshot?: number) =>
     req<ExploratoryData>(`/analytics/exploratory${snapshot != null ? `?snapshot=${snapshot}` : ""}`),
+
+  predictive: (params?: { snapshot?: number }) => {
+    const qs = new URLSearchParams(
+      Object.fromEntries(Object.entries(params ?? {}).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]))
+    ).toString();
+    return req<PredictiveData>(`/analytics/predictive${qs ? `?${qs}` : ""}`);
+  },
+
+  predictiveBacktest: (params?: { start?: number; end?: number; display_start?: number }) => {
+    const qs = new URLSearchParams(
+      Object.fromEntries(Object.entries(params ?? {}).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]))
+    ).toString();
+    return req<PredictiveBacktest>(`/analytics/predictive/backtest${qs ? `?${qs}` : ""}`);
+  },
 
   teamSnapshots: (snapshot?: number) =>
     req<TeamSnapshot[]>(`/analytics/snapshots/teams${snapshot != null ? `?snapshot=${snapshot}` : ""}`),
@@ -538,7 +699,7 @@ export const stats = {
 
 export interface AdminJob {
   id: number;
-  kind: "coleta" | "recalc";
+  kind: "coleta" | "recalc" | "preditiva-learn";
   status: "pending" | "running" | "success" | "error";
   started_at: string | null;
   finished_at: string | null;
@@ -565,6 +726,7 @@ export const admin = {
   job: (id: number) => req<AdminJob>(`/admin/jobs/${id}`),
   collect: () => req<AdminJob>("/admin/collect", { method: "POST", body: "{}" }),
   recalc: () => req<AdminJob>("/admin/recalc", { method: "POST", body: "{}" }),
+  learnPredictive: () => req<AdminJob>("/admin/predictive/learn", { method: "POST", body: "{}" }),
   autoCollect: () => req<AutoCollectStatus>("/admin/auto-collect"),
 };
 
