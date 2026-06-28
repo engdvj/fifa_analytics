@@ -2715,7 +2715,57 @@ function DashboardV2MotionStyles() {
       }
 
       .v2-group-table {
-        min-width: 540px;
+        min-width: 0;
+        table-layout: fixed;
+        font-size: 11.5px !important;
+      }
+
+      .v2-group-table th,
+      .v2-group-table td {
+        padding: 7px 5px !important;
+      }
+
+      .v2-group-table th {
+        font-size: 9.5px !important;
+      }
+
+      .v2-group-table th:nth-child(1),
+      .v2-group-table td:nth-child(1) {
+        width: 22px !important;
+      }
+
+      .v2-group-table th:nth-child(2),
+      .v2-group-table td:nth-child(2) {
+        width: auto !important;
+      }
+
+      .v2-group-table th:nth-child(n + 3):nth-child(-n + 6),
+      .v2-group-table td:nth-child(n + 3):nth-child(-n + 6) {
+        width: 20px !important;
+      }
+
+      .v2-group-table th:nth-child(n + 7):nth-child(-n + 9),
+      .v2-group-table td:nth-child(n + 7):nth-child(-n + 9) {
+        width: 24px !important;
+      }
+
+      .v2-group-table th:nth-child(10),
+      .v2-group-table td:nth-child(10) {
+        width: 28px !important;
+      }
+
+      .v2-group-table .v2-group-table-metric {
+        width: 56px !important;
+      }
+
+      .v2-group-table th:nth-child(12),
+      .v2-group-table td:nth-child(12) {
+        width: 44px !important;
+      }
+
+      .v2-group-table td:nth-child(2) span {
+        min-width: 0;
+        max-width: 100%;
       }
 
       .v2-bracket-scroll {
@@ -5340,7 +5390,7 @@ function DashboardV2MotionStyles() {
         }
 
         .v2-group-table {
-          min-width: 500px;
+          min-width: 0;
           font-size: 11.5px !important;
         }
 

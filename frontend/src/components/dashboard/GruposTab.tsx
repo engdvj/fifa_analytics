@@ -32,6 +32,14 @@ function fmtMetric(v: number | null, metric: string): string {
   return v.toFixed(metric.startsWith("score") || metric === "elo_rating" ? 1 : 2);
 }
 
+function compactMetricLabel(label: string): string {
+  return label
+    .replace(/^Score\s+/i, "")
+    .replace(/^Ranking\s+/i, "Rank ")
+    .replace(/^Aproveitamento$/i, "Aprov.")
+    .replace(/^Saldo de gols$/i, "Saldo");
+}
+
 type Form = "V" | "E" | "D";
 interface Row {
   team: string;
@@ -174,7 +182,7 @@ export default function GruposTab({
                   <Th w={28} align="right" title="Gols sofridos">GS</Th>
                   <Th w={28} align="right" title="Saldo de gols">SG</Th>
                   <Th w={30} align="right" title="Pontos">Pts</Th>
-                  <Th align="right" metric><span title={metricLabel}>{metricLabel}</span>{metricDef && <DefinitionBubble id={metricDef} size={11} />}</Th>
+                  <Th align="right" metric title={metricLabel}><span title={metricLabel}>{compactMetricLabel(metricLabel)}</span>{metricDef && <DefinitionBubble id={metricDef} size={11} />}</Th>
                   <Th w={62} align="center" title="Últimos resultados">Forma</Th>
                 </tr>
               </thead>
@@ -269,8 +277,8 @@ function Legend() {
 
 const thBase: React.CSSProperties = { padding: "7px 8px", borderBottom: "1px solid #21262d", fontWeight: 700, whiteSpace: "nowrap" };
 function Th({ children, align = "left", w, metric, title }: { children?: React.ReactNode; align?: "left" | "right" | "center"; w?: number; metric?: boolean; title?: string }) {
-  return <th title={title} style={{ ...thBase, textAlign: align, width: w, background: metric ? "#1f6feb12" : undefined, color: metric ? "#58a6ff" : undefined }}>{children}</th>;
+  return <th className={metric ? "v2-group-table-metric" : undefined} title={title} style={{ ...thBase, textAlign: align, width: w, background: metric ? "#1f6feb12" : undefined, color: metric ? "#58a6ff" : undefined }}>{children}</th>;
 }
 function Td({ children, align = "left", dim, metric, style }: { children?: React.ReactNode; align?: "left" | "right" | "center"; dim?: boolean; metric?: boolean; style?: React.CSSProperties }) {
-  return <td style={{ padding: "8px 8px", textAlign: align, whiteSpace: "nowrap", color: dim ? "#8b949e" : "#e6edf3", background: metric ? "#1f6feb0a" : undefined, ...style }}>{children}</td>;
+  return <td className={metric ? "v2-group-table-metric" : undefined} style={{ padding: "8px 8px", textAlign: align, whiteSpace: "nowrap", color: dim ? "#8b949e" : "#e6edf3", background: metric ? "#1f6feb0a" : undefined, ...style }}>{children}</td>;
 }
