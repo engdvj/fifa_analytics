@@ -548,14 +548,22 @@ def build_exploratory(
                 })
             estilo_resultado.sort(key=lambda e: e["pts_jogo"], reverse=True)
 
-        # mapa de estilos
-        if all(c in snap.columns for c in ("estilo_posse", "estilo_verticalidade", "estilo_jogo")):
+        # mapa de estilos — eixos conceituais (proatividade × diretude) que
+        # separam os 6 arquétipos em quadrantes. Mantém posse/verticalidade no
+        # payload por compatibilidade, mas o mapa usa os novos eixos.
+        if all(c in snap.columns for c in ("estilo_proatividade", "estilo_diretude", "estilo_jogo")):
             for r in snap.itertuples():
-                p, v = _num(r.estilo_posse), _num(r.estilo_verticalidade)
-                if not np.isnan(p) and not np.isnan(v):
-                    estilos_mapa.append({"team": r.team, "posse": round(p, 1),
-                                         "verticalidade": round(v, 1), "arquetipo": getattr(r, "estilo_jogo", None),
-                                         "jogos": int(_num(getattr(r, "jogos", 0)))})
+                pro, dirr = _num(getattr(r, "estilo_proatividade", np.nan)), _num(getattr(r, "estilo_diretude", np.nan))
+                if not np.isnan(pro) and not np.isnan(dirr):
+                    estilos_mapa.append({
+                        "team": r.team,
+                        "proatividade": round(pro, 1),
+                        "diretude": round(dirr, 1),
+                        "posse": round(_num(getattr(r, "estilo_posse", np.nan)), 1) if not np.isnan(_num(getattr(r, "estilo_posse", np.nan))) else None,
+                        "verticalidade": round(_num(getattr(r, "estilo_verticalidade", np.nan)), 1) if not np.isnan(_num(getattr(r, "estilo_verticalidade", np.nan))) else None,
+                        "arquetipo": getattr(r, "estilo_jogo", None),
+                        "jogos": int(_num(getattr(r, "jogos", 0))),
+                    })
 
         confrontos_estilo, influencias_confronto = _style_matchup_metrics(dim_match, wide, snap, snapshot)
 

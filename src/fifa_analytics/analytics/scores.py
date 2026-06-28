@@ -365,6 +365,26 @@ def _add_team_style(
     ])
     style["estilo_bola_parada"] = _zt("fase_bola_parada")
 
+    # Eixos do MAPA de estilos — desenhados para SEPARAR os 6 arquétipos em
+    # quadrantes nomeados (os eixos posse×verticalidade não conseguiam: pressão,
+    # retranca e bola parada caíam todos no centro).
+    #   X = Reativo (−) ↔ Proativo (+): quem toma a iniciativa do jogo.
+    #   Y = Direto (−)  ↔ Elaborado (+): como chega ao gol (vertical vs construído).
+    proativo = _mean_score([
+        _zt("fase_construcao_livre"), _zt("fase_construcao_pressionada"),
+        _zt("fase_progressao"), _zt("fase_pressao_alta"), _zt("fase_bloco_alto")])
+    reativo = _mean_score([
+        _zt("fase_bloco_baixo"), _zt("fase_pressao_baixa"),
+        _zt("fase_transicao_defensiva"), _zt("fase_contra_ataque")])
+    elaborado = _mean_score([
+        _zt("fase_construcao_livre"), _zt("fase_construcao_pressionada"),
+        _zt("fase_progressao"), _zt("fase_terceiro_final")])
+    direto = _mean_score([
+        _zt("fase_bola_longa"), _zt("fase_contra_ataque"), _zt("fase_bola_parada")])
+    # Centrado em 50 (0-100): >50 = proativo/elaborado, <50 = reativo/direto.
+    style["estilo_proatividade"] = (50 + (proativo - reativo) / 2).clip(0, 100)
+    style["estilo_diretude"] = (50 + (elaborado - direto) / 2).clip(0, 100)
+
     # Rótulo descritivo — 6 arquétipos bem definidos (fases exclusivas).
     arquetipos = pd.DataFrame({
         "Posse": _mean_score([
