@@ -6,26 +6,11 @@ import { deriveTeams, TeamSummary, getKit, selectionColor } from "@/lib/teamUtil
 import Flag from "@/components/ui/Flag";
 import TeamModal from "./TeamModal";
 import { METRIC_OPTIONS } from "@/lib/metrics";
-import { DefinitionBubble } from "@/components/DefinitionLink";
 
 const PAGE_SIZE = 24;
 
 // métrica do snapshot (chave de ordenação) → id de conceito. Só mapeia as que
 // têm definição; demais ficam sem bolinha.
-const METRIC_DEF_ID: Record<string, string> = {
-  score_geral: "score_geral", score_resultado: "score_resultado", score_ataque: "score_ataque",
-  score_defesa: "score_defesa", score_eficiencia: "score_eficiencia", score_controle: "score_controle",
-  score_forca_relativa: "score_forca_relativa", score_disciplina: "score_disciplina",
-  pontos: "pontos", aproveitamento: "aproveitamento", saldo_gols: "saldo_gols", elo_rating: "elo",
-  gols_pj: "", xg_pj: "xg", chutes_no_alvo_pj: "chutes_no_alvo", threat_pj: "threat",
-  posse: "posse", pitch_control: "pitch_control", final_third_control: "final_third_control",
-  precisao_passes: "precisao_passes",
-};
-function metricDefId(metric: string): string | null {
-  const id = METRIC_DEF_ID[metric];
-  return id && id.length > 0 ? id : null;
-}
-
 const METRIC_LABEL: Record<string, string> = {};
 for (const g of METRIC_OPTIONS) for (const [k, l] of g.items) METRIC_LABEL[k] = l;
 const PCT_FRAC = new Set(["posse", "aproveitamento"]);
@@ -226,7 +211,6 @@ function TeamCard({ card, selColor, onToggle, onDetails }: { card: Card; selColo
         <span style={{ fontSize: 26, fontWeight: 800, color: active ? "#58a6ff" : "#56606b", lineHeight: 1 }}>{active && value != null ? fmtMetric(value, metric) : DASH}</span>
         <span style={{ fontSize: 11, color: "#8b949e", textTransform: "uppercase", letterSpacing: "0.03em", display: "inline-flex", alignItems: "center", gap: 3 }} title={label}>
           {active && rank != null ? `#${rank} · ` : ""}{label}
-          {metricDefId(metric) && <DefinitionBubble id={metricDefId(metric)!} size={11} />}
         </span>
       </div>
 
@@ -247,7 +231,7 @@ function TeamCard({ card, selColor, onToggle, onDetails }: { card: Card; selColo
             </div>
             <div style={{ textAlign: "center", flex: 1 }}>
               <div style={{ fontSize: 16, fontWeight: 700, color: gd > 0 ? "#3fb950" : gd < 0 ? "#f85149" : "#8b949e" }}>{gd > 0 ? `+${gd}` : gd}</div>
-              <div style={{ fontSize: 10.5, color: "#8b949e" }}>Saldo<DefinitionBubble id="saldo_gols" size={11} /></div>
+              <div style={{ fontSize: 10.5, color: "#8b949e" }}>Saldo</div>
             </div>
           </div>
         ) : (
