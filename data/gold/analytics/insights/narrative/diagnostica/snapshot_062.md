@@ -1,0 +1,4 @@
+<!-- analise-manual -->
+O 5 a 0 de Senegal sobre o Iraque foi dos poucos placares largos que os dados endossam por inteiro. Foram 2,70 de xG contra apenas 0,21, com 14 finalizações dentro da área e 11 no alvo — volume e qualidade de chance num só pacote. Os cinco gols saíram de 2,70 de xG esperado, conversão acima da média, mas aqui o saldo veio sobretudo do peso do que foi criado, não de um lance fora da curva.
+
+O jogo virou de vez quando o Iraque ficou com um a menos: a expulsão condicionou tudo o que veio depois, e em desvantagem numérica a equipe não passou de 0,21 de xG, num ataque apagado e numa defesa que cedeu os 2,70 senegaleses. Senegal ainda foi mais intenso fisicamente — 461 sprints, 111,9 km — e não foi vazado, fechando uma atuação completa em que o domínio territorial (80% no terço final) traduziu a diferença que o placar mostrou.

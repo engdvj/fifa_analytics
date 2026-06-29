@@ -1,0 +1,4 @@
+<!-- analise-manual -->
+A França saiu de campo com um 4 a 1 que o jogo, no detalhe, não escreveu. Quem criou mais foi a Noruega: 1,45 de xG contra 1,05 dos franceses, além de ter levado mais perigo à frente. O placar elástico nasceu de outra coisa — pontaria. A França transformou 1,05 de xG em quatro gols, quase quatro vezes o esperado, o tipo de eficiência que decide um jogo sozinha.
+
+Onde a Noruega levou a melhor na criação, ficou também mais distante do ataque no acumulado: só 35% de controle no terço final, contra 62% de uma França que mandou no território (51% de posse) e fez render cada chegada. É o retrato de um jogo em que o time dominante no perigo perdeu por larga margem porque o outro foi cirúrgico — e os números deixam claro que a vitória francesa diz mais sobre conversão do que sobre superioridade.

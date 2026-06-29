@@ -1,0 +1,4 @@
+<!-- analise-manual -->
+Na estreia do mata-mata, o Canadá bateu a África do Sul por 1 a 0 num jogo que controlou pela qualidade, não pela bola. Criou bem mais perigo (1,33 de xG contra 0,16) e não foi vazado, cedendo apenas 0,16 de xG — a margem entre as duas criações praticamente desenhou o resultado de um confronto eliminatório apertado no placar.
+
+Curioso é o desenho do controle canadense: dominou o terço final (59%) tendo só 36% de posse, sinal de uma equipe que abriu mão da bola mas foi muito mais eficiente quando chegou à frente. A África do Sul até buscou o jogo, com seis finalizações, mas a baixíssima qualidade dessas chances (0,16 de xG) condenou o ataque. O Canadá ainda foi o mais intenso fisicamente — 607 sprints, 117 km —, somando entrega e eficiência para carimbar a classificação por um gol.
