@@ -1,0 +1,12 @@
+# Override de desenvolvimento local.
+# Sobe SÓ o Postgres e expõe a porta 5432 no host, para a API rodar fora do
+# Docker (uvicorn --reload) e alcançar o banco em localhost:5432.
+#
+# Uso:
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up -d db
+#
+# Não usar em produção — lá o Postgres fica interno na rede do compose.
+services:
+  db:
+    ports:
+      - "5432:5432"

@@ -5,7 +5,12 @@
 
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-VENV="$ROOT/.venv/Scripts/activate"
+# .venv/bin no Linux/macOS, .venv/Scripts no Windows (Git Bash)
+if [ -f "$ROOT/.venv/bin/activate" ]; then
+  VENV="$ROOT/.venv/bin/activate"
+else
+  VENV="$ROOT/.venv/Scripts/activate"
+fi
 
 export DATABASE_URL="sqlite:///./dev.db"
 export JWT_SECRET_KEY="copa2026-dev-secret-change-in-prod"
