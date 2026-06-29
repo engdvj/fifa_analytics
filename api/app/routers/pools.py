@@ -56,6 +56,7 @@ def _to_tree(pool: Pool) -> PoolTreeOut:
         parent_id=pool.parent_id,
         scope=pool.scope,
         is_group=pool.is_group,
+        edit_lock_minutes=pool.edit_lock_minutes,
         children=[_to_tree(c) for c in sorted(pool.children, key=lambda p: p.id)],
     )
 
@@ -119,6 +120,7 @@ def _to_tree_rich(pool: Pool, member_counts: dict, all_matches: list, rule_names
         parent_id=pool.parent_id,
         scope=pool.scope,
         is_group=pool.is_group,
+        edit_lock_minutes=pool.edit_lock_minutes,
         n_members=int(member_counts.get(pool.id, 0)),
         n_matches=sum(1 for m in all_matches if match_in_scope(m, pool.scope)),
         rule_name=rule_names.get(pool.rule_id),
@@ -223,6 +225,7 @@ def get_pool(
         parent_id=pool.parent_id,
         scope=pool.scope,
         is_group=pool.is_group,
+        edit_lock_minutes=pool.edit_lock_minutes,
         rule=RuleOut.model_validate(pool.rule) if pool.rule else None,
         members=members,
         children=[_to_tree(c) for c in sorted(pool.children, key=lambda p: p.id)],
@@ -518,6 +521,9 @@ def update_pool(
     if payload.scope is not None:
         pool.scope = payload.scope.model_dump()
         rescore = True
+    # Só aplica se o campo veio no payload (permite definir como NULL = definitivo).
+    if "edit_lock_minutes" in payload.model_fields_set:
+        pool.edit_lock_minutes = payload.edit_lock_minutes
 
     db.flush()
     if rescore:

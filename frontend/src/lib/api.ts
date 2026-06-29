@@ -513,6 +513,8 @@ export interface Pool {
   name: string;
   scope: PoolScope;
   is_group: boolean;
+  // Janela de reedição: null = definitivo; N = minutos antes do jogo.
+  edit_lock_minutes?: number | null;
   rule?: PoolRuleSummary | null;
   rule_id?: number | null;
   rule_name?: string | null;
@@ -649,7 +651,7 @@ export const bolao = {
   pool: (poolId: number) => req<Pool>(`/pools/${poolId}`),
   deletePool: (poolId: number) =>
     req<{ deleted: number }>(`/pools/${poolId}`, { method: "DELETE" }),
-  updatePool: (poolId: number, data: { name?: string; rule_id?: number; scope?: PoolScope }) =>
+  updatePool: (poolId: number, data: { name?: string; rule_id?: number; scope?: PoolScope; edit_lock_minutes?: number | null }) =>
     req<Pool>(`/pools/${poolId}`, { method: "PATCH", body: JSON.stringify(data) }),
   rules: () => req<ScoringRule[]>("/pools/rules"),
   join: (poolId: number) => req<Pool>(`/pools/${poolId}/join`, { method: "POST", body: "{}" }),

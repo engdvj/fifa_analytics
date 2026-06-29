@@ -99,6 +99,10 @@ class Pool(Base):
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("pools.id"))
     scope: Mapped[dict | None] = mapped_column(JSON)
     is_group: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # Janela de reedição do palpite pelo próprio participante:
+    #   NULL  → definitivo: salvou, só o admin altera depois.
+    #   N     → pode alterar até N minutos antes do início do jogo (date_utc).
+    edit_lock_minutes: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

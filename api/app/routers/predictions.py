@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -13,6 +15,24 @@ from api.app.scoring.recompute import match_in_scope
 from api.app.schemas import PredictionCreate, PredictionOut
 
 router = APIRouter(prefix="/pools/{pool_id}/predictions", tags=["predictions"])
+
+
+def _reedit_open(pool: Pool, match: Match) -> bool:
+    """Reedição do próprio palpite está aberta? True se o bolão tem janela
+    (`edit_lock_minutes`) e ainda falta esse tempo (ou mais) para o início do
+    jogo. Sem horário do jogo, mantém a janela aberta (não há como travar)."""
+    if pool.edit_lock_minutes is None:
+        return False
+    if not match.date_utc:
+        return True
+    try:
+        kickoff = datetime.fromisoformat(match.date_utc.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if kickoff.tzinfo is None:
+        kickoff = kickoff.replace(tzinfo=timezone.utc)
+    deadline = kickoff - timedelta(minutes=pool.edit_lock_minutes)
+    return datetime.now(timezone.utc) < deadline
 
 
 @router.get("", response_model=list[PredictionOut])
@@ -77,10 +97,12 @@ def upsert_prediction(
         )
         db.add(pred)
     else:
-        # Palpite já salvo é definitivo para o participante — só o admin pode
-        # alterar (ele edita por `/pools/{id}/registro`, não por aqui).
-        if not user.is_admin:
-            raise HTTPException(403, "palpite já salvo; só o admin pode alterar")
+        # Palpite já salvo: por padrão é definitivo e só o admin altera (ele
+        # edita por `/pools/{id}/registro`). Se o bolão tem janela de reedição
+        # (`edit_lock_minutes`), o próprio participante pode alterar até esse
+        # prazo antes do início do jogo.
+        if not user.is_admin and not _reedit_open(pool, match):
+            raise HTTPException(403, "palpite já salvo; prazo de alteração encerrado")
         pred.home_score = payload.home_score
         pred.away_score = payload.away_score
         pred.points = None  # invalida pontuação anterior

@@ -45,10 +45,23 @@ function findPool(pools: Pool[], id: number): Pool | null {
   }
   return null;
 }
-function scopeLabel(s: PoolScope): string {
+function scopeLabel(s: PoolScope | null | undefined): string {
+  if (!s) return "Todos os jogos";
   if (s.type === "all") return "Todos os jogos";
   if (s.type === "stage") return (s.stages ?? []).map(stageLabel).join(", ") || "Por fase";
   return `${(s.match_ids ?? []).length} jogos escolhidos`;
+}
+
+// Presets de prazo de reedição (minutos antes do início do jogo).
+const LOCK_PRESETS: { value: number; label: string }[] = [
+  { value: 15, label: "15 min" },
+  { value: 30, label: "30 min" },
+  { value: 60, label: "1 hora" },
+  { value: 120, label: "2 horas" },
+  { value: 1440, label: "1 dia" },
+];
+function lockLabel(min: number): string {
+  return LOCK_PRESETS.find(p => p.value === min)?.label ?? `${min} min`;
 }
 
 const TZ = "America/Sao_Paulo";
@@ -76,10 +89,13 @@ const OUTCOME_COLOR: Record<Outcome, string> = {
   exact: "#22c55e", partial: "#eab308", miss: "#ef4444", nopred: "#6b7280", pending: "#58a6ff",
 };
 
-function MatchCard({ m, onSave, saving, index }: { m: PoolMatch; onSave: (id: string, h: number, a: number) => Promise<void>; saving: boolean; index: number }) {
-  const [home, setHome] = useState(m.prediction ? String(m.prediction.home_score) : "");
-  const [away, setAway] = useState(m.prediction ? String(m.prediction.away_score) : "");
-  const [dirty, setDirty] = useState(false);
+// Estado dos placares vive no PredictionsTab (controlado), para o botão
+// "Salvar tudo" do topo conseguir enviar todos os cards de uma vez.
+function MatchCard({ m, home, away, dirty, onChange, index, editOpen }: {
+  m: PoolMatch; home: string; away: string; dirty: boolean;
+  onChange: (id: string, side: "home" | "away", v: string) => void;
+  index: number; editOpen: boolean;
+}) {
   const [hover, setHover] = useState(false);
   const finished = m.status === "finalizado";
   const live = m.status === "em_andamento";
@@ -92,16 +108,11 @@ function MatchCard({ m, onSave, saving, index }: { m: PoolMatch; onSave: (id: st
   const outcome: Outcome = !finished || !hasResult ? "pending"
     : !hasPred ? "nopred" : exact ? "exact" : (pts ?? 0) > 0 ? "partial" : "miss";
   const accent = OUTCOME_COLOR[outcome];
-  // Palpite salvo é definitivo: só o admin pode alterar depois.
+  // Palpite salvo é definitivo, exceto se a janela de reedição ainda está
+  // aberta (editOpen) ou o usuário é admin.
   const { user } = useAuth();
-  const locked = playable && hasPred && !user?.is_admin;
+  const locked = playable && hasPred && !user?.is_admin && !editOpen;
 
-  async function handleSave() {
-    const h = parseInt(home), a = parseInt(away);
-    if (isNaN(h) || isNaN(a) || h < 0 || a < 0) return;
-    await onSave(m.match_id, h, a);
-    setDirty(false);
-  }
   const inp: React.CSSProperties = { width: 40, textAlign: "center", background: "var(--surface2)", border: `1px solid ${dirty ? "var(--accent)" : "var(--border)"}`, borderRadius: 6, padding: "6px 4px", color: "var(--text)", fontSize: "1rem", fontWeight: 700, outline: "none", transition: "border-color .15s" };
   const flagStyle: React.CSSProperties = { fontSize: "1.3rem", transition: "transform .16s", transform: hover ? "scale(1.12)" : "none" };
 
@@ -128,9 +139,9 @@ function MatchCard({ m, onSave, saving, index }: { m: PoolMatch; onSave: (id: st
         <div style={{ flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", minWidth: 78 }}>
           {playable ? (
             <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-              <input type="number" min={0} max={99} value={home} disabled={locked} title={locked ? "Palpite já salvo — só o admin altera" : undefined} onChange={e => { setHome(e.target.value); setDirty(true); }} style={{ ...inp, opacity: locked ? 0.65 : 1, cursor: locked ? "not-allowed" : "text" }} />
+              <input type="number" min={0} max={99} value={home} disabled={locked} title={locked ? "Palpite já salvo — só o admin altera" : undefined} onChange={e => onChange(m.match_id, "home", e.target.value)} style={{ ...inp, opacity: locked ? 0.65 : 1, cursor: locked ? "not-allowed" : "text" }} />
               <span style={{ color: "var(--text-muted)", fontWeight: 700 }}>×</span>
-              <input type="number" min={0} max={99} value={away} disabled={locked} title={locked ? "Palpite já salvo — só o admin altera" : undefined} onChange={e => { setAway(e.target.value); setDirty(true); }} style={{ ...inp, opacity: locked ? 0.65 : 1, cursor: locked ? "not-allowed" : "text" }} />
+              <input type="number" min={0} max={99} value={away} disabled={locked} title={locked ? "Palpite já salvo — só o admin altera" : undefined} onChange={e => onChange(m.match_id, "away", e.target.value)} style={{ ...inp, opacity: locked ? 0.65 : 1, cursor: locked ? "not-allowed" : "text" }} />
             </div>
           ) : (
             <span style={{ fontSize: "1.15rem", fontWeight: 800, color: "var(--text)", whiteSpace: "nowrap" }}>{hasResult ? `${m.home_score} – ${m.away_score}` : "—"}</span>
@@ -143,9 +154,9 @@ function MatchCard({ m, onSave, saving, index }: { m: PoolMatch; onSave: (id: st
       </div>
       <div style={{ width: 118, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
         {playable ? (
-          <button disabled={saving || locked || (!dirty && hasPred)} onClick={handleSave} style={{ ...btn, padding: "6px 14px", fontSize: "0.78rem", background: !locked && (dirty || !hasPred) ? "var(--accent)" : "var(--surface2)", color: !locked && (dirty || !hasPred) ? "#0d1117" : "var(--text-muted)", cursor: saving || locked || (!dirty && hasPred) ? "default" : "pointer", opacity: saving ? 0.6 : 1, transition: "background .15s" }}>
-            {saving ? "…" : locked ? "Salvo 🔒" : hasPred && !dirty ? "Salvo ✓" : hasPred ? "Atualizar" : "Salvar"}
-          </button>
+          <span style={{ fontSize: "0.72rem", fontWeight: 700, whiteSpace: "nowrap", color: locked ? "var(--text-muted)" : dirty ? "var(--accent)" : hasPred ? "#22c55e" : "var(--text-muted)" }}>
+            {locked ? "Salvo 🔒" : dirty ? "Não salvo" : hasPred ? "Salvo ✓" : "Sem palpite"}
+          </span>
         ) : finished ? (
           hasPred ? (
             <>
@@ -299,22 +310,79 @@ function WinnerCelebration({ poolName, onDone }: { poolName: string; onDone: () 
 
 // ── Palpites ─────────────────────────────────────────────────────────────────
 function PredictionsTab({ pool, onPickChild }: { pool: Pool; onPickChild: (id: number) => void }) {
+  const { user } = useAuth();
   const [matches, setMatches] = useState<PoolMatch[]>([]);
-  const [savingId, setSavingId] = useState<string | null>(null);
+  // Placares digitados, por match_id (estado elevado dos cards).
+  const [scores, setScores] = useState<Record<string, { home: string; away: string }>>({});
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<"todos" | "a_jogar" | "jogados">("todos");
 
   const load = useCallback(async () => {
     if (pool.is_group) { setLoading(false); return; }
     setLoading(true);
-    try { setMatches(await bolao.poolMatches(pool.id)); } finally { setLoading(false); }
+    try {
+      const ms = await bolao.poolMatches(pool.id);
+      setMatches(ms);
+      // (re)seeda os campos com os palpites já salvos
+      const s: Record<string, { home: string; away: string }> = {};
+      for (const m of ms) {
+        s[m.match_id] = m.prediction
+          ? { home: String(m.prediction.home_score), away: String(m.prediction.away_score) }
+          : { home: "", away: "" };
+      }
+      setScores(s);
+    } finally { setLoading(false); }
   }, [pool.id, pool.is_group]);
   useEffect(() => { load(); }, [load]);
 
-  async function save(id: string, h: number, a: number) {
-    setSavingId(id);
-    try { await bolao.predict(pool.id, { match_id: id, home_score: h, away_score: a }); await load(); }
-    finally { setSavingId(null); }
+  const isAdmin = user?.is_admin ?? false;
+  const lockMin = pool.edit_lock_minutes ?? null;
+
+  // Reedição do próprio palpite ainda aberta para este jogo? Espelha o backend:
+  // só quando o bolão tem janela e falta >= lockMin para o início do jogo.
+  function editOpen(m: PoolMatch): boolean {
+    if (lockMin === null) return false;
+    if (!m.date_utc) return true;
+    const deadline = new Date(m.date_utc).getTime() - lockMin * 60_000;
+    return Date.now() < deadline;
+  }
+
+  function onChange(id: string, side: "home" | "away", v: string) {
+    const clean = v.replace(/[^0-9]/g, "").slice(0, 2);
+    setScores(prev => ({ ...prev, [id]: { ...(prev[id] ?? { home: "", away: "" }), [side]: clean } }));
+    setSaveMsg("");
+  }
+
+  // Um card está "sujo" (não salvo) se ambos os placares estão preenchidos,
+  // não está travado, e difere do palpite salvo.
+  function isDirty(m: PoolMatch): boolean {
+    if (m.status !== "agendado") return false;
+    const locked = m.prediction != null && !isAdmin && !editOpen(m);
+    if (locked) return false;
+    const c = scores[m.match_id];
+    if (!c || c.home === "" || c.away === "") return false;
+    if (!m.prediction) return true;
+    return Number(c.home) !== m.prediction.home_score || Number(c.away) !== m.prediction.away_score;
+  }
+
+  // Salva TODOS os palpites preenchidos e alterados (parcial: ignora vazios).
+  async function saveAll() {
+    const dirty = matches.filter(isDirty);
+    if (dirty.length === 0) { setSaveMsg("Nada para salvar."); return; }
+    setSaving(true); setSaveMsg("");
+    let ok = 0; let fail = 0;
+    for (const m of dirty) {
+      const c = scores[m.match_id];
+      try {
+        await bolao.predict(pool.id, { match_id: m.match_id, home_score: Number(c.home), away_score: Number(c.away) });
+        ok++;
+      } catch { fail++; }
+    }
+    await load();
+    setSaving(false);
+    setSaveMsg(fail === 0 ? `${ok} palpite(s) salvo(s).` : `${ok} salvo(s), ${fail} falhou(aram).`);
   }
 
   if (pool.is_group) {
@@ -341,6 +409,7 @@ function PredictionsTab({ pool, onPickChild }: { pool: Pool; onPickChild: (id: n
     && m.prediction.home_score === m.home_score && m.prediction.away_score === m.away_score).length;
   const aJogar = matches.filter(m => m.status !== "finalizado").length;
   const jogados = matches.length - aJogar;
+  const dirtyCount = matches.filter(isDirty).length;
 
   const visible = matches.filter(m =>
     filter === "todos" ? true : filter === "jogados" ? m.status === "finalizado" : m.status !== "finalizado");
@@ -369,7 +438,14 @@ function PredictionsTab({ pool, onPickChild }: { pool: Pool; onPickChild: (id: n
         <Stat label="Palpites" value={`${predicted}/${matches.length}`} />
         <Stat label="Pontos" value={totalPts} color="var(--accent)" big />
         <Stat label="Cravados" value={exactCount} color="#22c55e" />
-        <div style={{ color: "var(--text-muted)", fontSize: "0.8rem", marginLeft: "auto" }}>Código <strong style={{ color: "var(--text)" }}>#{pool.id}</strong> · compartilhe pra outros entrarem</div>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          <div style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}>Código <strong style={{ color: "var(--text)" }}>#{pool.id}</strong> · compartilhe pra outros entrarem</div>
+          {saveMsg && <span style={{ fontSize: "0.8rem", color: dirtyCount > 0 ? "var(--text-muted)" : "#22c55e" }}>{saveMsg}</span>}
+          <button onClick={saveAll} disabled={saving || dirtyCount === 0}
+            style={{ ...btn, padding: "9px 18px", whiteSpace: "nowrap", background: dirtyCount > 0 ? "var(--accent)" : "var(--surface2)", color: dirtyCount > 0 ? "#0d1117" : "var(--text-muted)", cursor: saving || dirtyCount === 0 ? "default" : "pointer", opacity: saving ? 0.6 : 1 }}>
+            {saving ? "Salvando…" : dirtyCount > 0 ? `Salvar tudo (${dirtyCount})` : "Salvar tudo"}
+          </button>
+        </div>
       </div>
 
       <div style={{ display: "flex", gap: 6, marginBottom: 18, flexWrap: "wrap" }}>
@@ -390,7 +466,10 @@ function PredictionsTab({ pool, onPickChild }: { pool: Pool; onPickChild: (id: n
               <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-              {list.map((m, i) => <MatchCard key={m.match_id} m={m} onSave={save} saving={savingId === m.match_id} index={i} />)}
+              {list.map((m, i) => {
+                const c = scores[m.match_id] ?? { home: "", away: "" };
+                return <MatchCard key={m.match_id} m={m} home={c.home} away={c.away} dirty={isDirty(m)} onChange={onChange} index={i} editOpen={editOpen(m)} />;
+              })}
             </div>
           </div>
         );
@@ -601,6 +680,8 @@ function EditPoolModal({ pool, rules: initialRules, onClose, onSaved }: {
     pool.scope?.type === "stage" ? "stage" : pool.scope?.type === "matches" ? "keep" : "all"
   );
   const [stages, setStages] = useState<string[]>(pool.scope?.stages ?? []);
+  // null = definitivo; N = minutos antes do jogo em que o palpite trava.
+  const [editLock, setEditLock] = useState<number | null>(pool.edit_lock_minutes ?? null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -608,7 +689,7 @@ function EditPoolModal({ pool, rules: initialRules, onClose, onSaved }: {
     if (!name.trim()) { setError("O nome não pode ficar vazio."); return; }
     if (scopeChoice === "stage" && stages.length === 0) { setError("Escolha ao menos uma fase."); return; }
     setBusy(true); setError("");
-    const body: { name?: string; rule_id?: number; scope?: PoolScope } = { name: name.trim(), rule_id: ruleId };
+    const body: { name?: string; rule_id?: number; scope?: PoolScope; edit_lock_minutes?: number | null } = { name: name.trim(), rule_id: ruleId, edit_lock_minutes: editLock };
     if (scopeChoice === "all") body.scope = { type: "all" };
     else if (scopeChoice === "stage") body.scope = { type: "stage", stages };
     // scopeChoice === "keep" → não envia scope (preserva os jogos escolhidos)
@@ -639,6 +720,27 @@ function EditPoolModal({ pool, rules: initialRules, onClose, onSaved }: {
               </div>
             )}
             <p style={{ fontSize: "0.74rem", color: "var(--text-muted)", margin: "6px 0 0" }}>Mudar regra ou escopo recalcula os pontos dos palpites.</p>
+          </Field>
+        )}
+        {!pool.is_group && (
+          <Field label="Palpites salvos">
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <Chip on={editLock === null} onClick={() => setEditLock(null)}>Definitivo</Chip>
+              <Chip on={editLock !== null} onClick={() => setEditLock(prev => prev ?? 60)}>Pode alterar</Chip>
+            </div>
+            {editLock !== null && (
+              <div style={{ marginTop: 8 }}>
+                <label style={{ fontSize: "0.78rem", color: "var(--text-muted)", display: "block", marginBottom: 6 }}>Trava o palpite quanto tempo antes do jogo?</label>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {LOCK_PRESETS.map(p => <Chip key={p.value} on={editLock === p.value} onClick={() => setEditLock(p.value)}>{p.label}</Chip>)}
+                </div>
+              </div>
+            )}
+            <p style={{ fontSize: "0.74rem", color: "var(--text-muted)", margin: "8px 0 0" }}>
+              {editLock !== null
+                ? `O participante pode alterar o próprio palpite até ${lockLabel(editLock)} antes do início do jogo. Depois disso trava.`
+                : "Uma vez salvo, o palpite é definitivo — só o admin altera."}
+            </p>
           </Field>
         )}
         {error && <p style={{ color: "#ef4444", fontSize: "0.82rem", margin: 0 }}>{error}</p>}

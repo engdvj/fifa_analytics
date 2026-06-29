@@ -137,6 +137,10 @@ class PoolUpdate(BaseModel):
     name: str | None = None
     rule_id: int | None = None
     scope: PoolScope | None = None
+    # Janela de reedição: NULL = definitivo (só admin altera); N = minutos antes
+    # do início do jogo. Só é aplicado se o campo vier no payload (usamos
+    # model_fields_set para distinguir "não enviado" de "enviado como null").
+    edit_lock_minutes: int | None = None
 
 
 class TransferIn(BaseModel):
@@ -169,6 +173,7 @@ class PoolOut(BaseModel):
     parent_id: int | None = None
     scope: dict | None = None
     is_group: bool = False
+    edit_lock_minutes: int | None = None
 
 
 class PoolMemberOut(BaseModel):
