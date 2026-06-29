@@ -16,6 +16,18 @@ outputs/*
 !logs/.gitkeep
 !outputs/.gitkeep
 
+# Narrativas curadas (escritas à mão pela skill analisar-snapshot, não
+# regeneráveis pelo pipeline) — versionadas para irem ao deploy. Reabrimos só
+# os diretórios do caminho da narrativa e, dentro dele, apenas os .md; todo o
+# resto do gold (parquets e demais saídas do fifa-coletar) segue ignorado.
+!data/gold/analytics/
+data/gold/analytics/*
+!data/gold/analytics/insights/
+data/gold/analytics/insights/*
+!data/gold/analytics/insights/narrative/
+!data/gold/analytics/insights/narrative/**/
+!data/gold/analytics/insights/narrative/**/*.md
+
 .env
 .env.*
 !.env.example
