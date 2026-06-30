@@ -96,13 +96,19 @@ def list_matches_analytics(status: str | None = None) -> list[dict]:
 _KNOCKOUT_FIRST_MATCH = 73
 
 
-@lru_cache(maxsize=1)
-def _snapshot_order() -> list[str]:
-    """Ordem cronológica dos snapshots: snapshot N == match_id na posição N-1."""
+def _snapshot_to_match() -> dict[int, str]:
+    """Mapa snapshot_jogo → match_id, lido do snapshot_timeline (mesma fonte que
+    o dashboard usa). Preferido ao match_order.json, que pode estar defasado."""
+    tl = _parquet("analytics/snapshot_timeline.parquet")
+    if not tl.empty and "match_id_referencia" in tl.columns and "snapshot_jogo" in tl.columns:
+        pairs = tl[["snapshot_jogo", "match_id_referencia"]].dropna().drop_duplicates()
+        return {int(r.snapshot_jogo): str(r.match_id_referencia) for r in pairs.itertuples()}
+    # Fallback: match_order.json (snapshot N == posição N-1).
     path = GOLD_DIR / "analytics" / "snapshots" / "match_order.json"
-    if not path.exists():
-        return []
-    return json.loads(path.read_text(encoding="utf-8"))
+    if path.exists():
+        order = json.loads(path.read_text(encoding="utf-8"))
+        return {i + 1: mid for i, mid in enumerate(order)}
+    return {}
 
 
 def _teams_of(df) -> set[str]:
@@ -143,18 +149,27 @@ def _eliminated_as_of(seen_ids: set[str] | None) -> list[str]:
         no_ko = _teams_of(ko)
         eliminated |= _teams_of(grupos) - no_ko
 
-    # (2) Perdedores do mata-mata entre os jogos já vistos.
+    # (2) Perdedores do mata-mata entre os jogos já vistos. O perdedor sai pelo
+    # PLACAR (gols no tempo normal; empate → pênaltis). Só assim é robusto: o
+    # calendário da FIFA demora a promover o vencedor para a fase seguinte, então
+    # não dá para inferir o eliminado por "não aparece depois".
     seen_ko = seen[seen["match_number"] >= _KNOCKOUT_FIRST_MATCH]
-    for _, played in seen_ko[seen_ko["status"] == "finalizado"].iterrows():
-        for t in (played["home_team"], played["away_team"]):
-            if not (isinstance(t, str) and t.strip()):
-                continue
-            later = ko[
-                (ko["match_number"] > played["match_number"])
-                & ((ko["home_team"] == t) | (ko["away_team"] == t))
-            ]
-            if later.empty:
-                eliminated.add(t)
+    for _, m in seen_ko[seen_ko["status"] == "finalizado"].iterrows():
+        home, away = m["home_team"], m["away_team"]
+        if not (isinstance(home, str) and home.strip() and isinstance(away, str) and away.strip()):
+            continue
+        hs, as_ = m["home_score"], m["away_score"]
+        if pd.isna(hs) or pd.isna(as_):
+            continue
+        if hs != as_:
+            loser = away if hs > as_ else home
+        else:
+            # Empate no tempo normal → decide nos pênaltis.
+            hp, ap = m.get("home_penalty"), m.get("away_penalty")
+            if pd.isna(hp) or pd.isna(ap) or hp == ap:
+                continue  # sem como saber o perdedor ainda
+            loser = away if hp > ap else home
+        eliminated.add(loser)
 
     return sorted(traduzir_selecao(t) for t in eliminated)
 
@@ -165,9 +180,9 @@ def eliminations(snapshot: int | None = Query(None, description="estado até est
     perdedores do mata-mata). Usado pelo dashboard para marcar (cinza + ☠️)."""
     seen_ids: set[str] | None = None
     if snapshot is not None:
-        order = _snapshot_order()
-        n = max(0, min(snapshot, len(order)))
-        seen_ids = set(order[:n])
+        # match_ids vistos cronologicamente até o snapshot (inclusive).
+        s2m = _snapshot_to_match()
+        seen_ids = {mid for s, mid in s2m.items() if s <= snapshot}
     return {"snapshot": snapshot, "eliminated": _eliminated_as_of(seen_ids)}
 
 
