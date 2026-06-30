@@ -1,0 +1,4 @@
+<!-- analise-manual -->
+Alemanha e Paraguai protagonizaram um 1 a 1 de mata-mata que foi muito mais movimentado do que o placar sugere. Os dois lados criaram à beça e desperdiçaram na mesma medida: a Alemanha produziu impressionantes 4,03 de xG e fez um só gol, enquanto o Paraguai gerou 2,69 de xG e também converteu apenas uma vez. Foi um festival de chances claras que as redes não acompanharam.
+
+A leitura do jogo é a de duas defesas vulneráveis (a Alemanha cedeu 2,69 de xG; o Paraguai, 4,03) num duelo de ataque contra ataque, em que a finalização traiu os dois. O equilíbrio no placar contrasta com o desequilíbrio no perigo — a Alemanha criou bem mais —, mas no fim a ineficiência igualou tudo. Jogo ainda no limite da disciplina, com quatro amarelos para cada lado, anunciando que a definição ficaria para os detalhes.
