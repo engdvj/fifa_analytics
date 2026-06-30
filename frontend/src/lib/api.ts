@@ -410,6 +410,12 @@ export const analytics = {
   teamSnapshots: (snapshot?: number) =>
     req<TeamSnapshot[]>(`/analytics/snapshots/teams${snapshot != null ? `?snapshot=${snapshot}` : ""}`),
 
+  // Seleções eliminadas no mata-mata até o snapshot (16-avos em diante).
+  eliminations: (snapshot?: number) =>
+    req<{ snapshot: number | null; eliminated: string[] }>(
+      `/analytics/eliminations${snapshot != null ? `?snapshot=${snapshot}` : ""}`
+    ),
+
   playerSnapshots: (params?: { snapshot?: number; team?: string }) => {
     const qs = new URLSearchParams(
       Object.fromEntries(Object.entries(params ?? {}).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]))

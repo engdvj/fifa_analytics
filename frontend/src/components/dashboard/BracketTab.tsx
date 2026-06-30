@@ -3,6 +3,8 @@
 import React from "react";
 import { Match } from "@/lib/api";
 import Flag from "@/components/ui/Flag";
+import { useEliminations } from "@/lib/hooks";
+import { eliminatedStyle, ELIMINATED_BADGE } from "@/lib/teamUtils";
 
 // Fixed 2026 knockout topology. Real teams, dates and scores come from dim_match
 // as the tournament advances; unresolved slots keep their possible feeder labels.
@@ -95,6 +97,8 @@ interface Props {
 }
 
 export default function BracketTab({ matches, selectedTeams, onToggleTeam, search = "" }: Props) {
+  // Estado atual da eliminação (a chave mostra o torneio inteiro, sem snapshot).
+  const { isEliminated } = useEliminations();
   const rootRef = React.useRef<HTMLDivElement>(null);
   const layout = useBracketLayout(rootRef);
   const byNum = React.useMemo(() => {
@@ -163,6 +167,7 @@ export default function BracketTab({ matches, selectedTeams, onToggleTeam, searc
       onToggleTeam={onToggleTeam}
       date={fmtDateTime(byNum.get(bm.n)?.date_utc ?? null)}
       final={opts?.final}
+      isEliminated={isEliminated}
     />
   );
 
@@ -267,7 +272,7 @@ function ColHead({ children }: { children: React.ReactNode }) {
 }
 
 function MatchCard({
-  bm, resolve, q, selectedTeams, onToggleTeam, date, final = false,
+  bm, resolve, q, selectedTeams, onToggleTeam, date, final = false, isEliminated,
 }: {
   bm: BMatch;
   resolve: (bm: BMatch, side: "a" | "b") => Resolved;
@@ -276,6 +281,7 @@ function MatchCard({
   onToggleTeam: (team: string) => void;
   date: string;
   final?: boolean;
+  isEliminated: (team?: string | null) => boolean;
 }) {
   const a = resolve(bm, "a");
   const b = resolve(bm, "b");
@@ -285,19 +291,21 @@ function MatchCard({
         <span>J{bm.n}</span>
         <span>{date}</span>
       </div>
-      <Slot {...a} selected={!!a.team && selectedTeams.includes(a.team)} hl={!!q && !!a.team && a.team.toLowerCase().includes(q)} onClick={() => a.team && onToggleTeam(a.team)} />
+      <Slot {...a} eliminated={isEliminated(a.team)} selected={!!a.team && selectedTeams.includes(a.team)} hl={!!q && !!a.team && a.team.toLowerCase().includes(q)} onClick={() => a.team && onToggleTeam(a.team)} />
       <div style={{ height: 1, background: "#161b22" }} />
-      <Slot {...b} selected={!!b.team && selectedTeams.includes(b.team)} hl={!!q && !!b.team && b.team.toLowerCase().includes(q)} onClick={() => b.team && onToggleTeam(b.team)} />
+      <Slot {...b} eliminated={isEliminated(b.team)} selected={!!b.team && selectedTeams.includes(b.team)} hl={!!q && !!b.team && b.team.toLowerCase().includes(q)} onClick={() => b.team && onToggleTeam(b.team)} />
     </div>
   );
 }
 
 function Slot({
-  team, text, score, winner, selected, hl, onClick,
-}: Resolved & { selected: boolean; hl: boolean; onClick: () => void }) {
+  team, text, score, winner, selected, hl, eliminated, onClick,
+}: Resolved & { selected: boolean; hl: boolean; eliminated?: boolean; onClick: () => void }) {
+  const out = !!eliminated && !winner;
   return (
     <div
       onClick={team ? onClick : undefined}
+      title={out ? "Eliminada" : undefined}
       style={{
         display: "flex",
         alignItems: "center",
@@ -305,9 +313,11 @@ function Slot({
         padding: "7px 9px",
         cursor: team ? "pointer" : "default",
         background: selected ? "rgba(88,166,255,0.14)" : hl ? "rgba(210,153,34,0.12)" : "transparent",
+        ...eliminatedStyle(out),
       }}
     >
-      {team ? <Flag team={team} height={12} /> : <span style={{ width: 16, height: 11, borderRadius: 2, background: "#161b22", flexShrink: 0 }} />}
+      {out ? <span style={{ fontSize: 12, width: 16, textAlign: "center", flexShrink: 0 }}>{ELIMINATED_BADGE}</span>
+        : team ? <Flag team={team} height={12} /> : <span style={{ width: 16, height: 11, borderRadius: 2, background: "#161b22", flexShrink: 0 }} />}
       <span style={{
         flex: 1,
         minWidth: 0,

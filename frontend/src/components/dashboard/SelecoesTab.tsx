@@ -2,10 +2,11 @@
 
 import React from "react";
 import { Match, TeamSnapshot } from "@/lib/api";
-import { deriveTeams, TeamSummary, getKit, selectionColor } from "@/lib/teamUtils";
+import { deriveTeams, TeamSummary, getKit, selectionColor, eliminatedStyle, ELIMINATED_BADGE } from "@/lib/teamUtils";
 import Flag from "@/components/ui/Flag";
 import TeamModal from "./TeamModal";
 import { METRIC_OPTIONS } from "@/lib/metrics";
+import { useEliminations } from "@/lib/hooks";
 
 const PAGE_SIZE = 24;
 
@@ -59,6 +60,7 @@ export default function SelecoesTab({ matches, snapshots, activeSnapshot, matchS
   const [page, setPage] = React.useState(0);
   const [detail, setDetail] = React.useState<TeamSummary | null>(null);
   const metricLabel = METRIC_LABEL[metric] ?? "Score Geral";
+  const { isEliminated } = useEliminations(activeSnapshot);
 
   const rowByTeam = React.useMemo(() => {
     const m = new Map<string, TeamSnapshot>();
@@ -130,6 +132,7 @@ export default function SelecoesTab({ matches, snapshots, activeSnapshot, matchS
               key={c.team.name}
               card={c}
               selColor={selectionColor(c.team.name, selectedTeams)}
+              eliminated={isEliminated(c.team.name)}
               onToggle={() => onToggleTeam(c.team.name)}
               onDetails={() => setDetail(c.team)}
             />
@@ -166,20 +169,21 @@ function PageBtn({ children, disabled, onClick }: { children: React.ReactNode; d
   );
 }
 
-function TeamCard({ card, selColor, onToggle, onDetails }: { card: Card; selColor: string | null; onToggle: () => void; onDetails: () => void }) {
+function TeamCard({ card, selColor, eliminated, onToggle, onDetails }: { card: Card; selColor: string | null; eliminated?: boolean; onToggle: () => void; onDetails: () => void }) {
   const { team, value, label, metric, rank, active } = card;
   const [hover, setHover] = React.useState(false);
   const kit = getKit(team.name);
   const gd = team.gf - team.ga;
   const selected = selColor != null;
   const DASH = "—";
+  const out = !!eliminated;
 
   return (
     <div
       onClick={onToggle}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      title="Clique para selecionar (comparar na Ranking Race)"
+      title={out ? "Seleção eliminada" : "Clique para selecionar (comparar na Ranking Race)"}
       style={{
         position: "relative",
         background: "#0d1117",
@@ -188,14 +192,18 @@ function TeamCard({ card, selColor, onToggle, onDetails }: { card: Card; selColo
         transition: "border-color 0.15s, box-shadow 0.15s, opacity 0.15s",
         boxShadow: selected ? `0 0 0 1px ${selColor!}, 0 8px 26px ${selColor!}33` : hover ? `0 8px 26px ${kit.main}22` : "none",
         opacity: active ? 1 : 0.55,
+        // Eliminada: esmaece e tira a cor (cinza), sobrepondo o estado normal.
+        ...eliminatedStyle(out),
       }}
     >
       {/* topo: bandeira + nome + botão Detalhes em destaque */}
       <div style={{ background: active ? `linear-gradient(135deg, ${kit.main}33, ${kit.main}11)` : "#11151c", borderBottom: `1px solid ${active ? kit.main + "33" : "#21262d"}`, padding: "13px 15px", display: "flex", alignItems: "center", gap: 12 }}>
         <Flag team={team.name} height={30} style={{ filter: active ? "none" : "grayscale(0.5)" }} />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <p style={{ color: "#e6edf3", fontWeight: 700, fontSize: 15.5, margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{team.name}</p>
-          <p style={{ color: "#8b949e", fontSize: 11.5, margin: "3px 0 0" }}>{team.confederation}{team.group ? ` · ${team.group}` : ""}</p>
+          <p style={{ color: "#e6edf3", fontWeight: 700, fontSize: 15.5, margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {out && <span title="Eliminada" style={{ marginRight: 5 }}>{ELIMINATED_BADGE}</span>}{team.name}
+          </p>
+          <p style={{ color: "#8b949e", fontSize: 11.5, margin: "3px 0 0" }}>{out ? "Eliminada" : team.confederation}{!out && team.group ? ` · ${team.group}` : ""}</p>
         </div>
         <button
           onClick={(e) => { e.stopPropagation(); onDetails(); }}

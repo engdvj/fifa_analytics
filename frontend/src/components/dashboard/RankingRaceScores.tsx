@@ -3,7 +3,8 @@
 import React from "react";
 import { Match, TeamSnapshot } from "@/lib/api";
 import { rankBarColor } from "@/lib/playerUtils";
-import { selectionColor } from "@/lib/teamUtils";
+import { selectionColor, eliminatedStyle, ELIMINATED_BADGE } from "@/lib/teamUtils";
+import { useEliminations } from "@/lib/hooks";
 import Flag from "@/components/ui/Flag";
 import { DefinitionBubble } from "@/components/DefinitionLink";
 import { METRIC_OPTIONS } from "@/lib/metrics";
@@ -87,6 +88,8 @@ export default function RankingRaceScores({
   search = "",
 }: Props) {
   const [compareTeams, setCompareTeams] = React.useState<string[]>([]);
+  const { isEliminated } = useEliminations(currentSnapshot);
+  const [hideEliminated, setHideEliminated] = React.useState(false);
   const [syncArea, setSyncArea] = React.useState(false);
   const [sharedArea, setSharedArea] = React.useState(0);
   const [sharedMode, setSharedMode] = React.useState<"pj" | "total">("pj");
@@ -124,7 +127,18 @@ export default function RankingRaceScores({
     return rows.map((r) => ({ ...r, qualityRank: qrank.get(r.team) ?? 1 }));
   }, [snapshots, currentSnapshot, metric, passesFilters, sortDir, search]);
 
-  const maxValue = ranked.length ? Math.max(...ranked.map((r) => Math.abs(r.value)), 1) : 1;
+  const anyEliminated = ranked.some((r) => isEliminated(r.team));
+  // Toggle "só vivos": remove eliminados e RENUMERA o rank (1,2,3… só entre os
+  // vivos). Com todos visíveis, mantém o qualityRank original do snapshot.
+  const shown = React.useMemo(() => {
+    if (!hideEliminated) return ranked;
+    const lib = LOWER_IS_BETTER.has(metric);
+    const alive = ranked.filter((r) => !isEliminated(r.team));
+    const byQuality = [...alive].sort((a, b) => (lib ? a.value - b.value : b.value - a.value));
+    const qrank = new Map(byQuality.map((r, i) => [r.team, i + 1]));
+    return alive.map((r) => ({ ...r, qualityRank: qrank.get(r.team) ?? 1 }));
+  }, [ranked, hideEliminated, isEliminated, metric]);
+  const maxValue = shown.length ? Math.max(...shown.map((r) => Math.abs(r.value)), 1) : 1;
 
   return (
     <div className="v2-race-list">
@@ -134,6 +148,20 @@ export default function RankingRaceScores({
           {METRIC_LABEL[metric] ?? metric}
           {METRIC_DEF_ID[metric] && <DefinitionBubble id={METRIC_DEF_ID[metric]} size={14} />}
         </span>
+        {anyEliminated && (
+          <button
+            onClick={() => setHideEliminated((v) => !v)}
+            title={hideEliminated ? "Mostrar também os eliminados" : "Ocultar os eliminados (só vivos)"}
+            style={{
+              background: hideEliminated ? "#1f6feb" : "#161b22",
+              color: hideEliminated ? "#fff" : "#8b949e",
+              border: "1px solid #30363d", borderRadius: 6,
+              padding: "4px 9px", fontSize: 11, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
+            }}
+          >
+            {hideEliminated ? `Só vivos ✓ (${shown.length})` : `${ELIMINATED_BADGE} Ocultar eliminados`}
+          </button>
+        )}
         {selectedTeams.length > 0 && (
           <span style={{ color: "#8b949e", fontSize: 11 }}>
             {selectedTeams.length} selecionada(s)
@@ -141,21 +169,22 @@ export default function RankingRaceScores({
         )}
       </div>
 
-      {ranked.length === 0 ? (
+      {shown.length === 0 ? (
         <p className="v2-race-empty">
-          Sem dados para essa métrica no snapshot {currentSnapshot}.
+          {ranked.length > 0 && hideEliminated ? "Todas as seleções deste filtro já foram eliminadas." : `Sem dados para essa métrica no snapshot ${currentSnapshot}.`}
         </p>
       ) : (
         <div className="v2-race-rows">
-          {ranked.map((row) => {
+          {shown.map((row) => {
             // posição/medalha/cor = rank de QUALIDADE (melhor=1=verde), não a
             // posição na lista — assim invertendo a ordem o vermelho vai pro topo.
             const rank = row.qualityRank;
             const isSelected = selectedTeams.includes(row.team);
             const isPlaying = activeMatchTeams.has(row.team);
             const isDimmed = focusMode && !isSelected;
+            const out = isEliminated(row.team);
             const pct = maxValue > 0 ? (Math.abs(row.value) / maxValue) * 100 : 0;
-            const barColor = isSelected ? "#58a6ff" : rankBarColor(rank, ranked.length);
+            const barColor = isSelected ? "#58a6ff" : rankBarColor(rank, shown.length);
             const badge: React.CSSProperties = {
               display: "inline-flex", alignItems: "center", justifyContent: "center",
               width: 24, height: 24, borderRadius: "50%", fontSize: 11, fontWeight: 700, flexShrink: 0,
@@ -175,11 +204,12 @@ export default function RankingRaceScores({
                   boxShadow: isSelected ? "inset 0 0 0 1px rgba(88,166,255,0.35), 0 0 18px rgba(88,166,255,0.08)" : "none",
                   opacity: isDimmed ? 0.16 : 1,
                   transition: "opacity 0.18s ease, background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease",
+                  ...(out && !isDimmed ? eliminatedStyle(true) : {}),
                 }}
               >
                 <span style={badge}>{rank}</span>
-                <span className="v2-race-flag">
-                  <Flag team={row.team} height={14} />
+                <span className="v2-race-flag" title={out ? "Eliminada" : undefined}>
+                  {out ? <span style={{ fontSize: 14 }}>{ELIMINATED_BADGE}</span> : <Flag team={row.team} height={14} />}
                 </span>
                 <span className="v2-race-team" style={{ fontWeight: isSelected || isPlaying ? 700 : 400, color: isSelected ? "#58a6ff" : "#e6edf3" }}>
                   <span

@@ -3,9 +3,9 @@
 import React from "react";
 import useSWR from "swr";
 import { analytics, Match } from "@/lib/api";
-import { useAvailableMetrics } from "@/lib/hooks";
+import { useAvailableMetrics, useEliminations } from "@/lib/hooks";
 import Spinner from "@/components/ui/Spinner";
-import { flag } from "@/lib/teamUtils";
+import { flag, eliminatedStyle, ELIMINATED_BADGE } from "@/lib/teamUtils";
 import { rankBarColor } from "@/lib/playerUtils";
 
 // High-interest metrics shown first in the dropdown
@@ -84,9 +84,17 @@ export default function RankingRace({
     () => analytics.teamStatsByGame(metric)
   );
 
+  const { isEliminated } = useEliminations(currentGame);
+  const [hideEliminated, setHideEliminated] = React.useState(false);
+
   const nameMap = buildTeamNameMap(matches);
-  const snapshot = rawStats ? buildSnapshot(rawStats, currentGame) : [];
+  const fullSnapshot = rawStats ? buildSnapshot(rawStats, currentGame) : [];
+  // Toggle "só vivos": remove eliminados da corrida (mantém a ordem/rank).
+  const snapshot = hideEliminated
+    ? fullSnapshot.filter((row) => !isEliminated(nameMap.get(row.id_team) ?? row.id_team))
+    : fullSnapshot;
   const maxValue = snapshot[0]?.value ?? 1;
+  const anyEliminated = fullSnapshot.some((row) => isEliminated(nameMap.get(row.id_team) ?? row.id_team));
 
   const sortedMetrics = sortMetrics(metrics);
 
@@ -120,6 +128,22 @@ export default function RankingRace({
           </select>
         )}
 
+        {anyEliminated && (
+          <button
+            onClick={() => setHideEliminated((v) => !v)}
+            title={hideEliminated ? "Mostrar também os eliminados" : "Ocultar os eliminados (só vivos)"}
+            style={{
+              marginLeft: selectedTeams.length > 0 ? undefined : "auto",
+              background: hideEliminated ? "var(--accent)" : "var(--surface2)",
+              color: hideEliminated ? "#0d1117" : "var(--text-muted)",
+              border: "1px solid var(--border)", borderRadius: 6,
+              padding: "5px 11px", fontSize: "0.78rem", fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
+            }}
+          >
+            {hideEliminated ? "Só vivos ✓" : `${ELIMINATED_BADGE} Ocultar eliminados`}
+          </button>
+        )}
+
         {selectedTeams.length > 0 && (
           <span style={{ color: "var(--text-muted)", fontSize: "0.75rem", marginLeft: "auto" }}>
             {selectedTeams.length} seleção(ões) na trajetória — clique para remover
@@ -146,6 +170,7 @@ export default function RankingRace({
             const rank = idx + 1;
             const label = nameMap.get(row.id_team) ?? row.id_team;
             const isSelected = selectedTeams.includes(label);
+            const out = isEliminated(label);
             const pct = maxValue > 0 ? (row.value / maxValue) * 100 : 0;
             const barColor = isSelected ? "var(--accent)" : rankBarColor(rank, snapshot.length);
 
@@ -184,13 +209,14 @@ export default function RankingRace({
                   width: "100%",
                   textAlign: "left",
                   transition: "all 0.15s",
+                  ...eliminatedStyle(out),
                 }}
               >
                 {/* Rank badge */}
                 <span style={rankBadgeStyle}>{rank}</span>
 
-                {/* Flag */}
-                <span style={{ fontSize: 16, lineHeight: 1, flexShrink: 0 }}>{flag(label)}</span>
+                {/* Flag (☠️ se eliminada) */}
+                <span style={{ fontSize: 16, lineHeight: 1, flexShrink: 0 }}>{out ? ELIMINATED_BADGE : flag(label)}</span>
 
                 {/* Team name */}
                 <span style={{

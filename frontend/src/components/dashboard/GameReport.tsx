@@ -2,9 +2,9 @@
 
 import React from "react";
 import { Insight, Match, MatchComparison } from "@/lib/api";
-import { useMatchComparison } from "@/lib/hooks";
+import { useMatchComparison, useEliminations } from "@/lib/hooks";
 import Flag from "@/components/ui/Flag";
-import { getKit } from "@/lib/teamUtils";
+import { getKit, eliminatedStyle, ELIMINATED_BADGE } from "@/lib/teamUtils";
 
 /**
  * Diagnóstico de UM jogo finalizado: placar + veredito, a história do jogo
@@ -38,6 +38,7 @@ export default function GameReport({ match, matchId, items, narrative, tipoLabel
   match?: Match; matchId: string; items: Insight[]; narrative: string[]; tipoLabel: string; enabled: boolean;
 }) {
   const { comparison } = useMatchComparison(matchId, enabled);
+  const { isEliminated } = useEliminations();
 
   const home = match?.home_team ?? "—";
   const away = match?.away_team ?? "—";
@@ -51,7 +52,7 @@ export default function GameReport({ match, matchId, items, narrative, tipoLabel
     <div style={{ display: "flex", flexDirection: "column", gap: 18, maxWidth: 1000, margin: "0 auto", width: "100%" }}>
       <header style={{ background: "var(--surface)", border: "1px solid var(--surface2)", borderRadius: 14, padding: "18px 20px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14, justifyContent: "center" }}>
-          <TeamSide team={home} align="right" />
+          <TeamSide team={home} align="right" eliminated={isEliminated(home)} />
           <div style={{ textAlign: "center", minWidth: 96 }}>
             <div style={{ fontSize: 30, fontWeight: 800, color: "var(--text)", lineHeight: 1 }}>
               {match?.home_score ?? "-"} <span style={{ color: "var(--text-muted)" }}>–</span> {match?.away_score ?? "-"}
@@ -61,7 +62,7 @@ export default function GameReport({ match, matchId, items, narrative, tipoLabel
               {match?.stage && <Badge texto={match.stage} />}
             </div>
           </div>
-          <TeamSide team={away} align="left" />
+          <TeamSide team={away} align="left" eliminated={isEliminated(away)} />
         </div>
 
         {(contraXg || prestigio) && (
@@ -95,12 +96,20 @@ export default function GameReport({ match, matchId, items, narrative, tipoLabel
   );
 }
 
-function TeamSide({ team, align }: { team: string; align: "left" | "right" }) {
+function TeamSide({ team, align, eliminated }: { team: string; align: "left" | "right"; eliminated?: boolean }) {
+  const out = !!eliminated;
+  const name = (
+    <span style={{ fontWeight: 700, fontSize: 16, textAlign: align === "right" ? "right" : "left" }} title={out ? "Eliminada" : undefined}>
+      {out && align === "left" && <span style={{ marginRight: 5 }}>{ELIMINATED_BADGE}</span>}
+      {team}
+      {out && align === "right" && <span style={{ marginLeft: 5 }}>{ELIMINATED_BADGE}</span>}
+    </span>
+  );
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, justifyContent: align === "right" ? "flex-end" : "flex-start" }}>
-      {align === "right" && <span style={{ fontWeight: 700, fontSize: 16, textAlign: "right" }}>{team}</span>}
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, justifyContent: align === "right" ? "flex-end" : "flex-start", ...eliminatedStyle(out) }}>
+      {align === "right" && name}
       <Flag team={team} height={26} />
-      {align === "left" && <span style={{ fontWeight: 700, fontSize: 16 }}>{team}</span>}
+      {align === "left" && name}
     </div>
   );
 }

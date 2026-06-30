@@ -3,7 +3,8 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import useSWR from "swr";
 import { analytics, Match, LineupPlayer, TeamStat } from "@/lib/api";
-import { TeamSummary, getKit } from "@/lib/teamUtils";
+import { TeamSummary, getKit, ELIMINATED_BADGE } from "@/lib/teamUtils";
+import { useEliminations } from "@/lib/hooks";
 import Flag from "@/components/ui/Flag";
 import TeamRoster from "./TeamRoster";
 import PitchView from "./PitchView";
@@ -359,6 +360,8 @@ export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
 
   const kit = getKit(team.name);
+  const { isEliminated } = useEliminations(snapshot);
+  const out = isEliminated(team.name);
 
   useEffect(() => {
     const fn = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -437,10 +440,11 @@ export default function TeamModal({ team, onClose, snapshot }: TeamModalProps) {
           flexShrink: 0,
         }}>
           {/* Só a bandeira, maior (sem a caixa do kit) */}
-          <Flag team={team.name} height={46} style={{ flexShrink: 0, borderRadius: 4, boxShadow: "0 3px 12px rgba(0,0,0,0.5)" }} />
+          <Flag team={team.name} height={46} style={{ flexShrink: 0, borderRadius: 4, boxShadow: "0 3px 12px rgba(0,0,0,0.5)", filter: out ? "grayscale(1)" : undefined, opacity: out ? 0.7 : 1 }} />
           <div style={{ flex: 1, minWidth: 0 }}>
-            <h2 style={{ color: "var(--text)", fontSize: 20, fontWeight: 700, margin: 0 }}>
+            <h2 style={{ color: "var(--text)", fontSize: 20, fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               {team.name}
+              {out && <span style={{ fontSize: 12, fontWeight: 700, color: "#f85149", border: "1px solid #f8514955", background: "#f8514915", borderRadius: 6, padding: "2px 8px" }}>{ELIMINATED_BADGE} Eliminada</span>}
             </h2>
             <p style={{ color: "var(--text-muted)", fontSize: 12, margin: "3px 0 0" }}>
               {team.confederation}{team.group ? ` · Grupo ${team.group}` : ""}{team.code ? ` · ${team.code}` : ""}

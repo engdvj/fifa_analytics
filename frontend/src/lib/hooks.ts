@@ -40,6 +40,21 @@ export function useTeamSnapshots(snapshot?: number) {
   return { snapshots: data ?? [], isLoading, error };
 }
 
+// Seleções eliminadas no mata-mata até `snapshot` (vazio na fase de grupos).
+// Devolve um Set normalizado + um predicado `isEliminated(team)` para os
+// componentes aplicarem o tratamento visual (cinza + ☠️).
+const _norm = (s: string) => s.trim().toLowerCase();
+export function useEliminations(snapshot?: number) {
+  const { data } = useSWR(
+    ["eliminations", snapshot ?? "all"],
+    () => analytics.eliminations(snapshot)
+  );
+  const names = data?.eliminated ?? [];
+  const set = new Set(names.map(_norm));
+  const isEliminated = (team?: string | null) => !!team && set.has(_norm(team));
+  return { eliminated: names, isEliminated };
+}
+
 export function usePlayerSnapshots(params?: { snapshot?: number; team?: string }) {
   const { data, isLoading, error } = useSWR(
     ["player-snapshots", params?.snapshot ?? "last", params?.team ?? "all"],

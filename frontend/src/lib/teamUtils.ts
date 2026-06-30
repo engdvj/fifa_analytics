@@ -1,4 +1,15 @@
+import type { CSSProperties } from "react";
 import { Match } from "@/lib/api";
+
+// ── Eliminação (mata-mata) ───────────────────────────────────────────────────
+// Selo padrão para times eliminados (16-avos em diante).
+export const ELIMINATED_BADGE = "☠️";
+
+/** Estilo "esmaecido + cinza" aplicado a quem foi eliminado. Espalhe em qualquer
+ *  card/linha/grade: `style={{ ...base, ...eliminatedStyle(isOut) }}`. */
+export function eliminatedStyle(isEliminated: boolean): CSSProperties {
+  return isEliminated ? { filter: "grayscale(1)", opacity: 0.55 } : {};
+}
 
 export const CONFEDERATION: Record<string, string> = {
   "Alemanha": "UEFA", "Espanha": "UEFA", "França": "UEFA", "Inglaterra": "UEFA",

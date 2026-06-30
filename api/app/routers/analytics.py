@@ -91,6 +91,86 @@ def list_matches_analytics(status: str | None = None) -> list[dict]:
     return _records(df, cols)
 
 
+# Primeiro match_number do mata-mata (Round of 32 = 16-avos). Antes disso é
+# fase de grupos e não há "eliminado" no sentido de torneio.
+_KNOCKOUT_FIRST_MATCH = 73
+
+
+@lru_cache(maxsize=1)
+def _snapshot_order() -> list[str]:
+    """Ordem cronológica dos snapshots: snapshot N == match_id na posição N-1."""
+    path = GOLD_DIR / "analytics" / "snapshots" / "match_order.json"
+    if not path.exists():
+        return []
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _teams_of(df) -> set[str]:
+    s: set[str] = set()
+    for _, r in df.iterrows():
+        for t in (r["home_team"], r["away_team"]):
+            if isinstance(t, str) and t.strip():
+                s.add(t)
+    return s
+
+
+def _eliminated_as_of(seen_ids: set[str] | None) -> list[str]:
+    """Seleções eliminadas considerando só os jogos já vistos (`seen_ids`, em
+    ordem cronológica). `None` = considera todos. Duas fontes:
+
+    1. Fase de grupos: quando TODOS os 72 jogos de grupos já foram vistos, quem
+       disputou os grupos mas não aparece em nenhum jogo do mata-mata não se
+       classificou. (snapshot↔match_number não coincidem; por isso contamos por
+       jogos vistos, não por match_number.)
+    2. Mata-mata: quem jogou um KO já visto e não aparece em fase posterior
+       (o vencedor já é promovido na grade da FIFA) — robusto a pênaltis.
+
+    Nomes traduzidos (pt-BR)."""
+    d = _parquet("dim_match.parquet")
+    if d.empty:
+        return []
+    seen = d if seen_ids is None else d[d["match_id"].isin(seen_ids)]
+
+    eliminated: set[str] = set()
+
+    grupos = d[d["match_number"] < _KNOCKOUT_FIRST_MATCH]
+    ko = d[d["match_number"] >= _KNOCKOUT_FIRST_MATCH]
+
+    # (1) Não classificados — só quando TODOS os jogos de grupos já foram vistos
+    # e finalizados (cronologicamente, conforme `seen`).
+    seen_grupos = seen[seen["match_number"] < _KNOCKOUT_FIRST_MATCH]
+    if len(grupos) > 0 and (seen_grupos["status"] == "finalizado").sum() == len(grupos):
+        no_ko = _teams_of(ko)
+        eliminated |= _teams_of(grupos) - no_ko
+
+    # (2) Perdedores do mata-mata entre os jogos já vistos.
+    seen_ko = seen[seen["match_number"] >= _KNOCKOUT_FIRST_MATCH]
+    for _, played in seen_ko[seen_ko["status"] == "finalizado"].iterrows():
+        for t in (played["home_team"], played["away_team"]):
+            if not (isinstance(t, str) and t.strip()):
+                continue
+            later = ko[
+                (ko["match_number"] > played["match_number"])
+                & ((ko["home_team"] == t) | (ko["away_team"] == t))
+            ]
+            if later.empty:
+                eliminated.add(t)
+
+    return sorted(traduzir_selecao(t) for t in eliminated)
+
+
+@router.get("/eliminations")
+def eliminations(snapshot: int | None = Query(None, description="estado até este snapshot (default: tudo)")) -> dict:
+    """Seleções eliminadas até o snapshot dado (não classificados nos grupos +
+    perdedores do mata-mata). Usado pelo dashboard para marcar (cinza + ☠️)."""
+    seen_ids: set[str] | None = None
+    if snapshot is not None:
+        order = _snapshot_order()
+        n = max(0, min(snapshot, len(order)))
+        seen_ids = set(order[:n])
+    return {"snapshot": snapshot, "eliminated": _eliminated_as_of(seen_ids)}
+
+
 @router.get("/matches/{match_id}/stats")
 def match_team_stats(match_id: str) -> dict:
     """Métricas avançadas de time do jogo (fact_team_match_stats)."""
